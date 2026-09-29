@@ -1,0 +1,58 @@
+{
+  "name": "University",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "country": {
+      "type": "string",
+      "enum": [
+        "US",
+        "UK"
+      ]
+    },
+    "major": {
+      "type": "string"
+    },
+    "application_type": {
+      "type": "string"
+    },
+    "deadline": {
+      "type": "string",
+      "format": "date"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "researching",
+        "in_progress",
+        "submitted",
+        "decided"
+      ],
+      "default": "researching"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "color": {
+      "type": "string",
+      "default": "#1e293b"
+    }
+  },
+  "required": [
+    "name",
+    "country"
+  ],
+  "rls": {
+    "read": {
+      "created_by_id": "{{user.id}}"
+    },
+    "update": {
+      "created_by_id": "{{user.id}}"
+    },
+    "delete": {
+      "created_by_id": "{{user.id}}"
+    }
+  }
+}

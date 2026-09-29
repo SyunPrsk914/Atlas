@@ -1,0 +1,30 @@
+{
+  "name": "CollegeKnowledge",
+  "type": "object",
+  "properties": {
+    "university_name": {
+      "type": "string"
+    },
+    "knowledge": {
+      "type": "string"
+    },
+    "last_updated": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "university_name"
+  ],
+  "rls": {
+    "read": {
+      "created_by_id": "{{user.id}}"
+    },
+    "update": {
+      "created_by_id": "{{user.id}}"
+    },
+    "delete": {
+      "created_by_id": "{{user.id}}"
+    }
+  }
+}

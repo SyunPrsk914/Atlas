@@ -1,0 +1,140 @@
+{
+  "name": "Profile",
+  "type": "object",
+  "properties": {
+    "nationality": {
+      "type": "string"
+    },
+    "school_system": {
+      "type": "string",
+      "enum": [
+        "Japanese Public",
+        "Japanese Private",
+        "US",
+        "UK",
+        "IB World School",
+        "Other"
+      ],
+      "default": "Japanese Public"
+    },
+    "graduation_year": {
+      "type": "string"
+    },
+    "background_summary": {
+      "type": "string"
+    },
+    "ib_predicted_score": {
+      "type": "number"
+    },
+    "ib_subjects": {
+      "type": "string"
+    },
+    "gpa_value": {
+      "type": "string"
+    },
+    "gpa_scale": {
+      "type": "string"
+    },
+    "sat_math": {
+      "type": "number"
+    },
+    "sat_ebrw": {
+      "type": "number"
+    },
+    "additional_test_info": {
+      "type": "string"
+    },
+    "ielts_listening": {
+      "type": "number"
+    },
+    "ielts_reading": {
+      "type": "number"
+    },
+    "ielts_writing": {
+      "type": "number"
+    },
+    "ielts_speaking": {
+      "type": "number"
+    },
+    "activities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "activity_type": {
+            "type": "string"
+          },
+          "position": {
+            "type": "string"
+          },
+          "organization": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "grade_levels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timing": {
+            "type": "string"
+          },
+          "hours_per_week": {
+            "type": "number"
+          },
+          "weeks_per_year": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "honors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "grade_level": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "activities_awards": {
+      "type": "string"
+    },
+    "requires_financial_aid": {
+      "type": "boolean",
+      "default": true
+    },
+    "financial_aid_notes": {
+      "type": "string"
+    },
+    "education_notes": {
+      "type": "string"
+    },
+    "additional_context": {
+      "type": "string"
+    }
+  },
+  "required": [],
+  "rls": {
+    "read": {
+      "created_by_id": "{{user.id}}"
+    },
+    "update": {
+      "created_by_id": "{{user.id}}"
+    },
+    "delete": {
+      "created_by_id": "{{user.id}}"
+    }
+  }
+}

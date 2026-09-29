@@ -1,0 +1,54 @@
+{
+  "name": "RoadmapTask",
+  "type": "object",
+  "properties": {
+    "university_id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "testing",
+        "application_platform",
+        "academic_records",
+        "essays",
+        "recommendations",
+        "financial",
+        "interview",
+        "portfolio",
+        "submission",
+        "post_submission"
+      ],
+      "default": "application_platform"
+    },
+    "completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "order": {
+      "type": "number",
+      "default": 0
+    }
+  },
+  "required": [
+    "university_id",
+    "title"
+  ],
+  "rls": {
+    "read": {
+      "created_by_id": "{{user.id}}"
+    },
+    "update": {
+      "created_by_id": "{{user.id}}"
+    },
+    "delete": {
+      "created_by_id": "{{user.id}}"
+    }
+  }
+}

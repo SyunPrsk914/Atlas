@@ -1,0 +1,84 @@
+{
+  "name": "Essay",
+  "type": "object",
+  "properties": {
+    "university_id": {
+      "type": "string"
+    },
+    "university_name": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "word_limit": {
+      "type": "number"
+    },
+    "content": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "drafting",
+        "in_review",
+        "polishing",
+        "final"
+      ],
+      "default": "not_started"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "personal_statement",
+        "supplemental",
+        "why_this_school",
+        "activity",
+        "scholarship",
+        "other"
+      ],
+      "default": "supplemental"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "university_specific",
+        "common"
+      ],
+      "default": "university_specific"
+    },
+    "application_platform": {
+      "type": "string",
+      "enum": [
+        "common_app",
+        "uc",
+        "coalition",
+        "ucas",
+        "direct",
+        "other"
+      ],
+      "default": "common_app"
+    },
+    "review_notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "rls": {
+    "read": {
+      "created_by_id": "{{user.id}}"
+    },
+    "update": {
+      "created_by_id": "{{user.id}}"
+    },
+    "delete": {
+      "created_by_id": "{{user.id}}"
+    }
+  }
+}
