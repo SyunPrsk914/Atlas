@@ -6,9 +6,9 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine, Trash2, ChevronDown, ChevronUp, Bot } from 'lucide-react';
+import { Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
-import { essaysApplicableToUniversity, PLATFORM_LABELS } from '@/lib/essayScope';
+import { essaysApplicableToUniversity } from '@/lib/essayScope';
 
 const essayTypes = [
   { value: 'personal_statement', label: 'Personal Statement' },

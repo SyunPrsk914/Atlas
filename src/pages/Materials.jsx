@@ -6,7 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Plus, Trash2, FileText, Link as LinkIcon, Upload, File, Award, StickyNote, Loader2, Pencil, X } from 'lucide-react';
+import { Plus, Trash2, FileText, Link as LinkIcon, Upload, File, Award, StickyNote, Loader2, Pencil } from 'lucide-react';
 
 const materialTypes = [
   { value: 'document', label: 'Document', icon: File },

@@ -5,6 +5,7 @@ import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import PageNotFound from './lib/PageNotFound';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
 import UserNotRegisteredError from '@/components/UserNotRegisteredError';
+import DemoModeBanner from '@/components/DemoModeBanner';
 import ScrollToTop from './components/ScrollToTop';
 // Add page imports here
 import { Navigate } from 'react-router-dom';
@@ -48,25 +49,28 @@ const AuthenticatedApp = () => {
 
   // Render the main app
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
-      <Route path="/forgot-password" element={<ForgotPassword />} />
-      <Route path="/reset-password" element={<ResetPassword />} />
-      <Route element={<ProtectedRoute unauthenticatedElement={<Navigate to="/login" replace />} />}>
-        <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/profile" element={<Profile />} />
-          <Route path="/universities" element={<Universities />} />
-          <Route path="/universities/:id" element={<UniversityDetail />} />
-          <Route path="/universities/:id/review" element={<ApplicationReview />} />
-          <Route path="/essay-builder" element={<EssayBuilder />} />
-          <Route path="/materials" element={<Materials />} />
-          <Route path="/knowledge-base" element={<KnowledgeBase />} />
+    <>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route element={<ProtectedRoute unauthenticatedElement={<Navigate to="/login" replace />} />}>
+          <Route element={<Layout />}>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/profile" element={<Profile />} />
+            <Route path="/universities" element={<Universities />} />
+            <Route path="/universities/:id" element={<UniversityDetail />} />
+            <Route path="/universities/:id/review" element={<ApplicationReview />} />
+            <Route path="/essay-builder" element={<EssayBuilder />} />
+            <Route path="/materials" element={<Materials />} />
+            <Route path="/knowledge-base" element={<KnowledgeBase />} />
+          </Route>
         </Route>
-      </Route>
-      <Route path="*" element={<PageNotFound />} />
-    </Routes>
+        <Route path="*" element={<PageNotFound />} />
+      </Routes>
+      <DemoModeBanner />
+    </>
   );
 };
 

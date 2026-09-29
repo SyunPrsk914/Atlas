@@ -9,7 +9,17 @@ import AuthLayout from "@/components/AuthLayout";
 
 export default function ResetPassword() {
   const [searchParams] = useSearchParams();
-  const resetToken = searchParams.get("token");
+  // Supabase recovery links can land in several shapes depending on the email
+  // template / auth flow: ?token=<TokenHash> (template in DEPLOYMENT.md),
+  // ?token_hash=..., ?code=..., or #access_token=... (implicit session).
+  const resetToken =
+    searchParams.get("token") ||
+    searchParams.get("token_hash") ||
+    searchParams.get("code");
+  const hasHashSession =
+    typeof window !== "undefined" &&
+    (window.location.hash.includes("access_token") || window.location.hash.includes("type=recovery"));
+  const canReset = Boolean(resetToken) || hasHashSession;
 
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -25,7 +35,7 @@ export default function ResetPassword() {
     }
     setLoading(true);
     try {
-      await base44.auth.resetPassword({ resetToken, newPassword });
+      await base44.auth.resetPassword({ resetToken: resetToken || undefined, newPassword });
       window.location.href = "/login";
     } catch (err) {
       setError(err.message || "Failed to reset password");
@@ -34,7 +44,7 @@ export default function ResetPassword() {
     }
   };
 
-  if (!resetToken) {
+  if (!canReset) {
     return (
       <AuthLayout
         icon={AlertTriangle}

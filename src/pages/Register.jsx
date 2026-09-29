@@ -29,7 +29,13 @@ export default function Register() {
     }
     setLoading(true);
     try {
-      await base44.auth.register({ email, password });
+      const result = await base44.auth.register({ email, password });
+      if (result?.access_token) {
+        // Email confirmation disabled in Supabase -> signed in immediately.
+        base44.auth.setToken(result.access_token);
+        window.location.href = safeReturnTo();
+        return;
+      }
       setShowOtp(true);
     } catch (err) {
       setError(err.message || "Registration failed");

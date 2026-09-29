@@ -51,6 +51,14 @@ export default function Universities() {
 
   const handleAdd = async () => {
     if (!form.name || !form.country) return;
+    if (form.country === 'US' && usCount >= 25) {
+      alert('Limit reached: maximum of 25 US universities. Remove one before adding another.');
+      return;
+    }
+    if (form.country === 'UK' && ukCount >= 2) {
+      alert('Limit reached: maximum of 2 UK universities. Remove one before adding another.');
+      return;
+    }
     setAdding(true);
     try {
       const uni = await base44.entities.University.create(form);
