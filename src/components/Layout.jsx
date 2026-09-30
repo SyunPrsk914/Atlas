@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Outlet, NavLink, useLocation } from 'react-router-dom';
+import { Outlet, NavLink } from 'react-router-dom';
 import { LayoutDashboard, User, GraduationCap, PenLine, FolderOpen, Library, Compass, Menu, X } from 'lucide-react';
+import AiStatusPill from '@/components/AiStatusPill';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -13,7 +14,6 @@ const navItems = [
 
 export default function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false);
-  const location = useLocation();
 
   const closeMobile = () => setMobileOpen(false);
 
@@ -25,9 +25,12 @@ export default function Layout() {
           <Compass className="w-5 h-5 text-accent" strokeWidth={2.2} />
           <span className="font-display text-lg font-semibold tracking-tight">Atlas</span>
         </div>
-        <button onClick={() => setMobileOpen(true)} className="p-2 -mr-2 text-foreground/70 hover:text-foreground transition">
-          <Menu className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <AiStatusPill />
+          <button onClick={() => setMobileOpen(true)} className="p-2 -mr-2 text-foreground/70 hover:text-foreground transition">
+            <Menu className="w-5 h-5" />
+          </button>
+        </div>
       </header>
 
       {/* Mobile overlay */}
@@ -87,7 +90,8 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="px-6 py-5 border-t border-border">
+        <div className="px-6 py-5 border-t border-border space-y-3">
+          <AiStatusPill />
           <p className="text-[11px] text-foreground/35 leading-relaxed">
             Your private workspace. All data is yours alone.
           </p>

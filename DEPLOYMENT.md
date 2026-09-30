@@ -123,11 +123,17 @@ The AI features (essay drafting/review/polish, deep college research, holistic a
 
 | Provider | Where to get the key | Env var | Free tier |
 |---|---|---|---|
-| **Google Gemini** (recommended) | **https://aistudio.google.com** → **Get API key** → Create API key (or via console.cloud.google.com → APIs & Services → Credentials) | `GEMINI_API_KEY` | Generous free tier, includes `gemini-2.5-flash` |
+| **Google Gemini** (recommended) | **https://aistudio.google.com** → **Get API key** → Create API key (or via console.cloud.google.com → APIs & Services → Credentials) | `GEMINI_API_KEY` | Generous free tier on the Flash models |
 | OpenAI | **https://platform.openai.com/api-keys** | `OPENAI_API_KEY` | Pay per use |
 | Anthropic | **https://console.anthropic.com/settings/keys** | `ANTHROPIC_API_KEY` | Pay per use |
 
-You can set one or several; `LLM_PROVIDER` picks the default (`gemini`/`openai`/`anthropic`), and internet-research calls automatically use Gemini when `GEMINI_API_KEY` exists. Model defaults (overridable via `GEMINI_MODEL`, `OPENAI_MODEL`, `ANTHROPIC_MODEL`): `gemini-2.5-flash`, `gpt-4o`, `claude-sonnet-4-5`.
+You can set one or several; `LLM_PROVIDER` picks the default (`gemini`/`openai`/`anthropic`), and internet-research calls automatically use Gemini when `GEMINI_API_KEY` exists.
+
+Model defaults (overridable via `GEMINI_MODEL`, `OPENAI_MODEL`, `ANTHROPIC_MODEL`): `gemini-flash-latest`, `gpt-4o`, `claude-sonnet-4-6`.
+
+Gemini defaults to the `gemini-flash-latest` pointer on purpose. Google retires concrete model IDs regularly, and a pinned ID that has been retired would break every AI feature. If the app is ever pointed at a model that is no longer offered, the endpoint retries once with the provider default and logs a warning, so a retired model degrades to a slightly different model rather than an error. Set `GEMINI_MODEL` only if you need a specific pin.
+
+**Check your setup at any time:** `GET /api/status` returns the configuration (never the keys) as JSON — `configured`, `provider`, `model`, `grounding`, and which providers have a key. The same information appears as a pill in the app's sidebar and mobile header, so you can confirm the connection before waiting on a long generation.
 
 ---
 
@@ -220,6 +226,6 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 
 - **Vercel Hobby:** free — 100 GB bandwidth/mo, serverless functions included. More than enough for one user.
 - **Supabase Free:** 500 MB database, 1 GB file storage, 50,000 monthly active users, 500k edge function invocations (unused here). Your data will be megabytes at most.
-- **LLM:** the only metered part. `gemini-2.5-flash` on the free tier covers heavy personal use; otherwise cents per essay draft.
+- **LLM:** the only metered part. The Flash model on the free tier covers heavy personal use; otherwise cents per essay draft.
 - **Backups:** Supabase free tier keeps 7 days of daily backups (Dashboard → Database → Backups). For irreplaceable essay work, periodically use SQL Editor → `copy (select * from essays) to stdout with csv header` or the Table Editor CSV export.
 - **Privacy:** essay/profile data is protected by per-user RLS; the AI endpoint requires a logged-in Supabase session (JWT-verified server-side); your LLM provider key never reaches the browser.

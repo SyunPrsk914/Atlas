@@ -1,4 +1,5 @@
-import { Toaster } from "@/components/ui/toaster"
+import { Toaster as ShadcnToaster } from "@/components/ui/toaster"
+import { Toaster } from "@/components/ui/sonner"
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClientInstance } from '@/lib/query-client'
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
@@ -84,7 +85,8 @@ function App() {
           <ScrollToTop />
           <AuthenticatedApp />
         </Router>
-        <Toaster />
+        <ShadcnToaster />
+        <Toaster position="bottom-right" richColors closeButton />
       </QueryClientProvider>
     </AuthProvider>
   )

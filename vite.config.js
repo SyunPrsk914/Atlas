@@ -9,6 +9,7 @@ const r = (p) => fileURLToPath(new URL(p, import.meta.url))
 function vercelApiDevPlugin() {
   const routes = {
     '/api/invoke-llm': () => import('./api/invoke-llm.js').then((m) => m.handleInvokeLLM),
+    '/api/status': () => import('./api/status.js').then((m) => m.handleStatus),
     '/api/health': () => Promise.resolve(async (_req, res) => {
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');

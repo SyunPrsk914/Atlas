@@ -178,6 +178,46 @@ begin
 end;
 $$;
 
+-- ===========================================================================
+-- 7. Upgrades (idempotent, and safe to skip entirely)
+-- ===========================================================================
+-- ---------------------------------------------------------------------------
+-- The app runs correctly without the columns below: anything not present is
+-- simply skipped on save, and the UI shows a one-line reminder instead of
+-- failing. Re-running this whole file is always safe.
+--
+--   universities.application_platform -> which application system the school
+--                                          uses, so shared essays attach to
+--                                          the right schools (Common App / UC /
+--                                          UCAS / Coalition / direct).
+--   essays.limit_unit                 -> 'words' (default) or 'characters'.
+--                                          UCAS is character-counted; without
+--                                          the column Atlas still counts UCAS
+--                                          essays in characters.
+--   materials.analysis                -> the saved AI word-level analysis.
+--   profiles.*                        -> the extra applicant context that makes
+--                                          a review accurate for international
+--                                          applicants (citizenship status,
+--                                          curriculum, class rank, ACT, TOEFL,
+--                                          Duolingo, first-generation, funding).
+
+alter table public.universities add column if not exists application_platform text;
+
+alter table public.essays add column if not exists limit_unit text;
+
+alter table public.materials add column if not exists analysis jsonb;
+
+alter table public.profiles add column if not exists full_name text;
+alter table public.profiles add column if not exists citizenship_status text;
+alter table public.profiles add column if not exists curriculum text;
+alter table public.profiles add column if not exists first_generation text;
+alter table public.profiles add column if not exists rank text;
+alter table public.profiles add column if not exists act_score numeric;
+alter table public.profiles add column if not exists toefl_total numeric;
+alter table public.profiles add column if not exists duolingo_english numeric;
+alter table public.profiles add column if not exists test_policy text;
+alter table public.profiles add column if not exists funding_source text;
+
 -- ---------------------------------------------------------------------------
 -- Storage: public "uploads" bucket (replaces Base44 UploadPublicFile)
 -- Files are stored under {user-id}/{timestamp}-{filename}; users can only
