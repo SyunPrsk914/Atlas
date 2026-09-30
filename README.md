@@ -1,62 +1,52 @@
-# Base44 Project
+# Atlas — College Application Command Center
 
-Use this repository to run and edit the app locally, then publish changes back through Base44.
+A private, self-hosted platform for building US/UK university applications:
+deep knowledge base per college (requirements, ideal-student profile, essay
+roles, Common Data Set facts), Common-App-style profile (activities/honors),
+per-university roadmaps, an Essay Hub with scope awareness (e.g. the Common App
+personal statement is shared by all US schools except UC/MIT), full-application
+holistic review with strict acceptance estimates, and material import
+(documents, links, notes) that feeds every AI feature.
 
-Any change pushed to the repo will also be reflected in the Base44 Builder.
+## Stack
 
-## Prerequisites
+- **Frontend:** React 18 + Vite + Tailwind (shadcn/ui) — `src/`
+- **Backend:** Supabase (Postgres + Auth + Storage) — `supabase/schema.sql`
+- **AI:** your own LLM key (Gemini / OpenAI / Anthropic) via `api/invoke-llm.js`
+  — no platform credits or token limits
+- **Hosting:** Vercel (static frontend + `api/` serverless functions)
 
-1. Clone the repository using the project's Git URL.
-2. Navigate to the project directory.
-3. Install dependencies: `npm install`.
-4. Install the Base44 CLI: `npm install -g base44@latest`.
-5. Install [Deno](https://docs.deno.com/runtime/getting_started/installation/) — the local Base44 backend runs on it.
+The app originally ran on Base44. A compatibility layer (`src/api/base44Client.js`)
+keeps every page's `base44.*` calls working unchanged on top of Supabase.
 
-Run `base44 --help` (or see the [CLI reference](https://docs.base44.com/developers/references/cli/commands/introduction)) for the full command surface.
-
-## Run Locally
-
-Three commands, from the project root:
-
-```bash
-base44 login   # one-time per machine
-base44 link    # one-time per clone
-base44 dev     # local backend + frontend together
-```
-
-Open the frontend URL that `base44 dev` prints (typically `http://localhost:5173`).
-
-Notes:
-
-- **Every fresh clone needs `base44 link`.** It writes `base44/.app.jsonc` (the app-id pointer), which is deliberately gitignored. Your app id is in the Builder URL (`app.base44.com/apps/<id>/...`); `base44 link --help` shows the non-interactive flags.
-- **`base44 dev` runs the frontend for you** (via `site.serveCommand` in this repo's `base44/config.jsonc`) — never run `npm run dev` yourself: alone it serves a UI with no backend behind it (`[base44] Proxy not enabled`, every `/api` call fails), and alongside `base44 dev` the second Vite silently takes the next port and you end up looking at the wrong one.
-- **The app must be published at least once for the UI to load under `base44 dev`.** The frontend boots by fetching app settings from the hosted app; before the first publish that fails and every page redirects to login. The local API works regardless.
-- Entities, functions, and auth run locally — entity data is **in-memory only**, wiped when `base44 dev` restarts. Everything else (Core integrations, OAuth login) is forwarded to your deployed app. Full breakdown: [Local development overview](https://docs.base44.com/developers/backend/overview/local-dev/local-development-overview).
-
-## Frontend Only, Hosted Backend
-
-To work on just the frontend against your app's live hosted backend:
+## Quick start
 
 ```bash
-base44 dev --remote
+npm install
+npm run dev            # no configuration needed -> Demo mode (browser-only data)
 ```
 
-⚠️ In this mode writes go to your app's **production data** — plain `base44 dev` keeps everything local.
+For the real, persistent, multi-device version, follow **[DEPLOYMENT.md](./DEPLOYMENT.md)** —
+a step-by-step guide (Supabase project, database schema, Google login, email
+templates, LLM key, Vercel deploy) with the exact location of every key.
 
-## Publish Your Changes
+## Scripts
 
-After pushing your changes to git, open the Base44 dashboard and publish the app:
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Vite dev server (also serves `/api/invoke-llm` locally) |
+| `npm run build` | Production build to `dist/` |
+| `npm run preview` | Preview the production build |
+| `npm run lint` / `npm run typecheck` | Quality checks |
 
-```bash
-base44 dashboard open
-```
+## Layout
 
-This repo syncs to Base44 through git, so publish from the dashboard rather than `base44 deploy` — a CLI deploy ships your local tree directly, bypassing the sync, and the deployed state silently diverges from the repo.
-
-## Docs & Support
-
-GitHub integration: [https://docs.base44.com/developers/app-code/local-development/github](https://docs.base44.com/developers/app-code/local-development/github)
-
-Local development: [https://docs.base44.com/developers/backend/overview/local-dev/local-development-overview](https://docs.base44.com/developers/backend/overview/local-dev/local-development-overview)
-
-Support: [https://app.base44.com/support](https://app.base44.com/support)
+| Path | Contents |
+|---|---|
+| `src/pages/` | Dashboard, Profile, Universities, UniversityDetail, ApplicationReview, EssayBuilder, Materials, KnowledgeBase, auth pages |
+| `src/api/base44Client.js` | Entry point; picks Supabase or demo backend |
+| `src/api/supabaseBackend.js` | Supabase implementation of the entity/auth/storage API |
+| `src/api/localBackend.js` | Demo-mode implementation (localStorage) |
+| `api/invoke-llm.js` | Vercel function: the AI endpoint (schema-aware, web-grounded research) |
+| `supabase/schema.sql` | Database schema + RLS + storage bucket (run once in Supabase SQL Editor) |
+| `base44/` | Original Base44 entity schemas — reference only |
