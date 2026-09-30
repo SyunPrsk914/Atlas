@@ -1,45 +1,31 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
+import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import {
+  Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine,
+  Trash2, ChevronDown, ChevronUp, Library, CheckCircle2, CircleDashed,
+  Info, ArrowRight, AlertTriangle,
+} from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
-import { essaysApplicableToUniversity } from '@/lib/essayScope';
+import { runAI } from '@/lib/ai';
+import { buildProfileContext } from '@/lib/profileContext';
+import {
+  buildGeneratePrompt, GENERATE_SCHEMA, buildReviewPrompt, REVIEW_SCHEMA, buildPolishPrompt,
+} from '@/lib/essayPrompts';
+import {
+  essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
+  buildSharedEssayPlan, isSharedEssay, limitUnitFor, measureEssay, formatLimit,
+  ESSAY_TYPES, ESSAY_STATUSES, COMMON_APP_PROMPTS, UC_PIQS, UC_RULES, UCAS_RULES, UCAS_QUESTIONS,
+} from '@/lib/essayScope';
 
-const essayTypes = [
-  { value: 'personal_statement', label: 'Personal Statement' },
-  { value: 'supplemental', label: 'Supplemental Essay' },
-  { value: 'why_this_school', label: 'Why This School' },
-  { value: 'activity', label: 'Activity Essay' },
-  { value: 'scholarship', label: 'Scholarship Essay' },
-  { value: 'other', label: 'Other' },
-];
-
-const statusLabels = {
-  not_started: 'Not Started',
-  drafting: 'Drafting',
-  in_review: 'In Review',
-  polishing: 'Polishing',
-  final: 'Final',
-};
-
-const wordCount = (text) => (text.trim() ? text.trim().split(/\s+/).length : 0);
-
-function formatActivitiesForAI(activities) {
-  if (!activities || activities.length === 0) return null;
-  return 'ACTIVITIES (Common App format):\n' + activities.map((a, i) =>
-    `${i + 1}. ${a.position || ''} at ${a.organization || ''} (${a.activity_type || ''})\n   ${a.description || ''}\n   Grades: ${(a.grade_levels || []).join(', ')} | ${a.timing || ''} | ${a.hours_per_week || '?'}h/wk, ${a.weeks_per_year || '?'}wks/yr`
-  ).join('\n');
-}
-
-function formatHonorsForAI(honors) {
-  if (!honors || honors.length === 0) return null;
-  return 'HONORS:\n' + honors.map((h, i) => `${i + 1}. ${h.name} — Grade ${h.grade_level}, ${h.level} level`).join('\n');
-}
+const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label: s }).label;
 
 export default function EssayBuilder() {
   const [searchParams] = useSearchParams();
@@ -48,15 +34,26 @@ export default function EssayBuilder() {
   const [selectedUni, setSelectedUni] = useState(null);
   const [selectedEssay, setSelectedEssay] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
-  const [polishing, setPolishing] = useState(false);
+  const [busy, setBusy] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [reviewResult, setReviewResult] = useState(null);
   const [genAnalysis, setGenAnalysis] = useState(null);
+  const [genGaps, setGenGaps] = useState([]);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [metaExpanded, setMetaExpanded] = useState(true);
-  const [newEssay, setNewEssay] = useState({ title: '', type: 'supplemental', prompt: '', word_limit: 650, scope: 'university_specific' });
+  const [newEssay, setNewEssay] = useState({ title: '', type: 'supplemental', prompt: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
+  const autosaveRef = useRef(null);
+
+  const platform = useMemo(() => getUniversityPlatform(selectedUni), [selectedUni]);
+  const platformInfo = PLATFORMS[platform];
+
+  const loadEssays = useCallback(async () => {
+    const ess = await base44.entities.Essay.list();
+    setEssays(ess);
+    return ess;
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -64,355 +61,322 @@ export default function EssayBuilder() {
         const unis = await base44.entities.University.list();
         setUniversities(unis);
         const uniParam = searchParams.get('university');
-        if (uniParam) {
-          const uni = unis.find((u) => u.id === uniParam);
-          if (uni) setSelectedUni(uni);
-        } else if (unis.length > 0) {
-          setSelectedUni(unis[0]);
+        const initial = (uniParam && unis.find((u) => u.id === uniParam)) || unis[0] || null;
+        setSelectedUni(initial);
+        if (!unis.length) setLoading(false);
+      } catch (e) {
+        console.error(e);
+        toast.error('Could not load your universities', { description: e.message });
+        setLoading(false);
+      }
+    })();
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!selectedUni) return;
+    (async () => {
+      try {
+        const ess = await loadEssays();
+        const essayParam = searchParams.get('essay');
+        if (essayParam) {
+          const essay = ess.find((e) => e.id === essayParam);
+          if (essay) {
+            setSelectedEssay(essay);
+            setReviewResult(null);
+            setGenAnalysis(null);
+          }
         }
       } catch (e) {
         console.error(e);
+        toast.error('Could not load your essays', { description: e.message });
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [selectedUni, searchParams, loadEssays]);
 
+  // Warn before losing an unsaved draft.
   useEffect(() => {
-    if (selectedUni) loadEssays();
-  }, [selectedUni]);
+    if (!dirty) return undefined;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty]);
 
-  const loadEssays = async () => {
-    try {
-      const ess = await base44.entities.Essay.list();
-      setEssays(ess);
-      const essayParam = searchParams.get('essay');
-      if (essayParam) {
-        const essay = ess.find((e) => e.id === essayParam);
-        if (essay) {
-          setSelectedEssay(essay);
-          setReviewResult(null);
-          setGenAnalysis(null);
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
+  const applicable = useMemo(
+    () => (selectedUni ? essaysApplicableToUniversity(essays, selectedUni) : essays),
+    [essays, selectedUni],
+  );
+  const sharedEssays = applicable.filter(isSharedEssay);
+  const specificEssays = applicable.filter((e) => !isSharedEssay(e));
+
+  const pickEssay = (essay) => {
+    if (dirty && !window.confirm('You have unsaved changes on the current essay. Discard them?')) return;
+    setSelectedEssay(essay);
+    setReviewResult(null);
+    setGenAnalysis(null);
+    setGenGaps([]);
+    setDirty(false);
   };
 
   const handleSelectUni = (uniId) => {
+    if (dirty && !window.confirm('You have unsaved changes. Discard them?')) return;
     const uni = universities.find((u) => u.id === uniId);
     setSelectedUni(uni);
     setSelectedEssay(null);
     setReviewResult(null);
     setGenAnalysis(null);
+    setDirty(false);
   };
 
-  const handleCreateEssay = async () => {
-    if (!newEssay.title) return;
-    if ((newEssay.scope || 'university_specific') === 'university_specific' && !selectedUni) return;
-    try {
-      const essayData = {
-        title: newEssay.title,
-        type: newEssay.type,
-        prompt: newEssay.prompt,
-        word_limit: parseInt(newEssay.word_limit) || 650,
-        content: '',
-        status: 'not_started',
-        scope: newEssay.scope || 'university_specific',
-        application_platform: 'common_app',
-      };
-      if ((newEssay.scope || 'university_specific') === 'university_specific') {
-        essayData.university_id = selectedUni.id;
-        essayData.university_name = selectedUni.name;
-      }
-      const created = await base44.entities.Essay.create(essayData);
-      setEssays([...essays, created]);
-      setSelectedEssay(created);
-      setDialogOpen(false);
-      setNewEssay({ title: '', type: 'supplemental', prompt: '', word_limit: 650, scope: 'university_specific' });
-      setReviewResult(null);
-      setGenAnalysis(null);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleDeleteEssay = async (essay, fromList = false) => {
-    if (!confirm(`Delete "${essay.title}"? This cannot be undone.`)) return;
-    try {
-      await base44.entities.Essay.delete(essay.id);
-      setEssays(essays.filter((e) => e.id !== essay.id));
-      if (selectedEssay?.id === essay.id) {
-        setSelectedEssay(null);
-        setReviewResult(null);
-        setGenAnalysis(null);
-      }
-    } catch (e) {
-      console.error(e);
-    }
+  // --- persistence --------------------------------------------------------
+  const persist = async (fields) => {
+    if (!selectedEssay) return null;
+    const updated = await base44.entities.Essay.update(selectedEssay.id, fields);
+    setEssays((prev) => prev.map((e) => (e.id === updated.id ? { ...e, ...updated } : e)));
+    setSelectedEssay((prev) => (prev ? { ...prev, ...fields } : prev));
+    setDirty(false);
+    return updated;
   };
 
   const handleFieldChange = (field, value) => {
     setSelectedEssay((prev) => ({ ...prev, [field]: value }));
+    setDirty(true);
   };
 
   const handleSave = async () => {
     if (!selectedEssay) return;
     setSaving(true);
     try {
-      const updated = await base44.entities.Essay.update(selectedEssay.id, {
+      await persist({
         title: selectedEssay.title,
         prompt: selectedEssay.prompt,
         word_limit: selectedEssay.word_limit,
         content: selectedEssay.content,
         type: selectedEssay.type,
         status: selectedEssay.status,
+        limit_unit: limitUnitFor(selectedEssay),
       });
-      setSelectedEssay(updated);
-      setEssays(essays.map((e) => (e.id === updated.id ? updated : e)));
+      toast.success('Essay saved');
     } catch (e) {
-      console.error(e);
+      toast.error('Could not save this essay', { description: e.message });
     } finally {
       setSaving(false);
     }
   };
 
+  // Debounced autosave so nothing is ever lost to a stray click.
+  useEffect(() => {
+    if (!dirty || !selectedEssay) return undefined;
+    clearTimeout(autosaveRef.current);
+    autosaveRef.current = setTimeout(async () => {
+      try {
+        await persist({
+          content: selectedEssay.content,
+          prompt: selectedEssay.prompt,
+          title: selectedEssay.title,
+          word_limit: selectedEssay.word_limit,
+          status: selectedEssay.status,
+          type: selectedEssay.type,
+          limit_unit: limitUnitFor(selectedEssay),
+        });
+      } catch { /* autosave failures must not interrupt typing */ }
+    }, 2500);
+    return () => clearTimeout(autosaveRef.current);
+  }, [dirty, selectedEssay?.id, selectedEssay?.content, selectedEssay?.prompt, selectedEssay?.title, selectedEssay?.word_limit, selectedEssay?.status, selectedEssay?.type]);
+
+  // --- context ------------------------------------------------------------
   const gatherContext = async () => {
-    const [profiles, materials, knowledge] = await Promise.all([
+    const [profiles, materials] = await Promise.all([
       base44.entities.Profile.list(),
       base44.entities.Material.list(),
-      base44.entities.CollegeKnowledge.filter({ university_name: selectedUni.name }),
     ]);
-
-    const p = profiles[0] || {};
-    const profileText = [
-      p.nationality && `NATIONALITY: ${p.nationality}`,
-      p.school_system && `SCHOOL SYSTEM: ${p.school_system}`,
-      p.graduation_year && `GRADUATION YEAR: ${p.graduation_year}`,
-      p.background_summary && `BACKGROUND:\n${p.background_summary}`,
-      p.education_notes && `EDUCATION SYSTEM NOTES:\n${p.education_notes}`,
-      p.ib_predicted_score && `IB PREDICTED SCORE: ${p.ib_predicted_score}`,
-      p.ib_subjects && `IB SUBJECTS:\n${p.ib_subjects}`,
-      p.gpa_value && `GPA: ${p.gpa_value}/${p.gpa_scale || '?'}`,
-      p.sat_math && `SAT: Math ${p.sat_math}, EBRW ${p.sat_ebrw || '?'}, Total ${(p.sat_math || 0) + (p.sat_ebrw || 0)}`,
-      (p.ielts_listening || p.ielts_reading || p.ielts_writing || p.ielts_speaking) &&
-        `IELTS (highest by component): L${p.ielts_listening} R${p.ielts_reading} W${p.ielts_writing} S${p.ielts_speaking}`,
-      p.additional_test_info && `ADDITIONAL TEST INFO:\n${p.additional_test_info}`,
-      formatActivitiesForAI(p.activities) || (p.activities_awards && `ACTIVITIES & AWARDS:\n${p.activities_awards}`),
-      formatHonorsForAI(p.honors),
-      p.requires_financial_aid !== undefined && `FINANCIAL AID: ${p.requires_financial_aid ? 'Requires financial aid (need-based)' : 'Does NOT require financial aid (full-pay applicant)'}`,
-      p.financial_aid_notes && `FINANCIAL AID NOTES:\n${p.financial_aid_notes}`,
-      p.additional_context && `ADDITIONAL CONTEXT:\n${p.additional_context}`,
-    ].filter(Boolean).join('\n\n');
-
-    const materialsText = materials.length > 0
-      ? materials.map((m) => `--- ${m.title} (${m.type}) ---\n${m.content || m.link_url || m.notes || ''}`).join('\n\n')
-      : 'No additional materials uploaded.';
-
-    const knowledgeText = knowledge.length > 0
+    const profileText = buildProfileContext(profiles[0] || {}, { includeLeadershipBrief: true });
+    const materialsText = materials.length
+      ? materials
+        .filter((m) => m.content || m.notes)
+        .map((m) => `--- ${m.title} [${m.type}] ---\n${m.content || m.notes}`)
+        .join('\n\n')
+      : 'No supporting materials uploaded yet.';
+    const knowledge = await base44.entities.CollegeKnowledge.filter({ university_name: selectedUni.name });
+    const knowledgeText = knowledge.length
       ? knowledge[0].knowledge
-      : 'No specific university knowledge cached. Use your expert knowledge of this university.';
-
+      : 'No research cached for this university yet. Research it in the Knowledge Base for a far more specific essay — this draft will rely on general knowledge only.';
     return { profileText, materialsText, knowledgeText };
   };
 
+  // --- actions ------------------------------------------------------------
   const handleGenerate = async () => {
     if (!selectedEssay) return;
-    setGenerating(true);
+    setBusy('generate');
     setReviewResult(null);
     setGenAnalysis(null);
     try {
       const { profileText, materialsText, knowledgeText } = await gatherContext();
-      const prompt = `You are an elite college admissions essay consultant who has read thousands of admitted students' essays at top universities. You deeply understand HOLISTIC ADMISSIONS and the specific ROLE each essay plays in a student's application.
+      const { ok, result } = await runAI({
+        prompt: buildGeneratePrompt({
+          essay: selectedEssay, university: selectedUni, platform,
+          profileText, knowledgeText, materialsText,
+        }),
+        response_json_schema: GENERATE_SCHEMA,
+      }, { fallbackTitle: 'Could not generate a draft' });
 
-STEP 1 — UNDERSTAND THE ESSAY'S ROLE:
-Before writing, analyze what THIS specific essay prompt is really asking. What is the admissions committee trying to learn from THIS particular essay? What role does it play in the holistic review alongside the other components?
-
-Different essays serve completely different purposes:
-- A Common App Personal Statement reveals WHO YOU ARE — your values, identity, growth. Not a resume in prose.
-- A Stanford "Roommate" essay is about PERSONALITY and daily-life humanity — what kind of person you'd be to live with. It is NOT a place to push intellectual vitality (even though that IS a core Stanford value — but not here). It should be casual, quirky, real.
-- A "Why This School" essay must show GENUINE, RESEARCHED knowledge of the school — specific programs, professors, traditions — not generic praise.
-- An Activity essay is about what you LEARNED and how you GREW — not just what you did.
-- Supplemental essays each have a specific purpose — understand what THIS one is asking.
-
-Not every essay should be rooted in academics or one subject. A student is a whole person, not just their major. Different essays should reveal different facets.
-
-STEP 2 — USE ALL AVAILABLE CONTEXT:
-The student has provided extensive background. Use EVERY relevant detail — do not ignore any material.
-
-STUDENT PROFILE:
-${profileText}
-
-ALL SUPPORTING MATERIALS (use every relevant detail from these):
-${materialsText}
-
-UNIVERSITY KNOWLEDGE & IDEAL STUDENT PROFILE:
-${knowledgeText}
-
-ESSAY TO WRITE:
-- University: ${selectedUni.name}
-- Program/Major: ${selectedUni.major || 'Not specified'}
-- Essay type: ${selectedEssay.type}
-- Prompt: ${selectedEssay.prompt || 'No specific prompt — write a strong personal statement that reveals who the student is'}
-- Word limit: ${selectedEssay.word_limit || 650} words
-
-STEP 3 — WRITE LIKE A HUMAN:
-- Write in the authentic voice of a thoughtful 17-18 year old. NOT an AI. NOT a thesaurus. NOT a polished adult professional.
-- Use specific, concrete details and anecdotes from the student's actual life. Show, don't tell.
-- ABSOLUTELY AVOID these AI-like patterns: "In conclusion," "This experience taught me," "Through this journey," "I realized that," "It was then that I understood," "Looking back," overly polished transitions, everything in lists of three, meta-commentary about personal growth, sweeping generalizations.
-- Be genuine, specific, and real. Let the student's personality come through naturally.
-- The essay should read like a talented teenager wrote it — not a robot trying to sound impressive.
-
-Output a JSON object with:
-- "essay": the full essay text (just the essay, no headers, no meta-commentary)
-- "essay_analysis": a brief analysis of what role this essay plays in the holistic application and how the essay serves that purpose`;
-
-      const result = await base44.integrations.Core.InvokeLLM({
-        prompt,
-        response_json_schema: {
-          type: 'object',
-          properties: {
-            essay: { type: 'string' },
-            essay_analysis: { type: 'string' },
-          },
-        },
+      if (!ok) return;
+      const text = typeof result === 'string' ? result : result.essay;
+      if (!text || !String(text).trim()) {
+        toast.error('The AI returned an empty draft', { description: 'Try again, or lower the length you asked for.' });
+        return;
+      }
+      setGenAnalysis(result.essay_analysis || '');
+      setGenGaps(Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : []);
+      await persist({ content: String(text).trim(), status: 'drafting' });
+      toast.success('Draft written', {
+        description: result.gaps_for_applicant?.length
+          ? 'Check the "fill these in" list — the AI deliberately left gaps rather than inventing your life.'
+          : 'Read it, then edit it in your own voice.',
       });
-
-      const updated = { ...selectedEssay, content: result.essay, status: 'drafting' };
-      setSelectedEssay(updated);
-      setEssays(essays.map((e) => (e.id === updated.id ? updated : e)));
-      setGenAnalysis(result.essay_analysis);
-      await base44.entities.Essay.update(selectedEssay.id, { content: result.essay, status: 'drafting' });
     } catch (e) {
       console.error(e);
-      alert('Failed to generate essay. Please try again.');
     } finally {
-      setGenerating(false);
+      setBusy(null);
     }
   };
 
   const handleReview = async () => {
-    if (!selectedEssay || !selectedEssay.content) return;
-    setReviewing(true);
+    if (!selectedEssay?.content) return;
+    setBusy('review');
     setReviewResult(null);
     try {
       const { knowledgeText } = await gatherContext();
-      const prompt = `You are a senior admissions officer at ${selectedUni.name}. You deeply understand holistic admissions and what each specific essay is supposed to accomplish.
+      const { ok, result } = await runAI({
+        prompt: buildReviewPrompt({
+          essay: selectedEssay, university: selectedUni, platform,
+          knowledgeText, reviewNotes: selectedEssay.review_notes,
+        }),
+        response_json_schema: REVIEW_SCHEMA,
+      }, { fallbackTitle: 'The review could not be completed' });
 
-CRITICAL: Judge this essay by what THIS SPECIFIC PROMPT is actually asking, not by generic essay standards.
-- A Stanford roommate essay that pushes intellectual vitality has MISSED THE POINT.
-- A "Why this school" essay with generic praise has MISSED THE POINT.
-- An essay that sounds like AI has FAILED, full stop.
-
-ESSAY:
-${selectedEssay.content}
-
-PROMPT: ${selectedEssay.prompt || 'Personal statement'}
-ESSAY TYPE: ${selectedEssay.type}
-WORD LIMIT: ${selectedEssay.word_limit || 650} words
-
-UNIVERSITY CONTEXT & IDEAL STUDENT:
-${knowledgeText}
-
-Evaluate on these dimensions:
-1. PROMPT ALIGNMENT (most important): Does the essay actually answer what the prompt asks? Does it serve the specific role this essay plays in the holistic application? Rate 1-10.
-2. HUMANITY: Does it sound like a real person wrote it? Or does it sound AI-generated? Flag specific AI-like phrases and patterns.
-3. SPECIFICITY: Are there concrete, personal details? Or is it vague and generic?
-4. NARRATIVE: Is there a clear, compelling story or structure?
-5. FIT: Does it align with what this university values — as appropriate for THIS essay type specifically (not generic)?
-6. CONTEXT USE: Does it draw on the student's actual background and experiences?
-7. VOCABULARY: Natural and precise? Or forced, pretentious, and thesaurus-driven?
-8. WORD COUNT: Current count vs. limit.
-
-Output a JSON object with:
-- "overall_score": score out of 10 (number)
-- "prompt_alignment_score": score out of 10 (number)
-- "word_count": actual word count (number)
-- "sounds_like_ai": boolean — does it sound AI-written?
-- "ai_patterns_detected": array of specific AI-like phrases or patterns found (strings), empty if none
-- "strengths": array of specific strengths (strings)
-- "weaknesses": array of specific weaknesses with context (strings)
-- "priority_improvements": array of the top 3 most important changes (strings)
-- "summary": a 2-3 sentence overall assessment (string)`;
-
-      const result = await base44.integrations.Core.InvokeLLM({
-        prompt,
-        response_json_schema: {
-          type: 'object',
-          properties: {
-            overall_score: { type: 'number' },
-            prompt_alignment_score: { type: 'number' },
-            word_count: { type: 'number' },
-            sounds_like_ai: { type: 'boolean' },
-            ai_patterns_detected: { type: 'array', items: { type: 'string' } },
-            strengths: { type: 'array', items: { type: 'string' } },
-            weaknesses: { type: 'array', items: { type: 'string' } },
-            priority_improvements: { type: 'array', items: { type: 'string' } },
-            summary: { type: 'string' },
-          },
-        },
-      });
-
+      if (!ok) return;
       setReviewResult(result);
-      const updated = { ...selectedEssay, status: 'in_review', review_notes: JSON.stringify(result, null, 2) };
-      setSelectedEssay(updated);
-      await base44.entities.Essay.update(selectedEssay.id, { status: 'in_review', review_notes: JSON.stringify(result, null, 2) });
+      await persist({ status: 'in_review', review_notes: JSON.stringify(result, null, 2) });
+      toast.success(`Reviewed: ${result.overall_score}/10`, {
+        description: `${(result.weaknesses || []).length} weakness(es) and ${(result.priority_improvements || []).length} priority fix(es) found.`,
+      });
     } catch (e) {
       console.error(e);
-      alert('Failed to run review. Please try again.');
     } finally {
-      setReviewing(false);
+      setBusy(null);
     }
   };
 
   const handlePolish = async () => {
-    if (!selectedEssay || !selectedEssay.content) return;
-    setPolishing(true);
+    if (!selectedEssay?.content) return;
+    setBusy('polish');
     try {
       const { knowledgeText } = await gatherContext();
-      const reviewNotes = reviewResult
-        ? JSON.stringify(reviewResult, null, 2)
-        : selectedEssay.review_notes || 'No specific review notes. Improve the essay for clarity, voice, university fit, and to sound more human.';
+      const { ok, result } = await runAI({
+        prompt: buildPolishPrompt({
+          essay: selectedEssay, university: selectedUni, platform,
+          reviewResult, knowledgeText,
+        }),
+      }, { fallbackTitle: 'Could not polish this essay' });
 
-      const prompt = `You are a master essay editor. Your goal: make this essay sound MORE HUMAN and LESS AI-WRITTEN while improving its alignment with what the specific prompt asks.
-
-CRITICAL RULES:
-1. The essay must answer what THIS SPECIFIC PROMPT asks, serving its role in holistic admissions (e.g., a roommate essay should be about personality and daily-life humanity, NOT academics).
-2. Remove ALL AI-like patterns: "In conclusion," "This experience taught me," "Through this journey," "I learned that," "It was then that I realized," "Looking back," overly polished transitions, everything in lists of three, meta-commentary about growth, sweeping generalizations.
-3. Make the voice sound like a real, thoughtful teenager — not a robot, not a thesaurus, not a polished adult professional.
-4. Keep specific, concrete, personal details. Remove vague, generic, or performative statements.
-5. Stay within ${selectedEssay.word_limit || 650} words.
-6. Maintain the student's authentic background and perspective. Do not invent experiences.
-7. The result should read like a talented 17-year-old wrote it — natural, specific, and real.
-
-REVIEW NOTES TO ADDRESS:
-${reviewNotes}
-
-CURRENT ESSAY:
-${selectedEssay.content}
-
-PROMPT: ${selectedEssay.prompt || 'Personal statement'}
-ESSAY TYPE: ${selectedEssay.type}
-UNIVERSITY: ${selectedUni.name}
-WORD LIMIT: ${selectedEssay.word_limit || 650} words
-
-Output ONLY the revised essay text. No commentary, no headers, no meta-text. Just the essay.`;
-
-      const result = await base44.integrations.Core.InvokeLLM({ prompt });
-      const polishedText = typeof result === 'string' ? result : result.essay || String(result);
-      const updated = { ...selectedEssay, content: polishedText, status: 'polishing' };
-      setSelectedEssay(updated);
-      setEssays(essays.map((e) => (e.id === updated.id ? updated : e)));
-      await base44.entities.Essay.update(selectedEssay.id, { content: polishedText, status: 'polishing' });
+      if (!ok) return;
+      const text = typeof result === 'string' ? result : result.essay;
+      if (!text || !String(text).trim()) {
+        toast.error('The AI returned an empty revision', { description: 'Your draft was left untouched.' });
+        return;
+      }
+      await persist({ content: String(text).trim(), status: 'polishing' });
+      toast.success('Revision applied', { description: 'Read the diff carefully — the editor will have cut aggressively.' });
     } catch (e) {
       console.error(e);
-      alert('Failed to polish essay. Please try again.');
     } finally {
-      setPolishing(false);
+      setBusy(null);
     }
   };
 
+  const handleDeleteEssay = async (essay) => {
+    if (!window.confirm(`Delete "${essay.title}"? This cannot be undone.`)) return;
+    try {
+      await base44.entities.Essay.delete(essay.id);
+      setEssays((prev) => prev.filter((e) => e.id !== essay.id));
+      if (selectedEssay?.id === essay.id) {
+        setSelectedEssay(null);
+        setReviewResult(null);
+        setGenAnalysis(null);
+      }
+      toast.success('Essay deleted');
+    } catch (e) {
+      toast.error('Could not delete this essay', { description: e.message });
+    }
+  };
+
+  // --- creation -----------------------------------------------------------
+  const createEssays = async (drafts, label) => {
+    const created = [];
+    for (const d of drafts) {
+      const row = await base44.entities.Essay.create({
+        title: d.title,
+        type: d.type || 'supplemental',
+        prompt: d.prompt || '',
+        word_limit: Number(d.word_limit) || 650,
+        content: '',
+        status: 'not_started',
+        scope: d.scope || 'university_specific',
+        application_platform: d.application_platform || platform,
+        limit_unit: d.limit_unit || 'words',
+        ...(d.scope === 'university_specific' && selectedUni
+          ? { university_id: selectedUni.id, university_name: selectedUni.name }
+          : {}),
+      });
+      created.push(row);
+    }
+    await loadEssays();
+    if (created.length === 1) setSelectedEssay(created[0]);
+    toast.success(`${created.length} essay${created.length > 1 ? 's' : ''} created`, { description: label });
+    return created;
+  };
+
+  const handleCreateEssay = async () => {
+    if (!newEssay.title) return;
+    if (newEssay.scope === 'university_specific' && !selectedUni) return;
+    const wordLimit = Number(newEssay.word_limit);
+    if (!Number.isFinite(wordLimit) || wordLimit <= 0) {
+      toast.error('Set a word or character limit for this essay.');
+      return;
+    }
+    try {
+      await createEssays([{
+        ...newEssay,
+        word_limit: wordLimit,
+        application_platform: newEssay.scope === 'common' ? (selectedUni ? platform : 'common_app') : platform,
+        limit_unit: newEssay.limit_unit || (platform === 'ucas' ? 'characters' : 'words'),
+      }], newEssay.scope === 'common'
+        ? `Shared with every ${platformInfo?.short || ''} university on your list.`
+        : 'Written only for this university.');
+      setDialogOpen(false);
+      setNewEssay({ title: '', type: 'supplemental', prompt: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
+    } catch (e) {
+      console.error(e);
+      toast.error('Could not create that essay', { description: e.message });
+    }
+  };
+
+  const missingShared = useMemo(
+    () => (selectedUni ? buildSharedEssayPlan(platform, essays) : []),
+    [platform, essays, selectedUni],
+  );
+
+  const addMissingShared = async () => {
+    try {
+      await createEssays(missingShared, `These apply to every ${platformInfo?.short || ''} university — write them once.`);
+    } catch (e) {
+      toast.error('Could not add the shared essays', { description: e.message });
+    }
+  };
+
+  // --- render -------------------------------------------------------------
   if (loading) {
     return (
       <div className="flex items-center justify-center py-32">
@@ -430,210 +394,316 @@ Output ONLY the revised essay text. No commentary, no headers, no meta-text. Jus
     );
   }
 
-  const applicableEssays = selectedUni ? essaysApplicableToUniversity(essays, selectedUni) : essays;
-  const commonEssays = applicableEssays.filter((e) => e.scope === 'common');
-  const specificEssays = applicableEssays.filter((e) => e.scope !== 'common');
+  const unit = selectedEssay ? limitUnitFor(selectedEssay) : 'words';
+  const currentCount = selectedEssay ? measureEssay(selectedEssay.content || '', unit) : 0;
+  const limit = selectedEssay ? Number(selectedEssay.word_limit) || 0 : 0;
+  const overBy = currentCount - limit;
+  const unitLabel = formatLimit(unit);
 
-  const renderEssayItem = (essay) => (
-    <div key={essay.id} className="group relative">
-      <button
-        onClick={() => { setSelectedEssay(essay); setReviewResult(null); setGenAnalysis(null); }}
-        className={`w-full text-left p-3 rounded-xl border transition-all pr-8 ${
-          selectedEssay?.id === essay.id
-            ? 'border-foreground/20 bg-card shadow-sm'
-            : 'border-border bg-card/50 hover:bg-card hover:border-foreground/10'
-        }`}
-      >
-        <div className="flex items-center gap-2 mb-1">
-          <FileText className="w-3.5 h-3.5 text-foreground/30 shrink-0" />
-          <span className="text-sm font-medium truncate">{essay.title}</span>
-          {essay.scope === 'common' && <span className="text-[10px] text-accent/70 shrink-0">Common</span>}
-        </div>
-        <div className="flex items-center gap-2 text-xs text-foreground/40">
-          <span className="capitalize">{statusLabels[essay.status]}</span>
-          <span>·</span>
-          <span>{wordCount(essay.content || '')}/{essay.word_limit || '—'}</span>
-        </div>
-      </button>
-      <button
-        onClick={() => handleDeleteEssay(essay, true)}
-        className="absolute top-2.5 right-2 p-1 rounded text-foreground/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
-      >
-        <Trash2 className="w-3.5 h-3.5" />
-      </button>
-    </div>
-  );
+  const renderEssayItem = (essay) => {
+    const u = limitUnitFor(essay);
+    const n = measureEssay(essay.content || '', u);
+    const lim = Number(essay.word_limit) || 0;
+    return (
+      <div key={essay.id} className="group relative">
+        <button
+          onClick={() => pickEssay(essay)}
+          className={`w-full text-left p-3 rounded-xl border transition-all pr-8 ${
+            selectedEssay?.id === essay.id
+              ? 'border-foreground/20 bg-card shadow-sm'
+              : 'border-border bg-card/50 hover:bg-card hover:border-foreground/10'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            {essay.status === 'final' || essay.status === 'polishing'
+              ? <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+              : <CircleDashed className="w-3.5 h-3.5 text-foreground/25 shrink-0" />}
+            <span className="text-sm font-medium truncate">{essay.title}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-foreground/40">
+            <span>{statusLabel(essay.status)}</span>
+            <span>·</span>
+            <span className={n > lim ? 'text-destructive' : ''}>{n}/{lim || '—'} {u === 'characters' ? 'chars' : 'w'}</span>
+          </div>
+        </button>
+        <button
+          onClick={() => handleDeleteEssay(essay)}
+          className="absolute top-2.5 right-2 p-1 rounded text-foreground/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="font-display text-3xl font-semibold tracking-tight">Essay Builder</h1>
-        <p className="text-foreground/50 mt-1.5">Your essay hub. Common App essays shared across schools, university-specific essays filtered per school. AI understands holistic admissions and essay roles.</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="font-display text-3xl font-semibold tracking-tight">Essay Builder</h1>
+          <p className="text-foreground/50 mt-1.5 max-w-2xl">
+            Shared writing is written once and sent to every school on the platform. School-specific writing is
+            written for one school. Atlas keeps them apart so you never write the same essay twice.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Select value={selectedUni?.id} onValueChange={handleSelectUni}>
+            <SelectTrigger className="w-64"><SelectValue placeholder="Select university..." /></SelectTrigger>
+            <SelectContent>
+              {universities.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
-      <div className="flex items-center gap-3">
-        <span className="text-sm font-medium text-foreground/60 shrink-0">University:</span>
-        <Select value={selectedUni?.id} onValueChange={handleSelectUni}>
-          <SelectTrigger className="w-72"><SelectValue placeholder="Select university..." /></SelectTrigger>
-          <SelectContent>
-            {universities.map((u) => (
-              <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      {/* How this school actually works */}
+      {platformInfo && (
+        <div className="bg-card border border-border rounded-xl p-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <Badge variant="outline" className="shrink-0">{platformInfo.label}</Badge>
+            <p className="text-sm text-foreground/60 flex-1 min-w-[240px]">
+              {PLATFORM_REQUIREMENTS[platform]?.summary}
+            </p>
+          </div>
+          <p className="text-xs text-foreground/45 mt-2 flex items-start gap-1.5">
+            <Info className="w-3.5 h-3.5 mt-px shrink-0" />
+            {platformInfo.sharedNote}
+          </p>
+        </div>
+      )}
 
-      <div className="grid lg:grid-cols-[220px_1fr] gap-5">
-        {/* Essay list sidebar */}
+      {missingShared.length > 0 && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-accent/5 border border-accent/20">
+          <Library className="w-5 h-5 text-accent shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-medium">
+              {missingShared.length} shared {missingShared.length > 1 ? 'essays are' : 'essay is'} missing
+            </p>
+            <p className="text-xs text-foreground/50 mt-0.5">
+              {platformInfo?.sharedNote} Create {missingShared.length > 1 ? 'them' : 'it'} once and every{' '}
+              {platformInfo?.short} university picks {missingShared.length > 1 ? 'them' : 'it'} up automatically.
+            </p>
+            <Button size="sm" className="mt-2.5" onClick={addMissingShared}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              Add shared {missingShared.length > 1 ? 'essays' : 'essay'}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid lg:grid-cols-[240px_1fr] gap-5">
+        {/* Essay list */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="font-medium text-sm text-foreground/60">Essays</h2>
             <Button size="sm" variant="outline" onClick={() => setDialogOpen(true)}>
-              <Plus className="w-3.5 h-3.5 mr-1" />
-              New
+              <Plus className="w-3.5 h-3.5 mr-1" /> New
             </Button>
           </div>
 
-          {applicableEssays.length === 0 ? (
-            <p className="text-xs text-foreground/40 px-1 py-4 text-center">No essays yet. Click "New" to create one.</p>
+          {applicable.length === 0 ? (
+            <p className="text-xs text-foreground/40 px-1 py-4 text-center">
+              No essays yet. Add the shared writing above, or click “New”.
+            </p>
           ) : (
             <div className="space-y-4">
-              {commonEssays.length > 0 && (
+              {sharedEssays.length > 0 && (
                 <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-accent/80 px-1">Common App (shared)</p>
-                  {commonEssays.map(renderEssayItem)}
+                  <p className="text-xs font-medium text-accent/80 px-1 flex items-center gap-1.5">
+                    <Library className="w-3 h-3" />
+                    Shared with every {platformInfo?.short} university
+                  </p>
+                  {sharedEssays.map(renderEssayItem)}
                 </div>
               )}
               {specificEssays.length > 0 && (
                 <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-foreground/40 px-1">{selectedUni?.name || 'University'}</p>
+                  <p className="text-xs font-medium text-foreground/40 px-1">{selectedUni?.name}</p>
                   {specificEssays.map(renderEssayItem)}
                 </div>
               )}
             </div>
           )}
+
+          {selectedUni && (
+            <Link
+              to="/universities"
+              className="block text-xs text-foreground/35 hover:text-foreground/60 transition pt-1"
+            >
+              Add another university <ArrowRight className="w-3 h-3 inline" />
+            </Link>
+          )}
         </div>
 
-        {/* Essay editor */}
-        <div>
+        {/* Editor */}
+        <div className="min-w-0">
           {!selectedEssay ? (
             <div className="bg-card border border-border rounded-xl p-16 text-center">
               <PenLine className="w-10 h-10 text-foreground/15 mx-auto mb-4" />
               <h3 className="font-display text-lg font-medium mb-1">Select or create an essay</h3>
-              <p className="text-sm text-foreground/40">Choose an essay from the left or create a new one to start writing.</p>
+              <p className="text-sm text-foreground/40 max-w-md mx-auto">
+                Start with the shared writing — it is sent to every {platformInfo?.short} university, so you only
+                write it once.
+              </p>
             </div>
           ) : (
             <div className="space-y-4">
-              {/* Essay metadata - collapsible */}
               <div className="bg-card border border-border rounded-xl overflow-hidden">
                 <button
                   onClick={() => setMetaExpanded(!metaExpanded)}
                   className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-muted/30 transition"
                 >
-                  <span className="font-medium text-sm flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-foreground/40" />
-                    {selectedEssay.title || 'Untitled Essay'}
+                  <span className="font-medium text-sm flex items-center gap-2 min-w-0">
+                    <FileText className="w-4 h-4 text-foreground/40 shrink-0" />
+                    <span className="truncate">{selectedEssay.title || 'Untitled Essay'}</span>
+                    {isSharedEssay(selectedEssay) && (
+                      <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-accent border-accent/40 shrink-0">
+                        shared
+                      </Badge>
+                    )}
                   </span>
-                  {metaExpanded ? <ChevronUp className="w-4 h-4 text-foreground/40" /> : <ChevronDown className="w-4 h-4 text-foreground/40" />}
+                  {metaExpanded ? <ChevronUp className="w-4 h-4 text-foreground/40 shrink-0" /> : <ChevronDown className="w-4 h-4 text-foreground/40 shrink-0" />}
                 </button>
+
                 {metaExpanded && (
                   <div className="px-5 pb-5 space-y-3 border-t border-border pt-4">
                     <input
-                      value={selectedEssay.title}
+                      value={selectedEssay.title || ''}
                       onChange={(e) => handleFieldChange('title', e.target.value)}
                       placeholder="Essay title"
                       className="w-full font-display text-base font-semibold bg-transparent border-none focus:outline-none -mt-1"
                     />
-                    <div className="grid sm:grid-cols-2 gap-3">
+                    <div className="grid sm:grid-cols-3 gap-3">
                       <div>
                         <label className="block text-xs font-medium text-foreground/50 mb-1">Type</label>
-                        <Select value={selectedEssay.type} onValueChange={(v) => handleFieldChange('type', v)}>
+                        <Select value={selectedEssay.type || 'supplemental'} onValueChange={(v) => handleFieldChange('type', v)}>
                           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                           <SelectContent>
-                            {essayTypes.map((t) => (
-                              <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
-                            ))}
+                            {ESSAY_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
                           </SelectContent>
                         </Select>
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-foreground/50 mb-1">Word Limit</label>
+                        <label className="block text-xs font-medium text-foreground/50 mb-1">Status</label>
+                        <Select value={selectedEssay.status || 'not_started'} onValueChange={(v) => handleFieldChange('status', v)}>
+                          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {ESSAY_STATUSES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-foreground/50 mb-1">Limit ({unitLabel})</label>
                         <Input
                           type="number"
-                          value={selectedEssay.word_limit || ''}
-                          onChange={(e) => handleFieldChange('word_limit', parseInt(e.target.value) || 0)}
+                          value={selectedEssay.word_limit ?? ''}
+                          onChange={(e) => handleFieldChange('word_limit', e.target.value === '' ? null : Number(e.target.value))}
                         />
                       </div>
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-foreground/50 mb-1">Prompt</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-medium text-foreground/50">Prompt</label>
+                        {isSharedEssay(selectedEssay) && (
+                          <button
+                            onClick={() => setLibraryOpen(true)}
+                            className="text-[11px] text-accent hover:underline"
+                          >
+                            Paste this cycle&apos;s real prompts
+                          </button>
+                        )}
+                      </div>
                       <Textarea
                         value={selectedEssay.prompt || ''}
                         onChange={(e) => handleFieldChange('prompt', e.target.value)}
-                        placeholder="Paste the essay prompt here..."
-                        rows={2}
+                        placeholder="Paste the exact prompt here..."
+                        rows={4}
                       />
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* AI action buttons */}
               <div className="flex items-center gap-2 flex-wrap">
-                <Button onClick={handleGenerate} disabled={generating}>
-                  {generating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
-                  {generating ? 'Generating...' : 'Generate Draft'}
+                <Button onClick={handleGenerate} disabled={busy !== null}>
+                  {busy === 'generate' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
+                  {busy === 'generate' ? 'Writing…' : 'Generate draft'}
                 </Button>
-                <Button onClick={handleReview} disabled={reviewing || !selectedEssay.content} variant="outline">
-                  {reviewing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ClipboardCheck className="w-4 h-4 mr-2" />}
-                  {reviewing ? 'Reviewing...' : 'AO Review'}
+                <Button onClick={handleReview} disabled={busy !== null || !selectedEssay.content} variant="outline">
+                  {busy === 'review' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ClipboardCheck className="w-4 h-4 mr-2" />}
+                  {busy === 'review' ? 'Reviewing…' : 'Admissions review'}
                 </Button>
-                <Button onClick={handlePolish} disabled={polishing || !selectedEssay.content} variant="outline">
-                  {polishing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
-                  {polishing ? 'Polishing...' : 'Polish'}
+                <Button onClick={handlePolish} disabled={busy !== null || !selectedEssay.content} variant="outline">
+                  {busy === 'polish' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
+                  {busy === 'polish' ? 'Editing…' : 'Apply edits'}
                 </Button>
                 <div className="flex items-center gap-2 ml-auto">
-                  <Button onClick={handleSave} disabled={saving} variant="ghost" size="sm">
+                  {dirty && <span className="text-[11px] text-foreground/35">Unsaved — autosaving…</span>}
+                  <Button onClick={handleSave} disabled={saving || !dirty} variant="ghost" size="sm">
                     <Save className="w-4 h-4 mr-1.5" />
-                    {saving ? 'Saving...' : 'Save'}
+                    {saving ? 'Saving…' : 'Save'}
                   </Button>
-                  <Button onClick={() => handleDeleteEssay(selectedEssay)} disabled={generating || reviewing || polishing} variant="ghost" size="sm" className="text-destructive hover:text-destructive">
-                    <Trash2 className="w-4 h-4 mr-1.5" />
-                    Delete
+                  <Button onClick={() => handleDeleteEssay(selectedEssay)} disabled={busy !== null} variant="ghost" size="sm" className="text-destructive hover:text-destructive">
+                    <Trash2 className="w-4 h-4 mr-1.5" /> Delete
                   </Button>
                 </div>
               </div>
 
-              {/* Generation analysis */}
               {genAnalysis && (
                 <div className="bg-accent/5 border border-accent/20 rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <Sparkles className="w-4 h-4 text-accent" />
-                    <span className="text-sm font-medium">Essay Role Analysis</span>
+                    <span className="text-sm font-medium">Why this essay, in this slot</span>
                   </div>
                   <p className="text-sm text-foreground/60 leading-relaxed">{genAnalysis}</p>
+                  {genGaps.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-accent/20">
+                      <p className="text-xs font-medium text-foreground/60 mb-1.5">
+                        Fill these in yourself — the AI left them blank rather than inventing your life:
+                      </p>
+                      <ul className="space-y-1">
+                        {genGaps.map((g, i) => (
+                          <li key={i} className="text-xs text-foreground/55 flex gap-2">
+                            <span className="text-accent">→</span>{g}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Essay editor - large */}
               <div className="bg-card border border-border rounded-xl p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-sm font-medium text-foreground/50">Essay Content</span>
-                  <span className={`text-xs font-medium ${wordCount(selectedEssay.content || '') > (selectedEssay.word_limit || Infinity) ? 'text-destructive' : 'text-foreground/40'}`}>
-                    {wordCount(selectedEssay.content || '')} / {selectedEssay.word_limit || '—'} words
+                <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                  <span className="text-sm font-medium text-foreground/50">Draft</span>
+                  <span className={`text-xs font-medium ${overBy > 0 ? 'text-destructive' : 'text-foreground/40'}`}>
+                    {currentCount.toLocaleString()} / {limit ? limit.toLocaleString() : '—'} {unitLabel}
+                    {overBy > 0 && ` · ${overBy.toLocaleString()} over`}
+                    {unit === 'characters' && limit > 0 && (
+                      <span className="text-foreground/30"> · min {UCAS_RULES.perAnswerMinChars} per answer</span>
+                    )}
                   </span>
                 </div>
+                {overBy > 0 && (
+                  <div className="flex items-start gap-2 mb-3 p-2.5 rounded-lg bg-red-50 border border-red-200">
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <p className="text-xs text-red-700">
+                      This is over the limit. {unit === 'characters'
+                        ? 'UCAS rejects anything past the character cap, and it counts everything you type — including spaces.'
+                        : 'Admissions portals will not accept an over-length essay.'}
+                    </p>
+                  </div>
+                )}
                 <textarea
                   value={selectedEssay.content || ''}
                   onChange={(e) => handleFieldChange('content', e.target.value)}
-                  placeholder="Write your essay here, or click 'Generate Draft' to let AI write it based on your profile, materials, and university knowledge..."
-                  rows={30}
+                  placeholder="Write here, or let the AI draft from your profile, materials, and university research…"
+                  rows={26}
                   className="w-full rounded-lg border border-input bg-background px-4 py-3 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition placeholder:text-foreground/25 font-body"
                 />
               </div>
 
-              {/* Review panel */}
-              <EssayReviewPanel reviewResult={reviewResult} onPolish={handlePolish} polishing={polishing} />
+              <EssayReviewPanel reviewResult={reviewResult} onPolish={handlePolish} polishing={busy === 'polish'} />
             </div>
           )}
         </div>
@@ -641,9 +711,12 @@ Output ONLY the revised essay text. No commentary, no headers, no meta-text. Jus
 
       {/* New Essay Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle className="font-display">New Essay</DialogTitle>
+            <DialogDescription className="text-xs text-foreground/50">
+              The scope decides who sees this. This is the single most important choice on this screen.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
@@ -654,56 +727,290 @@ Output ONLY the revised essay text. No commentary, no headers, no meta-text. Jus
                 placeholder="e.g. Stanford Roommate Essay"
               />
             </div>
+
             <div>
-              <label className="block text-xs font-medium text-foreground/50 mb-1.5">Scope</label>
-              <Select value={newEssay.scope || 'university_specific'} onValueChange={(v) => setNewEssay({ ...newEssay, scope: v })}>
+              <label className="block text-xs font-medium text-foreground/50 mb-1.5">Who is this written for?</label>
+              <Select value={newEssay.scope} onValueChange={(v) => setNewEssay({ ...newEssay, scope: v })}>
                 <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="university_specific">For this university</SelectItem>
-                  <SelectItem value="common">Common App (shared across US schools)</SelectItem>
+                  <SelectItem value="university_specific">
+                    Only {selectedUni?.name || 'this university'}
+                  </SelectItem>
+                  <SelectItem value="common">
+                    Every {platformInfo?.short} university (shared)
+                  </SelectItem>
                 </SelectContent>
               </Select>
-              {newEssay.scope === 'common' && (
-                <p className="text-xs text-foreground/30 mt-1">Shared across all Common App universities (except UC and MIT).</p>
-              )}
+              <p className="text-xs text-foreground/40 mt-1.5 leading-relaxed">
+                {newEssay.scope === 'common'
+                  ? platformInfo?.sharedNote
+                  : `School-specific. ${PLATFORM_REQUIREMENTS[platform]?.reviewFocus || ''}`}
+              </p>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-foreground/50 mb-1.5">Type</label>
-              <Select value={newEssay.type} onValueChange={(v) => setNewEssay({ ...newEssay, type: v })}>
-                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {essayTypes.map((t) => (
-                    <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-foreground/50 mb-1.5">Type</label>
+                <Select value={newEssay.type} onValueChange={(v) => setNewEssay({ ...newEssay, type: v })}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {ESSAY_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-foreground/50 mb-1.5">Counted in</label>
+                <Select
+                  value={newEssay.limit_unit}
+                  onValueChange={(v) => setNewEssay({
+                    ...newEssay,
+                    limit_unit: v,
+                    word_limit: v === 'characters' ? 4000 : 650,
+                  })}
+                >
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="words">Words</SelectItem>
+                    <SelectItem value="characters">Characters (UCAS)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
+
             <div>
-              <label className="block text-xs font-medium text-foreground/50 mb-1.5">Prompt</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-medium text-foreground/50">Prompt</label>
+                <button
+                  onClick={() => { setDialogOpen(false); setLibraryOpen(true); }}
+                  className="text-[11px] text-accent hover:underline"
+                >
+                  Browse this cycle&apos;s prompts
+                </button>
+              </div>
               <Textarea
                 value={newEssay.prompt}
                 onChange={(e) => setNewEssay({ ...newEssay, prompt: e.target.value })}
-                placeholder="Paste the essay prompt here..."
+                placeholder="Paste the exact prompt here…"
                 rows={3}
               />
             </div>
+
             <div className="flex items-center gap-2">
               <Input
                 type="number"
-                value={newEssay.word_limit}
-                onChange={(e) => setNewEssay({ ...newEssay, word_limit: e.target.value })}
-                placeholder="Word limit"
-                className="w-28"
+                value={newEssay.word_limit ?? ''}
+                onChange={(e) => setNewEssay({
+                  ...newEssay,
+                  word_limit: e.target.value === '' ? null : Number(e.target.value),
+                })}
+                className="w-32"
               />
-              <span className="text-xs text-foreground/40">word limit</span>
+              <span className="text-xs text-foreground/40">
+                {newEssay.limit_unit === 'characters' ? 'characters (including spaces)' : 'words'}
+              </span>
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleCreateEssay} disabled={!newEssay.title}>Create Essay</Button>
+            <Button
+              onClick={handleCreateEssay}
+              disabled={!newEssay.title || (newEssay.scope === 'university_specific' && !selectedUni)}
+            >
+              Create Essay
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PromptLibraryDialog
+        open={libraryOpen}
+        onOpenChange={setLibraryOpen}
+        platform={platform}
+        onApply={(draft) => {
+          if (selectedEssay) {
+            handleFieldChange('prompt', draft.prompt);
+            handleFieldChange('title', draft.title || selectedEssay.title);
+            handleFieldChange('word_limit', Number(draft.word_limit) || selectedEssay.word_limit);
+            handleFieldChange('limit_unit', draft.limit_unit || limitUnitFor(selectedEssay));
+            toast.success('Prompt applied');
+          } else {
+            setNewEssay((prev) => ({
+              ...prev,
+              title: draft.title,
+              prompt: draft.prompt,
+              word_limit: Number(draft.word_limit) || prev.word_limit,
+              limit_unit: draft.limit_unit || prev.limit_unit,
+              type: draft.type || prev.type,
+            }));
+            setDialogOpen(true);
+          }
+        }}
+      />
     </div>
+  );
+}
+// ---------------------------------------------------------------------------
+// The researched prompt library — the real 2026-27 requirements, in-app.
+// ---------------------------------------------------------------------------
+function PromptLibraryDialog({ open, onOpenChange, platform, onApply }) {
+  const groups = useMemo(() => {
+    const out = [];
+    if (platform === 'common_app') {
+      out.push({
+        key: 'ca-personal',
+        title: 'Common App Personal Statement',
+        note: 'One essay, 250-650 words, sent identically to every Common App school on your list. Choose one prompt.',
+        items: COMMON_APP_PROMPTS.map((p) => ({
+          key: p.key,
+          label: `Prompt ${p.number} — ${p.label}`,
+          meta: `${p.share}% of applicants chose this last cycle`,
+          prompt: p.text,
+          role: p.role,
+          warn: p.watchOut,
+          word_limit: 650,
+          limit_unit: 'words',
+          type: 'personal_statement',
+        })),
+      });
+      out.push({
+        key: 'ca-other',
+        title: 'Common App — other writing',
+        note: 'Only needed if you have something to add. Most applicants need neither of these.',
+        items: [
+          { key: 'ca-additional', label: 'Additional Information (300 words)', meta: 'Optional', prompt: 'Use this space for anything else that is important: a gap year, a change of name, a health or family circumstance, or a project you want to explain. Shared with every Common App school.', role: 'Context, not storytelling. It is read after the personal statement, so it only matters if it changes how the rest of the file is read.', word_limit: 300, limit_unit: 'words', type: 'other' },
+          { key: 'ca-challenges', label: 'Challenges and Circumstances (250 words)', meta: 'Optional — leave empty unless you have an exceptional circumstance', prompt: 'If there has been a significant personal, academic, or work challenge that has affected your work or activities, you may discuss it here. Shared with every Common App school.', role: 'Reserved for genuine exceptional circumstances. Using it without a real reason reads as an appeal for sympathy.', word_limit: 250, limit_unit: 'words', type: 'other' },
+        ],
+      });
+    }
+    if (platform === 'uc') {
+      out.push({
+        key: 'uc',
+        title: `UC Personal Insight Questions (answer ${UC_RULES.pick} of ${UC_RULES.of})`,
+        note: UC_RULES.note,
+        items: UC_PIQS.map((q) => ({
+          key: q.key,
+          label: `PIQ ${q.number} — ${q.theme}`,
+          meta: `${q.limit} words`,
+          prompt: q.prompt,
+          role: q.role,
+          word_limit: q.limit,
+          limit_unit: 'words',
+          type: 'supplemental',
+        })),
+      });
+    }
+    if (platform === 'ucas') {
+      out.push({
+        key: 'ucas',
+        title: `UCAS Personal Statement — ${UCAS_RULES.totalChars.toLocaleString()} characters`,
+        note: UCAS_RULES.note,
+        items: [{
+          key: 'ucas-all',
+          label: 'The full three-question statement',
+          meta: `${UCAS_RULES.totalChars.toLocaleString()} characters total, ${UCAS_RULES.perAnswerMinChars} minimum per answer`,
+          prompt: UCAS_QUESTIONS.map((q) => `${q.number}. ${q.prompt}\n   (minimum ${q.minChars} characters — aim for ${q.suggestedShare})`).join('\n\n'),
+          role: UCAS_RULES.academicBias,
+          word_limit: UCAS_RULES.totalChars,
+          limit_unit: 'characters',
+          type: 'personal_statement',
+        }],
+      });
+    }
+    if (platform === 'coalition') {
+      out.push({
+        key: 'coalition',
+        title: 'Coalition Application',
+        note: PLATFORMS.coalition.sharedNote,
+        items: [{
+          key: 'coalition-personal',
+          label: 'Coalition Personal Essay',
+          meta: '500-650 words',
+          prompt: 'Write the Coalition Application personal essay. One essay is sent to every Coalition member school on your list, so keep it free of school-specific references.',
+          role: PLATFORMS.coalition.sharedNote,
+          word_limit: 650,
+          limit_unit: 'words',
+          type: 'personal_statement',
+        }],
+      });
+    }
+    if (platform === 'direct' || platform === 'other') {
+      out.push({
+        key: 'direct',
+        title: 'School-specific writing',
+        note: 'Nothing is shared on this platform, so every prompt comes from the university itself. Research the school in the Knowledge Base and paste the exact prompts.',
+        items: [{
+          key: 'direct-why',
+          label: 'Typical “Why this school?” shape',
+          meta: 'Varies by school',
+          prompt: 'Paste the exact prompt from the university\'s own application portal here. Schools that run their own portal usually ask shorter, more specific questions than a supplement would — often with hard word caps.',
+          role: PLATFORM_REQUIREMENTS[platform]?.reviewFocus,
+          word_limit: 650,
+          limit_unit: 'words',
+          type: 'why_this_school',
+        }],
+      });
+    }
+    return out;
+  }, [platform]);
+
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => { setExpanded(null); }, [platform]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="font-display">Prompt library — {PLATFORMS[platform]?.label}</DialogTitle>
+          <DialogDescription className="text-xs text-foreground/50">
+            The real requirements for the {PLATFORMS[platform]?.short} 2026-27 cycle (Fall 2027 entry), with what
+            each prompt is actually testing. Pick one to paste it into your essay.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-5 py-2">
+          {groups.map((group) => (
+            <div key={group.key}>
+              <h3 className="font-display text-base font-semibold mb-1">{group.title}</h3>
+              <p className="text-xs text-foreground/45 mb-2.5 leading-relaxed">{group.note}</p>
+              <div className="space-y-2">
+                {group.items.map((item) => (
+                  <div key={item.key} className="border border-border rounded-lg overflow-hidden">
+                    <button
+                      onClick={() => setExpanded(expanded === item.key ? null : item.key)}
+                      className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-muted/40 transition"
+                    >
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium">{item.label}</span>
+                        <span className="block text-[11px] text-foreground/40">{item.meta}</span>
+                      </span>
+                      <ChevronDown className={`w-4 h-4 text-foreground/40 shrink-0 transition-transform ${expanded === item.key ? 'rotate-180' : ''}`} />
+                    </button>
+                    {expanded === item.key && (
+                      <div className="px-4 pb-4 space-y-2.5 border-t border-border pt-3">
+                        <p className="text-sm text-foreground/70 leading-relaxed italic">“{item.prompt}”</p>
+                        {item.role && (
+                          <p className="text-xs text-foreground/50 leading-relaxed">
+                            <span className="font-medium">What it is testing: </span>{item.role}
+                          </p>
+                        )}
+                        {item.warn && (
+                          <p className="text-xs text-amber-700 leading-relaxed flex items-start gap-1.5">
+                            <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />{item.warn}
+                          </p>
+                        )}
+                        <Button size="sm" onClick={() => onApply({ ...item, title: item.label })}>
+                          Use this prompt
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -11,7 +11,12 @@
 //     model?: string,                     // provider model or alias
 //     max_tokens?: number
 //   }
-// Response: { ok: true, result: <string|object> }
+// Response: { ok: true, result: <string|object>, meta: {...} }
+//
+// `meta` is new and purely additive — older clients that only read `result`
+// keep working. It tells the UI what actually happened, which is what the
+// Knowledge Base / Essay Builder screens need in order to stop guessing:
+//   { provider, model, grounded, demo, warning, finish_reason }
 //
 // This module is used BOTH as a Vercel function (export default) and by the
 // Vite dev server middleware (export handleInvokeLLM), so it must not assume
@@ -23,20 +28,24 @@ import { createClient } from '@supabase/supabase-js';
 // Model aliases used in the frontend (kept compatible with the old Base44
 // aliases such as `gemini_3_flash`).
 // ---------------------------------------------------------------------------
+// Legacy Base44 aliases -> current Gemini API model IDs.
+// The `*-latest` pointers are used deliberately: Google retires concrete model
+// IDs regularly, and a stale ID would otherwise make every AI feature fail.
+// Anyone who needs a pinned model sets GEMINI_MODEL in Vercel.
 const GEMINI_ALIASES = {
-  gemini_3_flash: 'gemini-3-flash',
-  gemini_3_pro: 'gemini-3-pro',
+  gemini_3_flash: 'gemini-flash-latest',
+  gemini_3_pro: 'gemini-pro-latest',
   gemini_2_5_flash: 'gemini-2.5-flash',
   gemini_2_5_pro: 'gemini-2.5-pro',
   gemini_2_0_flash: 'gemini-2.0-flash',
-  gemini_flash: 'gemini-2.5-flash',
-  gemini_pro: 'gemini-2.5-pro',
+  gemini_flash: 'gemini-flash-latest',
+  gemini_pro: 'gemini-pro-latest',
 };
 
 const PROVIDER_DEFAULTS = {
-  gemini: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+  gemini: process.env.GEMINI_MODEL || 'gemini-flash-latest',
   openai: process.env.OPENAI_MODEL || 'gpt-4o',
-  anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+  anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
 };
 
 function detectProvider() {
@@ -142,8 +151,33 @@ Respond with ONLY one valid JSON object that strictly matches this JSON Schema. 
 ${JSON.stringify(responseJsonSchema)}`;
 }
 
+/**
+ * Turn a raw provider failure into a message an applicant can act on.
+ * The old code forwarded provider strings verbatim, which is how "AI not
+ * working" became undiagnosable — this maps the common cases explicitly.
+ */
+function explainProviderError(provider, message, status) {
+  const m = String(message || '');
+  if (status === 429 || /rate limit|quota|resource_exhausted/i.test(m)) {
+    return 'The AI provider is rate-limiting you (quota or requests-per-minute exceeded). Wait a minute, or check the billing/quota page for your key in Vercel → Environment Variables.';
+  }
+  if (status === 401 || status === 403 || /api key not valid|permission denied|unauthorized/i.test(m)) {
+    return `Your ${provider.toUpperCase()} API key was rejected. It is missing, expired, or has the wrong permissions — re-check the key in Vercel → Environment Variables.`;
+  }
+  if (/billing|credit balance|payment required/i.test(m)) {
+    return `Your ${provider.toUpperCase()} account has no remaining credit. Add credit, or switch to a different provider key.`;
+  }
+  if (status === 404 || /not found|not supported/i.test(m)) {
+    return `The configured ${provider.toUpperCase()} model does not exist or is not available to this key. Set the *_MODEL env var to a model your key can call (see DEPLOYMENT.md).`;
+  }
+  if (/safety|blocked|prohibited_content/i.test(m)) {
+    return 'The provider blocked this request for safety reasons. Rephrase the request (usually caused by copying a copyrighted essay verbatim) and try again.';
+  }
+  return m;
+}
+
 // ---------------------------------------------------------------------------
-// Provider adapters -> { text } or throw Error
+// Provider adapters -> { text, finishReason } or throw Error
 // ---------------------------------------------------------------------------
 async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTokens }) {
   const key = process.env.GEMINI_API_KEY;
@@ -152,6 +186,7 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
   const aliases = GEMINI_ALIASES;
   let resolved = aliases[model] || model || PROVIDER_DEFAULTS.gemini;
   const wantsJson = !!responseJsonSchema && !addContext;
+  let finishReason = '';
 
   const call = async (modelName) => {
     const generationConfig = {};
@@ -180,19 +215,29 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
       const msg = data?.error?.message || `Gemini request failed (HTTP ${res.status})`;
       const err = new Error(msg);
       err.status = res.status;
+      err.provider = 'gemini';
       throw err;
     }
-    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const candidate = data?.candidates?.[0];
+    finishReason = candidate?.finishReason || '';
+    const parts = candidate?.content?.parts || [];
     return parts.map((p) => p.text || '').join('');
   };
 
+  // `call` assigns finishReason before resolving, so reading it here is safe.
+  const run = async (modelName) => ({
+    text: await call(modelName),
+    model: modelName,
+    finishReason,
+  });
+
   try {
-    return await call(resolved);
+    return await run(resolved);
   } catch (e) {
     // If the requested/alias model does not exist, fall back once.
     if (e.status === 404 && resolved !== PROVIDER_DEFAULTS.gemini) {
       resolved = PROVIDER_DEFAULTS.gemini;
-      return call(resolved);
+      return run(resolved);
     }
     throw e;
   }
@@ -218,8 +263,13 @@ async function callOpenAI({ prompt, responseJsonSchema, model, maxTokens }) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `OpenAI request failed (HTTP ${res.status})`);
-  return data?.choices?.[0]?.message?.content || '';
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `OpenAI request failed (HTTP ${res.status})`);
+    err.status = res.status;
+    err.provider = 'openai';
+    throw err;
+  }
+  return { text: data?.choices?.[0]?.message?.content || '', model: body.model, finishReason: data?.choices?.[0]?.finish_reason || '' };
 }
 
 async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens }) {
@@ -241,8 +291,33 @@ async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens }) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Anthropic request failed (HTTP ${res.status})`);
-  return (data?.content || []).map((b) => b.text || '').join('');
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `Anthropic request failed (HTTP ${res.status})`);
+    err.status = res.status;
+    err.provider = 'anthropic';
+    throw err;
+  }
+  return {
+    text: (data?.content || []).map((b) => b.text || '').join(''),
+    model: body.model,
+    finishReason: data?.stop_reason || '',
+  };
+}
+
+// Providers retire model IDs on their own schedule. If a caller-supplied model
+// is no longer offered, retry once with the provider default so a stale
+// preference degrades to "slightly different model" rather than a hard failure.
+async function callWithModelFallback(call, requested, fallback) {
+  try {
+    return await call(requested);
+  } catch (e) {
+    const missingModel = e?.status === 404
+      || e?.status === 400
+      || /model_not_found|does not exist|not found|deprecat|invalid model/i.test(e?.message || '');
+    if (!missingModel || !fallback || requested === fallback) throw e;
+    console.warn(`[invoke-llm] model "${requested}" unavailable, falling back to "${fallback}"`);
+    return call(fallback);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,14 +364,14 @@ export async function handleInvokeLLM(req, res) {
     const header = req.headers?.authorization || req.headers?.Authorization || '';
     const token = String(header).replace(/^Bearer\s+/i, '').trim();
     if (!token) {
-      send(res, 401, { error: 'Missing Authorization bearer token.' });
+      send(res, 401, { error: 'Your session is missing, so the AI endpoint rejected the request. Sign out and sign back in.' });
       return;
     }
     try {
       const sb = createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false } });
       const { data, error } = await sb.auth.getUser(token);
       if (error || !data?.user) {
-        send(res, 401, { error: 'Invalid or expired session. Please log in again.' });
+        send(res, 401, { error: 'Your session has expired. Sign out and sign back in — the AI endpoint only accepts a valid Supabase session.' });
         return;
       }
     } catch (e) {
@@ -306,10 +381,15 @@ export async function handleInvokeLLM(req, res) {
   }
 
   // --- Provider selection ---
-  // Internet-grounded research needs Google Search grounding -> prefer Gemini.
-  const provider = (addContext && process.env.GEMINI_API_KEY)
-    ? 'gemini'
-    : detectProvider();
+  // Internet-grounded research needs Google Search grounding -> only Gemini.
+  // When a non-Gemini key is the active provider we still answer (so the
+  // screen is usable), but we say out loud that the answer is NOT web-grounded.
+  const provider = detectProvider();
+  const groundingRequested = !!addContext;
+  const groundingPossible = groundingRequested && provider === 'gemini' && !!process.env.GEMINI_API_KEY;
+  const groundingWarning = groundingRequested && !groundingPossible
+    ? 'Web search grounding is only available with Gemini. Set GEMINI_API_KEY and LLM_PROVIDER=gemini in Vercel to get live, source-checked university research — this answer came from the model\'s own knowledge.'
+    : '';
 
   if (!provider || !apiKeyFor(provider)) {
     // No AI key configured (typical for first-run Demo mode): return clearly
@@ -317,46 +397,90 @@ export async function handleInvokeLLM(req, res) {
     // stays explorable. This is never mistaken for real output — every string
     // is explicitly marked, and real keys switch it off automatically.
     const demoText = 'DEMO OUTPUT — no AI provider is connected yet. Add GEMINI_API_KEY (recommended), OPENAI_API_KEY, or ANTHROPIC_API_KEY to your Vercel project (or .env.local) to get real, deeply-researched, university-specific writing. See DEPLOYMENT.md, Part 2.';
-    if (responseJsonSchema) {
-      send(res, 200, { ok: true, result: demoSchemaValue(responseJsonSchema, demoText) });
-      return;
-    }
-    send(res, 200, { ok: true, result: demoText });
+    send(res, 200, {
+      ok: true,
+      result: responseJsonSchema ? demoSchemaValue(responseJsonSchema, demoText) : demoText,
+      meta: {
+        provider: provider || 'none',
+        model: null,
+        grounded: false,
+        demo: true,
+        warning: 'No AI provider key is configured on the server, so this is placeholder text — not a real answer.',
+      },
+    });
     return;
   }
 
   const finalPrompt = buildPrompt(prompt, responseJsonSchema);
 
   try {
-    let text = '';
+    let out;
     if (provider === 'gemini') {
-      text = await callGemini({ prompt: finalPrompt, responseJsonSchema, addContext, model, maxTokens });
+      out = await callGemini({
+        prompt: finalPrompt,
+        responseJsonSchema,
+        addContext: groundingPossible,
+        model,
+        maxTokens,
+      });
     } else if (provider === 'openai') {
-      text = await callOpenAI({ prompt: finalPrompt, responseJsonSchema, model, maxTokens });
+      out = await callWithModelFallback(
+        (m) => callOpenAI({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens }),
+        model && !model.startsWith('gemini') && !model.startsWith('claude') ? model : PROVIDER_DEFAULTS.openai,
+        PROVIDER_DEFAULTS.openai,
+      );
     } else if (provider === 'anthropic') {
-      text = await callAnthropic({ prompt: finalPrompt, responseJsonSchema, model, maxTokens });
+      out = await callWithModelFallback(
+        (m) => callAnthropic({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens }),
+        model && model.startsWith('claude') ? model : PROVIDER_DEFAULTS.anthropic,
+        PROVIDER_DEFAULTS.anthropic,
+      );
     } else {
       send(res, 503, { error: `Unknown LLM_PROVIDER "${provider}". Use gemini | openai | anthropic.` });
       return;
     }
 
+    const text = out.text || '';
+    if (!text.trim()) {
+      send(res, 502, {
+        error: out.finishReason === 'MAX_TOKENS'
+          ? 'The AI ran out of output space before finishing. Shorten the request or raise max_tokens.'
+          : 'The AI returned an empty response. This usually means the provider blocked the prompt — try rephrasing, or raise max_tokens.',
+      });
+      return;
+    }
+
+    const meta = {
+      provider,
+      model: out.model || null,
+      grounded: groundingPossible,
+      demo: false,
+      finish_reason: out.finishReason || '',
+      warning: groundingWarning
+        || (out.finishReason === 'MAX_TOKENS'
+          ? 'The response hit the model output cap and may be incomplete.'
+          : ''),
+    };
+
     if (responseJsonSchema) {
       const parsed = extractJSON(text);
       if (!parsed) {
         send(res, 502, {
-          error: 'Model did not return valid JSON. Please retry.',
+          error: 'The AI did not return valid JSON. Please retry.',
           raw_preview: String(text).slice(0, 400),
         });
         return;
       }
-      send(res, 200, { ok: true, result: parsed });
+      send(res, 200, { ok: true, result: parsed, meta });
       return;
     }
 
-    send(res, 200, { ok: true, result: String(text) });
+    send(res, 200, { ok: true, result: String(text), meta });
   } catch (e) {
     const status = e.status === 429 ? 429 : e.status === 401 || e.status === 403 ? 402 : 502;
-    send(res, status, { error: e.message || 'LLM call failed.' });
+    send(res, status, {
+      error: explainProviderError(e.provider || provider, e.message, e.status),
+    });
   }
 }
 

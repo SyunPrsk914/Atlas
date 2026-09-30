@@ -4,13 +4,23 @@
 // explored before any keys are configured. A banner in the app makes the mode
 // obvious. Do NOT use this for real data — connect Supabase for that.
 
-import { invokeLLM } from './llmClient';
+import { invokeLLM, invokeLLMDetailed } from './llmClient';
+import { makeError } from '@/lib/aiError';
 
 const DB_KEY = 'atlas_demo_db_v1';
 const TOKEN_KEY = 'atlas_access_token';
 const USER_KEY = 'atlas_demo_user';
 
-const TABLES = ['universities', 'essays', 'materials', 'profiles', 'roadmap_tasks', 'college_knowledge'];
+// Entity name -> localStorage table (must mirror supabaseBackend's TABLES map,
+// otherwise pages calling base44.entities.University get `undefined`).
+const TABLES = {
+  University: 'universities',
+  Essay: 'essays',
+  Material: 'materials',
+  Profile: 'profiles',
+  RoadmapTask: 'roadmap_tasks',
+  CollegeKnowledge: 'college_knowledge',
+};
 
 const now = () => new Date().toISOString();
 const uid = () => (globalThis.crypto?.randomUUID
@@ -40,9 +50,7 @@ export function createLocalBackend() {
   const requireUser = () => {
     const raw = window.localStorage.getItem(USER_KEY);
     if (!raw) {
-      const e = new Error('Not authenticated');
-      e.status = 401;
-      throw e;
+      throw makeError('Not authenticated', { status: 401 });
     }
     return JSON.parse(raw);
   };
@@ -192,13 +200,21 @@ export function createLocalBackend() {
 
   return {
     isSupabase: false,
-    entities: Object.fromEntries(TABLES.map((name) => [name, makeEntity(name)])),
+    entities: Object.fromEntries(
+      Object.entries(TABLES).map(([entity, table]) => [entity, makeEntity(table)]),
+    ),
+    // localStorage has no schema, so every optional column is always writable.
+    capabilities: { missingOptionalColumns: () => [] },
     auth,
     integrations: {
       Core: {
         // Same endpoint as production. Without a configured provider the API
         // returns schema-shaped DEMO content so every screen is explorable.
         InvokeLLM: (params) => invokeLLM(params, getAuthToken),
+
+        // Additive: same call, plus the server's `meta` block (grounding, demo
+        // placeholders, truncation) so the UI never has to guess.
+        InvokeLLMDetailed: (params) => invokeLLMDetailed(params, getAuthToken),
 
         UploadPublicFile: async ({ file }) => new Promise((resolve, reject) => {
           const reader = new FileReader();
