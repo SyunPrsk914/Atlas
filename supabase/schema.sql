@@ -80,7 +80,7 @@ create table if not exists public.materials (
   updated_at timestamptz not null default now(),
   title text not null,
   type text not null default 'document'
-    check (type in ('document', 'link', 'essay', 'resume', 'transcript', 'award', 'note', 'other')),
+    check (type in ('document', 'link', 'essay', 'sample_essay', 'resume', 'transcript', 'award', 'note', 'other')),
   content text,
   file_url text,
   link_url text,
@@ -218,6 +218,27 @@ alter table public.profiles add column if not exists duolingo_english numeric;
 alter table public.profiles add column if not exists test_policy text;
 alter table public.profiles add column if not exists funding_source text;
 
+-- materials.type must accept sample_essay (someone else's successful essay).
+-- The original inline check does not, and create table if not exists will not
+-- update it. Drop whichever type check is present and replace it.
+do $$
+declare cname text;
+begin
+  for cname in
+    select con.conname
+    from pg_constraint con
+    where con.conrelid = 'public.materials'::regclass
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) ilike '%type%'
+  loop
+    execute format('alter table public.materials drop constraint %I', cname);
+  end loop;
+end $$;
+
+alter table public.materials
+  add constraint materials_type_check
+  check (type in ('document', 'link', 'essay', 'sample_essay', 'resume', 'transcript', 'award', 'note', 'other'));
+
 -- ---------------------------------------------------------------------------
 -- Storage: public "uploads" bucket (replaces Base44 UploadPublicFile)
 -- Files are stored under {user-id}/{timestamp}-{filename}; users can only
@@ -247,3 +268,7 @@ create policy "uploads_delete_own" on storage.objects
 create policy "uploads_select_all" on storage.objects
   for select
   using (bucket_id = 'uploads');
+
+-- PostgREST caches the schema. Without this, a column or check added above
+-- is invisible until the project restarts, and the app reports it as missing.
+notify pgrst, 'reload schema';

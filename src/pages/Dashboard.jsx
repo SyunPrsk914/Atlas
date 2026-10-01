@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { daysUntil } from '@/lib/dates';
 import {
   getUniversityPlatform, PLATFORMS, buildSharedEssayPlan, isSharedEssay,
-  normalizeUniversityName,
+  universityNamesMatch,
 } from '@/lib/essayScope';
 
 export default function Dashboard() {
@@ -56,7 +56,7 @@ export default function Dashboard() {
     for (const u of universities) {
       const platform = getUniversityPlatform(u);
       const researched = knowledge.some(
-        (k) => normalizeUniversityName(k.university_name) === normalizeUniversityName(u.name),
+        (k) => universityNamesMatch(k.university_name, u.name),
       );
       if (!researched) {
         actions.push({

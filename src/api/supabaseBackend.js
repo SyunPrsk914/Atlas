@@ -379,13 +379,19 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
         cols.filter((c) => !(c in (COLUMNS[table] || {})))),
 
       async probe() {
+        // PostgREST names one missing column per error. Asking for every
+        // optional column at once used to stop after the first, so the banner
+        // under-reported what would be dropped on save.
         for (const [table, cols] of Object.entries(OPTIONAL_COLUMNS)) {
-          const stillExpected = cols.filter((c) => c in (COLUMNS[table] || {}));
-          if (stillExpected.length === 0) continue;
-          const { error } = await supabase.from(table).select(stillExpected.join(',')).limit(1);
-          if (!error || !isMissingColumnError(error)) continue;
-          for (const c of stillExpected) {
-            if (error.message.includes(c)) delete COLUMNS[table][c];
+          let pending = cols.filter((c) => c in (COLUMNS[table] || {}));
+          while (pending.length) {
+            const { error } = await supabase.from(table).select(pending.join(',')).limit(1);
+            if (!error || !isMissingColumnError(error)) break;
+            const named = [...pending].sort((a, b) => b.length - a.length)
+              .find((c) => error.message.includes(c));
+            if (!named) break;
+            delete COLUMNS[table][named];
+            pending = pending.filter((c) => c !== named);
           }
         }
         return this.missingOptionalColumns();

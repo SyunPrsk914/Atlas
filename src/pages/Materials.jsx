@@ -11,28 +11,34 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import {
   Plus, Trash2, FileText, Link as LinkIcon, Upload, File, Award, StickyNote,
   Loader2, Pencil, ScanText, ChevronDown, CircleAlert, CheckCircle2, Info,
-  TriangleAlert, Sparkles,
+  TriangleAlert, Sparkles, BookOpen,
 } from 'lucide-react';
 import { runAI } from '@/lib/ai';
 import {
   buildEssayAnalysisPrompt, ESSAY_ANALYSIS_SCHEMA, normalizeAnalysis,
   localSignals, FINDING_KINDS,
 } from '@/lib/materialAnalysis';
+import {
+  MATERIAL_TYPES, presentMaterial, materialWritePayload, isMaterialTypeCheckError, isSampleMaterial,
+} from '@/lib/materialRole';
 
-const materialTypes = [
-  { value: 'document', label: 'Document', icon: File },
-  { value: 'link', label: 'Link / Website', icon: LinkIcon },
-  { value: 'essay', label: 'Past Essay', icon: FileText },
-  { value: 'resume', label: 'Resume / CV', icon: FileText },
-  { value: 'transcript', label: 'Transcript', icon: File },
-  { value: 'award', label: 'Award / Certificate', icon: Award },
-  { value: 'note', label: 'Note / Context', icon: StickyNote },
-  { value: 'other', label: 'Other', icon: File },
-];
+const TYPE_ICONS = {
+  document: File,
+  link: LinkIcon,
+  essay: FileText,
+  sample_essay: BookOpen,
+  resume: FileText,
+  transcript: File,
+  award: Award,
+  note: StickyNote,
+  other: File,
+};
+
+const materialTypes = MATERIAL_TYPES.map((t) => ({ ...t, icon: TYPE_ICONS[t.value] || File }));
 
 // Materials that are actual prose are worth a word-level read; a bare URL or a
 // certificate stub is not, so the Analyze button only appears where it helps.
-const ANALYZABLE = new Set(['essay', 'resume', 'transcript', 'note', 'document']);
+const ANALYZABLE = new Set(['essay', 'sample_essay', 'resume', 'transcript', 'note', 'document']);
 
 const typeIcon = (type) => materialTypes.find((t) => t.value === type)?.icon || File;
 
@@ -250,7 +256,7 @@ export default function Materials() {
   const loadData = async () => {
     try {
       const mats = await base44.entities.Material.list();
-      setMaterials(mats);
+      setMaterials(mats.map(presentMaterial));
     } catch (e) {
       console.error(e);
       toast.error('Could not load your materials', { description: e.message });
@@ -268,8 +274,9 @@ export default function Materials() {
   };
 
   const openEdit = (mat) => {
-    setEditingMaterial(mat);
-    setForm({ title: mat.title, type: mat.type, content: mat.content || '', link_url: mat.link_url || '', notes: mat.notes || '' });
+    const shown = presentMaterial(mat);
+    setEditingMaterial(shown);
+    setForm({ title: shown.title, type: shown.type, content: shown.content || '', link_url: shown.link_url || '', notes: shown.notes || '' });
     setFile(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     setDialogOpen(true);
@@ -296,13 +303,25 @@ export default function Materials() {
         // Re-saving from the dialog must never silently drop a stored analysis.
         ...(editingMaterial?.analysis ? { analysis: editingMaterial.analysis } : {}),
       };
+      const write = async (body) => (editingMaterial
+        ? base44.entities.Material.update(editingMaterial.id, body)
+        : base44.entities.Material.create(body));
+      let saved;
+      try {
+        saved = await write(materialWritePayload(payload));
+      } catch (error) {
+        if (!isMaterialTypeCheckError(error)) throw error;
+        saved = await write(materialWritePayload(payload, { forceLegacy: true }));
+        toast.message('Saved as a sample essay', {
+          description: 'This database still rejects the new type. Re-run supabase/schema.sql in the Supabase SQL editor so it is stored as its own type. Until then Atlas keeps a marker in the notes.',
+        });
+      }
+      const shown = presentMaterial(saved);
       if (editingMaterial) {
-        const updated = await base44.entities.Material.update(editingMaterial.id, payload);
-        setMaterials((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+        setMaterials((prev) => prev.map((m) => (m.id === shown.id ? shown : m)));
         toast.success('Material updated');
       } else {
-        const created = await base44.entities.Material.create(payload);
-        setMaterials((prev) => [...prev, created]);
+        setMaterials((prev) => [...prev, shown]);
         toast.success('Material added');
       }
       setDialogOpen(false);
@@ -354,7 +373,7 @@ export default function Materials() {
 
       try {
         const updated = await base44.entities.Material.update(mat.id, { analysis });
-        setMaterials((prev) => prev.map((m) => (m.id === mat.id ? { ...m, ...updated, analysis } : m)));
+        setMaterials((prev) => prev.map((m) => (m.id === mat.id ? presentMaterial({ ...m, ...updated, analysis }) : m)));
       } catch {
         // The `analysis` column is an optional upgrade — keep the result usable
         // in this session even when the database has not been updated yet.
@@ -396,8 +415,8 @@ export default function Materials() {
         <div>
           <h1 className="font-display text-3xl font-semibold tracking-tight">Materials</h1>
           <p className="text-foreground/50 mt-1.5">
-            Upload documents, links, past essays, and context. Every piece here is read word by word by the AI
-            and feeds your essays and reviews.
+            Your own documents, links, and past essays are evidence about you. A successful essay is someone
+            else’s writing — Atlas studies the craft and must not treat that life as yours.
           </p>
           {materials.length > 0 && (
             <p className="text-xs text-foreground/40 mt-1">
@@ -430,8 +449,8 @@ export default function Materials() {
           <FileText className="w-10 h-10 text-foreground/20 mx-auto mb-4" />
           <h3 className="font-display text-lg font-medium mb-1">No materials yet</h3>
           <p className="text-sm text-foreground/40 mb-5 max-w-md mx-auto">
-            Paste in a past essay, a resume, or anything that shows how you write. Atlas reads it word by word
-            and tells you exactly what to fix.
+            Paste a past essay or a resume of your own, or a successful essay you want studied as a sample.
+            Atlas reads the words you give it. A sample is never treated as your life.
           </p>
           <Button onClick={openAdd}>
             <Plus className="w-4 h-4 mr-2" />
@@ -567,6 +586,12 @@ export default function Materials() {
                   ))}
                 </SelectContent>
               </Select>
+              {isSampleMaterial({ type: form.type }) && (
+                <p className="text-xs text-foreground/50 mt-1.5 leading-relaxed">
+                  This is not your writing. Reviews will study its content, expression, voice, tone, and word
+                  choice, and will not score it as your essay or borrow its biography.
+                </p>
+              )}
             </div>
             <div>
               <Label className="block text-xs font-medium text-foreground/50 mb-1.5">Upload File (optional)</Label>

@@ -8,12 +8,15 @@
 //   base44.app.getPublicSettings
 //
 // Backends:
-//   * Supabase (Postgres + Auth + Storage)  — when VITE_SUPABASE_URL and
-//     VITE_SUPABASE_ANON_KEY are set. This is the production path (Vercel +
-//     Supabase; see DEPLOYMENT.md).
+//   * Supabase (Postgres + Auth + Storage)  — when a real project URL and anon
+//     key resolve from VITE_*, NEXT_PUBLIC_*, or SUPABASE_* (see vite.config.js).
 //   * localStorage demo mode               — when they are not set, so the UI
 //     runs with zero configuration. Data stays in this browser only.
+//
+// A set-but-invalid URL is not passed to createClient. That used to throw
+// "Invalid supabaseUrl" and take the Knowledge Base down with it.
 
+import { resolveSupabaseConfig } from '../../api/supabaseConfig.js';
 import { createSupabaseBackend } from './supabaseBackend';
 import { createLocalBackend } from './localBackend';
 
@@ -28,11 +31,23 @@ if (typeof window !== 'undefined') {
   } catch { /* no window URL (SSR/tests) */ }
 }
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// Vite inlines these. vite.config.js fills them from whichever public env name
+// actually holds a valid project URL and anon key.
+const supabaseConfig = resolveSupabaseConfig({
+  VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL,
+  VITE_SUPABASE_ANON_KEY: import.meta.env.VITE_SUPABASE_ANON_KEY,
+});
 
-export const isDemoMode = !(supabaseUrl && supabaseAnonKey);
+// vite.config.js inlines this from every public env name, including a bad
+// SUPABASE_URL that never reaches the browser as a URL.
+const inlinedProblem = import.meta.env.VITE_SUPABASE_CONFIG_PROBLEM || '';
 
-export const base44 = isDemoMode
-  ? createLocalBackend()
-  : createSupabaseBackend(supabaseUrl, supabaseAnonKey);
+export const supabaseConfigProblem = supabaseConfig.configured
+  ? ''
+  : (inlinedProblem || supabaseConfig.invalidReason || supabaseConfig.problems[0] || '');
+
+export const isDemoMode = !supabaseConfig.configured;
+
+export const base44 = supabaseConfig.configured
+  ? createSupabaseBackend(supabaseConfig.url, supabaseConfig.key)
+  : createLocalBackend();

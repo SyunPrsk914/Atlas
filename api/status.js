@@ -8,6 +8,8 @@
 //
 // GET /api/status -> { ok, configured, provider, model, grounding, ... }
 
+import { resolveSupabaseConfig } from './supabaseConfig.js';
+
 function send(res, status, payload) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -47,10 +49,14 @@ export async function handleStatus(req, res) {
     return;
   }
 
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const supabaseConfig = resolveSupabaseConfig(process.env);
   send(res, 200, {
     ok: true,
-    supabase_configured: !!supabaseUrl,
+    supabase_configured: supabaseConfig.configured,
+    // A problem string, never the URL or the key.
+    supabase_problem: supabaseConfig.configured
+      ? null
+      : (supabaseConfig.invalidReason || supabaseConfig.problems[0] || null),
     llm_allow_anon: process.env.LLM_ALLOW_ANON === 'true',
     ...readEnvStatus(),
   });

@@ -6,20 +6,15 @@
 // nobody ever saw the IB subject breakdown properly. Every AI feature now
 // builds its context from `buildProfileContext()` so they cannot drift apart.
 
-import { serializeIbSubjects, parseIbSubjects } from './profileOptions';
+import { parseIbRecord, ibRecordLines, subjectDisplayName, hlCount } from './ibDiploma';
 
 const fmt = (v) => (v === null || v === undefined || v === '' ? null : String(v));
 
-/** IB subjects: prefer the structured picker, fall back to parsing free text. */
+/** IB subjects, TOK, and EE — the structured diploma record, or older free text. */
 export function ibSubjectLines(profile) {
   const raw = profile?.ib_subjects || '';
   if (!raw) return [];
-  const parsed = parseIbSubjects(raw);
-  return parsed.map((s) => {
-    const level = s.level ? ` ${s.level}` : '';
-    const grade = s.grade ? ` predicted ${s.grade}` : '';
-    return `- ${s.name}${level}${grade}`;
-  });
+  return ibRecordLines(raw);
 }
 
 export function formatActivities(activities, oldText) {
@@ -70,13 +65,18 @@ export function buildProfileContext(profile, opts = {}) {
   // Academic record
   const academic = [];
   if (p.ib_predicted_score) academic.push(`IB predicted total: ${p.ib_predicted_score}/45`);
-  if (p.gpa_value) academic.push(`GPA: ${p.gpa_value}${p.gpa_scale ? ` on a ${p.gpa_scale} scale` : ''} (scale unspecified)`);
+  if (p.gpa_value) {
+    academic.push(p.gpa_scale
+      ? `GPA: ${p.gpa_value} on a ${p.gpa_scale} scale`
+      : `GPA: ${p.gpa_value} (scale not specified — do not assume 4.0)`);
+  }
   if (p.rank) academic.push(`Class rank: ${p.rank}`);
   const ibLines = ibSubjectLines(p);
   if (ibLines.length) {
-    academic.push(`IB subjects (${ibLines.length} taken):\n${ibLines.join('\n')}`);
-    const hl = ibLines.filter((l) => l.includes(' HL')).length;
-    academic.push(`Higher Level subjects: ${hl}. This is the rigorous workload a US/UK reader needs to understand.`);
+    const record = parseIbRecord(p.ib_subjects);
+    const taken = record.subjects.filter((s) => subjectDisplayName(s)).length;
+    academic.push(`IB DIPLOMA (predicted grades are the school's current prediction, for review — not final results):\n${ibLines.join('\n')}`);
+    academic.push(`${taken} of 6 subject slots filled. Higher Level count: ${hlCount(record)} (3 or 4 allowed).`);
   }
   if (academic.length) lines.push(`ACADEMIC RECORD:\n${academic.join('\n')}`);
 
@@ -131,4 +131,4 @@ export function buildProfileContext(profile, opts = {}) {
   return lines.join('\n\n');
 }
 
-export { serializeIbSubjects, parseIbSubjects };
+export { parseIbRecord, ibRecordLines };

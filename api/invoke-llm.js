@@ -23,6 +23,7 @@
 // Vercel's parsed `req.body` — see readBody().
 
 import { createClient } from '@supabase/supabase-js';
+import { resolveSupabaseConfig } from './supabaseConfig.js';
 
 // ---------------------------------------------------------------------------
 // Model aliases used in the frontend (kept compatible with the old Base44
@@ -357,10 +358,21 @@ export async function handleInvokeLLM(req, res) {
   }
 
   // --- Auth: require a valid Supabase JWT when Supabase is configured. ---
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
-  const allowAnon = process.env.LLM_ALLOW_ANON === 'true' || !supabaseUrl;
+  // Do not pass the first env var that happens to be set. A Postgres URI in
+  // SUPABASE_URL used to win over a valid VITE_ / NEXT_PUBLIC_ project URL and
+  // createClient threw "Invalid supabaseUrl" before any model call.
+  const supabaseConfig = resolveSupabaseConfig(process.env);
+  const nothingConfigured = !supabaseConfig.url && !supabaseConfig.key && supabaseConfig.problems.length === 0;
+  const allowAnon = process.env.LLM_ALLOW_ANON === 'true' || nothingConfigured;
   if (!allowAnon) {
+    if (!supabaseConfig.configured) {
+      send(res, 500, {
+        error: supabaseConfig.invalidReason
+          || supabaseConfig.problems[0]
+          || 'Supabase is not configured correctly, so the AI endpoint cannot verify your session.',
+      });
+      return;
+    }
     const header = req.headers?.authorization || req.headers?.Authorization || '';
     const token = String(header).replace(/^Bearer\s+/i, '').trim();
     if (!token) {
@@ -368,7 +380,7 @@ export async function handleInvokeLLM(req, res) {
       return;
     }
     try {
-      const sb = createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false } });
+      const sb = createClient(supabaseConfig.url, supabaseConfig.key, { auth: { persistSession: false } });
       const { data, error } = await sb.auth.getUser(token);
       if (error || !data?.user) {
         send(res, 401, { error: 'Your session has expired. Sign out and sign back in — the AI endpoint only accepts a valid Supabase session.' });

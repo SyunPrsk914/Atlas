@@ -4,7 +4,6 @@ import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
@@ -14,6 +13,8 @@ import {
   Info, ArrowRight, AlertTriangle,
 } from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
+import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
+import PromptChooser from '@/components/essay/PromptChooser';
 import { runAI } from '@/lib/ai';
 import { buildProfileContext } from '@/lib/profileContext';
 import {
@@ -21,9 +22,13 @@ import {
 } from '@/lib/essayPrompts';
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
-  buildSharedEssayPlan, isSharedEssay, limitUnitFor, measureEssay, formatLimit,
+  buildSharedEssayPlan, isSharedEssay, limitUnitFor, measureEssay, formatLimit, resolvedEssayLimit,
   ESSAY_TYPES, ESSAY_STATUSES, COMMON_APP_PROMPTS, UC_PIQS, UC_RULES, UCAS_RULES, UCAS_QUESTIONS,
+  findKnowledgeRecord, isUcasQuestion, isLegacyUcasStatement, ucasCharacterBudget,
+  isCommonAppPersonalStatement, chosenCommonAppPrompt, isAmbiguousCommonAppPrompt,
 } from '@/lib/essayScope';
+import { formatMaterialsForAI } from '@/lib/materialRole';
+import { missingSchoolPrompts, promptsForUniversity, toEssayDraft } from '@/lib/supplementPrompts';
 
 const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label: s }).label;
 
@@ -111,12 +116,13 @@ export default function EssayBuilder() {
   const specificEssays = applicable.filter((e) => !isSharedEssay(e));
 
   const pickEssay = (essay) => {
-    if (dirty && !window.confirm('You have unsaved changes on the current essay. Discard them?')) return;
+    const stayingInUcas = isUcasQuestion(essay) && isUcasQuestion(selectedEssay);
+    if (dirty && !stayingInUcas && !window.confirm('You have unsaved changes on the current essay. Discard them?')) return;
     setSelectedEssay(essay);
     setReviewResult(null);
     setGenAnalysis(null);
     setGenGaps([]);
-    setDirty(false);
+    if (!stayingInUcas) setDirty(false);
   };
 
   const handleSelectUni = (uniId) => {
@@ -144,19 +150,51 @@ export default function EssayBuilder() {
     setDirty(true);
   };
 
+  const onUcasChange = (essay, content) => {
+    setEssays((prev) => prev.map((item) => (item.id === essay.id ? { ...item, content } : item)));
+    setSelectedEssay((prev) => (prev?.id === essay.id ? { ...prev, content } : prev));
+    setDirty(true);
+  };
+
+  const onUcasFocus = (essay) => {
+    if (!essay || selectedEssay?.id === essay.id) return;
+    setSelectedEssay(essay);
+    setReviewResult(null);
+    setGenAnalysis(null);
+    setGenGaps([]);
+  };
+
   const handleSave = async () => {
     if (!selectedEssay) return;
     setSaving(true);
     try {
-      await persist({
-        title: selectedEssay.title,
-        prompt: selectedEssay.prompt,
-        word_limit: selectedEssay.word_limit,
-        content: selectedEssay.content,
-        type: selectedEssay.type,
-        status: selectedEssay.status,
-        limit_unit: limitUnitFor(selectedEssay),
-      });
+      if (isUcasQuestion(selectedEssay)) {
+        const rows = essays
+          .filter(isUcasQuestion)
+          .map((essay) => (essay.id === selectedEssay.id ? { ...essay, ...selectedEssay } : essay));
+        for (const essay of rows) {
+          await base44.entities.Essay.update(essay.id, {
+            content: essay.content,
+            prompt: essay.prompt,
+            title: essay.title,
+            word_limit: resolvedEssayLimit(essay),
+            status: essay.status,
+            type: essay.type,
+            limit_unit: 'characters',
+          });
+        }
+        setDirty(false);
+      } else {
+        await persist({
+          title: selectedEssay.title,
+          prompt: selectedEssay.prompt,
+          word_limit: selectedEssay.word_limit,
+          content: selectedEssay.content,
+          type: selectedEssay.type,
+          status: selectedEssay.status,
+          limit_unit: limitUnitFor(selectedEssay),
+        });
+      }
       toast.success('Essay saved');
     } catch (e) {
       toast.error('Could not save this essay', { description: e.message });
@@ -171,19 +209,37 @@ export default function EssayBuilder() {
     clearTimeout(autosaveRef.current);
     autosaveRef.current = setTimeout(async () => {
       try {
-        await persist({
-          content: selectedEssay.content,
-          prompt: selectedEssay.prompt,
-          title: selectedEssay.title,
-          word_limit: selectedEssay.word_limit,
-          status: selectedEssay.status,
-          type: selectedEssay.type,
-          limit_unit: limitUnitFor(selectedEssay),
-        });
+        if (isUcasQuestion(selectedEssay)) {
+          const rows = essays
+            .filter(isUcasQuestion)
+            .map((essay) => (essay.id === selectedEssay.id ? { ...essay, ...selectedEssay } : essay));
+          for (const essay of rows) {
+            await base44.entities.Essay.update(essay.id, {
+              content: essay.content,
+              prompt: essay.prompt,
+              title: essay.title,
+              word_limit: resolvedEssayLimit(essay),
+              status: essay.status,
+              type: essay.type,
+              limit_unit: 'characters',
+            });
+          }
+          setDirty(false);
+        } else {
+          await persist({
+            content: selectedEssay.content,
+            prompt: selectedEssay.prompt,
+            title: selectedEssay.title,
+            word_limit: selectedEssay.word_limit,
+            status: selectedEssay.status,
+            type: selectedEssay.type,
+            limit_unit: limitUnitFor(selectedEssay),
+          });
+        }
       } catch { /* autosave failures must not interrupt typing */ }
     }, 2500);
     return () => clearTimeout(autosaveRef.current);
-  }, [dirty, selectedEssay?.id, selectedEssay?.content, selectedEssay?.prompt, selectedEssay?.title, selectedEssay?.word_limit, selectedEssay?.status, selectedEssay?.type]);
+  }, [dirty, essays, selectedEssay, selectedEssay?.id, selectedEssay?.content, selectedEssay?.prompt, selectedEssay?.title, selectedEssay?.word_limit, selectedEssay?.status, selectedEssay?.type]);
 
   // --- context ------------------------------------------------------------
   const gatherContext = async () => {
@@ -192,22 +248,29 @@ export default function EssayBuilder() {
       base44.entities.Material.list(),
     ]);
     const profileText = buildProfileContext(profiles[0] || {}, { includeLeadershipBrief: true });
-    const materialsText = materials.length
-      ? materials
-        .filter((m) => m.content || m.notes)
-        .map((m) => `--- ${m.title} [${m.type}] ---\n${m.content || m.notes}`)
-        .join('\n\n')
-      : 'No supporting materials uploaded yet.';
-    const knowledge = await base44.entities.CollegeKnowledge.filter({ university_name: selectedUni.name });
-    const knowledgeText = knowledge.length
-      ? knowledge[0].knowledge
-      : 'No research cached for this university yet. Research it in the Knowledge Base for a far more specific essay — this draft will rely on general knowledge only.';
+    const materialsText = formatMaterialsForAI(materials);
+    const knowledgeRows = await base44.entities.CollegeKnowledge.list();
+    const knowledge = findKnowledgeRecord(knowledgeRows, selectedUni.name);
+    const knowledgeText = knowledge?.knowledge
+      || 'No research cached for this university yet. Research it in the Knowledge Base for a far more specific essay — this draft will rely on general knowledge only.';
     return { profileText, materialsText, knowledgeText };
   };
 
   // --- actions ------------------------------------------------------------
   const handleGenerate = async () => {
     if (!selectedEssay) return;
+    if (isCommonAppPersonalStatement(selectedEssay) && !chosenCommonAppPrompt(selectedEssay)) {
+      toast.error('Choose one Common App prompt first', {
+        description: 'The personal statement answers one of the seven prompts. Leaving all of them in the box makes the draft try to answer every prompt.',
+      });
+      return;
+    }
+    if (isAmbiguousCommonAppPrompt(selectedEssay.prompt)) {
+      toast.error('This essay has more than one official prompt in it', {
+        description: 'Choose the single prompt you are answering before generating a draft.',
+      });
+      return;
+    }
     setBusy('generate');
     setReviewResult(null);
     setGenAnalysis(null);
@@ -216,7 +279,7 @@ export default function EssayBuilder() {
       const { ok, result } = await runAI({
         prompt: buildGeneratePrompt({
           essay: selectedEssay, university: selectedUni, platform,
-          profileText, knowledgeText, materialsText,
+          profileText, knowledgeText, materialsText, allEssays: essays,
         }),
         response_json_schema: GENERATE_SCHEMA,
       }, { fallbackTitle: 'Could not generate a draft' });
@@ -251,7 +314,7 @@ export default function EssayBuilder() {
       const { ok, result } = await runAI({
         prompt: buildReviewPrompt({
           essay: selectedEssay, university: selectedUni, platform,
-          knowledgeText, reviewNotes: selectedEssay.review_notes,
+          knowledgeText, reviewNotes: selectedEssay.review_notes, allEssays: essays,
         }),
         response_json_schema: REVIEW_SCHEMA,
       }, { fallbackTitle: 'The review could not be completed' });
@@ -277,7 +340,7 @@ export default function EssayBuilder() {
       const { ok, result } = await runAI({
         prompt: buildPolishPrompt({
           essay: selectedEssay, university: selectedUni, platform,
-          reviewResult, knowledgeText,
+          reviewResult, knowledgeText, allEssays: essays,
         }),
       }, { fallbackTitle: 'Could not polish this essay' });
 
@@ -320,7 +383,7 @@ export default function EssayBuilder() {
         title: d.title,
         type: d.type || 'supplemental',
         prompt: d.prompt || '',
-        word_limit: Number(d.word_limit) || 650,
+        word_limit: resolvedEssayLimit(d),
         content: '',
         status: 'not_started',
         scope: d.scope || 'university_specific',
@@ -333,7 +396,7 @@ export default function EssayBuilder() {
       created.push(row);
     }
     await loadEssays();
-    if (created.length === 1) setSelectedEssay(created[0]);
+    if (created[0]) setSelectedEssay(created[0]);
     toast.success(`${created.length} essay${created.length > 1 ? 's' : ''} created`, { description: label });
     return created;
   };
@@ -367,6 +430,11 @@ export default function EssayBuilder() {
     () => (selectedUni ? buildSharedEssayPlan(platform, essays) : []),
     [platform, essays, selectedUni],
   );
+  const missingSchool = useMemo(
+    () => (selectedUni ? missingSchoolPrompts(selectedUni.name, essays) : []),
+    [selectedUni, essays],
+  );
+  const ucasBudget = useMemo(() => ucasCharacterBudget(essays), [essays]);
 
   const addMissingShared = async () => {
     try {
@@ -423,7 +491,11 @@ export default function EssayBuilder() {
           <div className="flex items-center gap-1.5 text-xs text-foreground/40">
             <span>{statusLabel(essay.status)}</span>
             <span>·</span>
-            <span className={n > lim ? 'text-destructive' : ''}>{n}/{lim || '—'} {u === 'characters' ? 'chars' : 'w'}</span>
+            <span className={(isUcasQuestion(essay) ? ucasBudget.over : n > lim) ? 'text-destructive' : ''}>
+              {isUcasQuestion(essay)
+                ? `${n} chars`
+                : `${n}/${lim || '—'} ${u === 'characters' ? 'chars' : 'w'}`}
+            </span>
           </div>
         </button>
         <button
@@ -486,6 +558,39 @@ export default function EssayBuilder() {
             <Button size="sm" className="mt-2.5" onClick={addMissingShared}>
               <Plus className="w-3.5 h-3.5 mr-1.5" />
               Add shared {missingShared.length > 1 ? 'essays' : 'essay'}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {missingSchool.length > 0 && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-card border border-border">
+          <FileText className="w-5 h-5 text-foreground/40 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-medium">
+              {missingSchool.length} published {missingSchool.length > 1 ? 'prompts' : 'prompt'} for {selectedUni.name}
+            </p>
+            <p className="text-xs text-foreground/50 mt-0.5">
+              These are the 2026-27 questions from the university’s own page. Add them instead of typing the prompts.
+              Confirm the wording on the official page before you submit.
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-2.5"
+              onClick={async () => {
+                try {
+                  await createEssays(
+                    missingSchool.map((item) => toEssayDraft(item, { applicationPlatform: platform })),
+                    'Taken from the university’s published prompts.',
+                  );
+                } catch (e) {
+                  toast.error('Could not add those prompts', { description: e.message });
+                }
+              }}
+            >
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              Add these prompts
             </Button>
           </div>
         </div>
@@ -604,21 +709,35 @@ export default function EssayBuilder() {
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label className="block text-xs font-medium text-foreground/50">Prompt</label>
-                        {isSharedEssay(selectedEssay) && (
-                          <button
-                            onClick={() => setLibraryOpen(true)}
-                            className="text-[11px] text-accent hover:underline"
-                          >
-                            Paste this cycle&apos;s real prompts
-                          </button>
-                        )}
+                        <button
+                          onClick={() => setLibraryOpen(true)}
+                          className="text-[11px] text-accent hover:underline"
+                        >
+                          Browse this cycle&apos;s prompts
+                        </button>
                       </div>
-                      <Textarea
-                        value={selectedEssay.prompt || ''}
-                        onChange={(e) => handleFieldChange('prompt', e.target.value)}
-                        placeholder="Paste the exact prompt here..."
-                        rows={4}
-                      />
+                      {isUcasQuestion(selectedEssay) ? (
+                        <p className="text-sm text-foreground/70 leading-relaxed rounded-lg border border-border bg-muted/20 p-3">
+                          {selectedEssay.prompt}
+                          <span className="block text-[11px] text-foreground/40 mt-1">
+                            This wording is fixed. The three answers share 4,000 characters.
+                          </span>
+                        </p>
+                      ) : (
+                        <PromptChooser
+                          platform={selectedEssay.scope === 'common' ? (selectedEssay.application_platform || platform) : platform}
+                          universityName={selectedEssay.scope === 'common' ? '' : selectedUni?.name}
+                          scope={selectedEssay.scope || 'university_specific'}
+                          value={selectedEssay.prompt || ''}
+                          onChange={(prompt) => handleFieldChange('prompt', prompt)}
+                          onPick={(choice) => {
+                            handleFieldChange('prompt', choice.prompt);
+                            if (choice.word_limit) handleFieldChange('word_limit', choice.word_limit);
+                            if (choice.limit_unit) handleFieldChange('limit_unit', choice.limit_unit);
+                            if (choice.type) handleFieldChange('type', choice.type);
+                          }}
+                        />
+                      )}
                     </div>
                   </div>
                 )}
@@ -673,6 +792,26 @@ export default function EssayBuilder() {
                 </div>
               )}
 
+              {isLegacyUcasStatement(selectedEssay) && (
+                <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200">
+                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-800 leading-relaxed">
+                    This is the old single UCAS box. The real form is three answers that share 4,000 characters.
+                    Add the three shared answers, move each response into its own box, then delete this one.
+                  </p>
+                </div>
+              )}
+
+              {isUcasQuestion(selectedEssay) ? (
+                <div className="bg-card border border-border rounded-xl p-5">
+                  <UcasStatementEditor
+                    essays={essays}
+                    focusId={selectedEssay.id}
+                    onChange={onUcasChange}
+                    onFocus={onUcasFocus}
+                  />
+                </div>
+              ) : (
               <div className="bg-card border border-border rounded-xl p-5">
                 <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
                   <span className="text-sm font-medium text-foreground/50">Draft</span>
@@ -702,6 +841,7 @@ export default function EssayBuilder() {
                   className="w-full rounded-lg border border-input bg-background px-4 py-3 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition placeholder:text-foreground/25 font-body"
                 />
               </div>
+              )}
 
               <EssayReviewPanel reviewResult={reviewResult} onPolish={handlePolish} polishing={busy === 'polish'} />
             </div>
@@ -787,11 +927,20 @@ export default function EssayBuilder() {
                   Browse this cycle&apos;s prompts
                 </button>
               </div>
-              <Textarea
+              <PromptChooser
+                platform={platform}
+                universityName={newEssay.scope === 'common' ? '' : selectedUni?.name}
+                scope={newEssay.scope}
                 value={newEssay.prompt}
-                onChange={(e) => setNewEssay({ ...newEssay, prompt: e.target.value })}
-                placeholder="Paste the exact prompt here…"
-                rows={3}
+                onChange={(prompt) => setNewEssay({ ...newEssay, prompt })}
+                onPick={(choice) => setNewEssay((prev) => ({
+                  ...prev,
+                  prompt: choice.prompt,
+                  title: prev.title || choice.title || '',
+                  word_limit: choice.word_limit || prev.word_limit,
+                  limit_unit: choice.limit_unit || prev.limit_unit,
+                  type: choice.type || prev.type,
+                }))}
               />
             </div>
 
@@ -826,6 +975,7 @@ export default function EssayBuilder() {
         open={libraryOpen}
         onOpenChange={setLibraryOpen}
         platform={platform}
+        universityName={selectedUni?.name}
         onApply={(draft) => {
           if (selectedEssay) {
             handleFieldChange('prompt', draft.prompt);
@@ -852,7 +1002,7 @@ export default function EssayBuilder() {
 // ---------------------------------------------------------------------------
 // The researched prompt library — the real 2026-27 requirements, in-app.
 // ---------------------------------------------------------------------------
-function PromptLibraryDialog({ open, onOpenChange, platform, onApply }) {
+function PromptLibraryDialog({ open, onOpenChange, platform, universityName, onApply }) {
   const groups = useMemo(() => {
     const out = [];
     if (platform === 'common_app') {
@@ -902,18 +1052,39 @@ function PromptLibraryDialog({ open, onOpenChange, platform, onApply }) {
     if (platform === 'ucas') {
       out.push({
         key: 'ucas',
-        title: `UCAS Personal Statement — ${UCAS_RULES.totalChars.toLocaleString()} characters`,
-        note: UCAS_RULES.note,
-        items: [{
-          key: 'ucas-all',
-          label: 'The full three-question statement',
-          meta: `${UCAS_RULES.totalChars.toLocaleString()} characters total, ${UCAS_RULES.perAnswerMinChars} minimum per answer`,
-          prompt: UCAS_QUESTIONS.map((q) => `${q.number}. ${q.prompt}\n   (minimum ${q.minChars} characters — aim for ${q.suggestedShare})`).join('\n\n'),
-          role: UCAS_RULES.academicBias,
+        title: `UCAS Personal Statement — three answers, ${UCAS_RULES.totalChars.toLocaleString()} characters shared`,
+        note: `${UCAS_RULES.note} Use “Add shared essays” to create the three boxes. Do not paste all three prompts into one essay.`,
+        items: UCAS_QUESTIONS.map((q) => ({
+          key: q.key,
+          label: `Question ${q.number} — ${q.label}`,
+          meta: `Minimum ${q.minChars} characters · ${q.suggestedShare}`,
+          prompt: q.prompt,
+          role: q.role,
           word_limit: UCAS_RULES.totalChars,
           limit_unit: 'characters',
           type: 'personal_statement',
-        }],
+          title: `UCAS Q${q.number} — ${q.label}`,
+        })),
+      });
+    }
+    const schoolItems = promptsForUniversity(universityName).map((item) => ({
+      key: item.id,
+      label: item.title,
+      meta: `${item.word_limit} ${item.limit_unit === 'characters' ? 'characters' : 'words'} · ${item.cycle}`,
+      prompt: item.prompt,
+      role: item.role,
+      word_limit: item.word_limit,
+      limit_unit: item.limit_unit,
+      type: item.type,
+      title: item.title,
+      source: item.source,
+    }));
+    if (schoolItems.length) {
+      out.push({
+        key: 'school',
+        title: `Published prompts for ${universityName}`,
+        note: 'Checked against the university’s own page for 2026-27. Confirm before you submit — Atlas does not invent prompts for schools that are not listed.',
+        items: schoolItems,
       });
     }
     if (platform === 'coalition') {
