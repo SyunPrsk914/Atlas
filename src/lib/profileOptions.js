@@ -1,3 +1,5 @@
+import { parseIbRecord, subjectDisplayName } from './ibDiploma';
+
 // ---------------------------------------------------------------------------
 // Atlas — profile reference data.
 //
@@ -48,135 +50,48 @@ export const GPA_SCALES = [
   { value: 'Other', label: 'Other / unweighted', max: null },
 ];
 
-// --- IB Diploma subjects ----------------------------------------------------
-// Grouped per the IB Diploma Programme subject groups. Each entry is
-// `[name, group]`. Keeping the official IB wording matters: admissions readers
-// and the Common App both expect the subject exactly as the school reports it.
-export const IB_SUBJECT_GROUPS = [
-  {
-    group: 1,
-    label: 'Group 1 — Studies in Language & Literature',
-    subjects: [
-      'Language A: Literature (or Language A: Language and Literature)',
-      'Language A: Language and Literature',
-      'Languages (Literature) — other',
-    ],
-  },
-  {
-    group: 2,
-    label: 'Group 2 — Languages',
-    subjects: [
-      'Language B (any language)',
-      'Language B: Business',
-      'Ab initio (any language)',
-    ],
-  },
-  {
-    group: 3,
-    label: 'Group 3 — Individuals and Societies',
-    subjects: [
-      'Business Management', 'Digital Society', 'Economics', 'Geography',
-      'History', 'Human Geography', 'Psychology', 'Social Studies',
-      'World History', 'Philosophy', 'Political Science', 'Sociology',
-    ],
-  },
-  {
-    group: 4,
-    label: 'Group 4 — Sciences',
-    subjects: [
-      'Biology', 'Chemistry', 'Computer Science', 'Design Technology',
-      'Earth and Space Sciences', 'Environmental Systems and Societies',
-      'Physics', 'Science (single award)', 'Sports Science',
-    ],
-  },
-  {
-    group: 5,
-    label: 'Group 5 — Mathematics',
-    subjects: ['Mathematics', 'Mathematics: Analysis and Approaches', 'Mathematics: Applications and Interpretation', 'Further Mathematics'],
-  },
-  {
-    group: 6,
-    label: 'Group 6 — Arts',
-    subjects: [
-      'Dance', 'Design', 'Drama', 'Film', 'Music', 'Theatre Arts', 'Visual Arts',
-    ],
-  },
-  {
-    group: 7,
-    label: 'Group 7 — Interdisciplinary',
-    subjects: ['Environmental Systems and Societies', 'World History', 'Social Studies', 'Science (single award)'],
-  },
-  {
-    group: 8,
-    label: 'Additional subjects / electives',
-    subjects: [
-      'Additional Mathematics', 'Psychology (SL only in some regions)',
-      'Human Genetics (HL)', 'Marine Science (SL)', 'Astronomy (SL)',
-      'Entrepreneurship (SL)', 'Digital Design (SL)', 'God (HL)',
-    ],
-  },
-];
-
-export const ALL_IB_SUBJECTS = IB_SUBJECT_GROUPS.flatMap((g) => g.subjects);
+// IB subject data, predicted grades, and serialisation live in ibDiploma.js.
+// Re-exported here so older imports keep working.
+export {
+  IB_COURSES,
+  IB_SLOTS,
+  SUBJECT_GRADES as IB_PREDICTED_GRADES,
+  CORE_GRADES,
+  parseIbRecord,
+  serializeIbRecord,
+  subjectDisplayName,
+  ibRecordLines,
+  suggestedDiplomaTotal,
+  hlCount,
+} from './ibDiploma';
 
 export const IB_LEVELS = ['HL', 'SL'];
-export const IB_PREDICTED_GRADES = ['7', '6', '5', '4', '3', '2', '1', 'EE'];
 
-// Common App orders activities by commitment; these labels are what the essay
-// writer needs when describing a subject load.
-export const SUBJECT_SUMMARY_TEMPLATE = (subjects = []) => subjects
-  .map((s) => `${s.name} ${s.level}${s.grade ? ` (predicted ${s.grade})` : ''}`)
-  .join(', ');
-
-// --- Serialisation ----------------------------------------------------------
-// `profiles.ib_subjects` is a text column. We write a readable, parseable
-// string: "Physics HL (7), Chemistry HL (6), Japanese A: Literature SL (6)".
-// parseIbSubjects() understands both that format and the free text students
-// typed before this picker existed, so nothing is ever lost on upgrade.
-
-export function serializeIbSubjects(subjects = []) {
-  return subjects
-    .filter((s) => s && s.name)
-    .map((s) => {
-      const level = s.level ? ` ${s.level}` : '';
-      const grade = s.grade ? ` (${s.grade})` : '';
-      return `${s.name}${level}${grade}`;
-    })
-    .join(', ');
-}
-
-/**
- * Best-effort parse of a free-text IB subject list.
- * Handles "Physics HL, Math AA HL, Japanese A Lit SL" and "Biology HL (7)".
- */
+/** @deprecated Use parseIbRecord. Kept so older callers still receive a list. */
 export function parseIbSubjects(text) {
-  if (!text) return [];
-  return String(text)
-    .split(/[,;\n]/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const gradeMatch = part.match(/\(([^()]*)\)\s*$/);
-      const grade = gradeMatch ? gradeMatch[1].trim() : '';
-      const core = (gradeMatch ? part.slice(0, gradeMatch.index) : part).trim();
-      const levelMatch = core.match(/\b(HL|SL)\b/i);
-      const level = levelMatch ? levelMatch[1].toUpperCase() : '';
-      const name = core
-        .replace(/\b(HL|SL)\b/gi, '')
-        .replace(/\s+/g, ' ')
-        .trim();
+  return parseIbRecord(text).subjects
+    .map((subject) => {
+      const name = subjectDisplayName(subject);
       if (!name) return null;
-      return { name, level, grade: IB_PREDICTED_GRADES.includes(grade) ? grade : '' };
+      return { name, level: subject.level || '', grade: subject.grade || '' };
     })
     .filter(Boolean);
 }
 
-export function findSubjectGroup(name) {
-  const key = String(name || '').toLowerCase();
-  for (const g of IB_SUBJECT_GROUPS) {
-    if (g.subjects.some((s) => s.toLowerCase() === key)) return g;
-  }
-  return null;
+/** @deprecated Use serializeIbRecord. */
+export function serializeIbSubjects(subjects = []) {
+  // Only used if something still passes the old {name, level, grade} list.
+  // The profile page now stores the structured record directly.
+  if (!Array.isArray(subjects)) return '';
+  return subjects
+    .filter((s) => s && (s.name || s.customName))
+    .map((s) => {
+      const name = s.name || s.customName;
+      const level = s.level ? ` ${s.level}` : '';
+      const grade = s.grade ? ` (predicted ${s.grade})` : '';
+      return `${name}${level}${grade}`;
+    })
+    .join(', ');
 }
 
 // --- Test scores ------------------------------------------------------------
@@ -215,7 +130,7 @@ export const SUPPORT_TYPES = [
   'None',
   'Fee-paying / full-pay (no aid needed)',
   'Need-based aid',
-  ' merit scholarships only',
+  'Merit scholarships only',
 ];
 
 // --- International applicant money context ----------------------------------

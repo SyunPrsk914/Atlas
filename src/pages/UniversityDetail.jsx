@@ -13,7 +13,7 @@ import {
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
   buildSharedEssayPlan, isSharedEssay, limitUnitFor, measureEssay,
-  normalizeUniversityName,
+  findKnowledgeRecord, resolvedEssayLimit, ucasCharacterBudget, isUcasQuestion,
 } from '@/lib/essayScope';
 import { daysUntil } from '@/lib/dates';
 
@@ -64,7 +64,7 @@ export default function UniversityDetail() {
       setTasks(allTasks.sort((a, b) => (a.order || 0) - (b.order || 0)));
       setAllEssays(essays);
       setKnowledge(
-        knw.find((k) => normalizeUniversityName(k.university_name) === normalizeUniversityName(uni.name)) || null,
+        findKnowledgeRecord(knw, uni.name),
       );
     } catch (e) {
       console.error(e);
@@ -152,7 +152,7 @@ export default function UniversityDetail() {
           title: d.title,
           type: d.type,
           prompt: d.prompt,
-          word_limit: Number(d.word_limit) || 650,
+          word_limit: resolvedEssayLimit(d),
           content: '',
           status: 'not_started',
           scope: 'common',
@@ -332,6 +332,11 @@ export default function UniversityDetail() {
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <p className="text-sm text-foreground/50">
               {essays.length} essay{essays.length !== 1 ? 's' : ''} apply to {university.name}
+              {platform === 'ucas' && essays.some(isUcasQuestion) && (
+                <span className={ucasCharacterBudget(essays).over ? 'text-destructive' : ''}>
+                  {' '}· UCAS {ucasCharacterBudget(essays).total.toLocaleString()} / {ucasCharacterBudget(essays).limit.toLocaleString()} characters shared
+                </span>
+              )}
             </p>
             <Link to={`/essay-builder?university=${id}`}>
               <Button><Plus className="w-4 h-4 mr-2" /> New Essay</Button>

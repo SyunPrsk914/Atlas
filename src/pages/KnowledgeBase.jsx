@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { runAI, refreshAIStatus } from '@/lib/ai';
 import { buildProfileContext } from '@/lib/profileContext';
-import { getUniversityPlatform, PLATFORMS, normalizeUniversityName } from '@/lib/essayScope';
+import { getUniversityPlatform, PLATFORMS, universityNamesMatch, universityMatchKey } from '@/lib/essayScope';
 import { daysSince } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
@@ -202,14 +202,16 @@ export default function KnowledgeBase() {
 
   // Universities on the list that have no research yet — the actual next action.
   const missing = useMemo(() => {
-    const done = new Set(library.map((k) => normalizeUniversityName(k.university_name)));
-    return universities.filter((u) => !done.has(normalizeUniversityName(u.name)));
+    const done = new Set(library.map((k) => universityMatchKey(k.university_name)));
+    return universities.filter((u) => !done.has(universityMatchKey(u.name)));
   }, [universities, library]);
 
-  const selected = useMemo(
-    () => library.find((k) => k.university_name === selectedKey) || null,
-    [library, selectedKey],
-  );
+  const selected = useMemo(() => {
+    if (!selectedKey) return null;
+    return library.find((k) => k.university_name === selectedKey)
+      || library.find((k) => universityNamesMatch(k.university_name, selectedKey))
+      || null;
+  }, [library, selectedKey]);
 
   const sections = useMemo(
     () => (selected ? splitSections(selected.knowledge) : null),
@@ -231,7 +233,7 @@ export default function KnowledgeBase() {
   // instead would label the button "Refresh" for a school that has never been
   // researched, which reads as though a report already exists.
   const targetResearched = !!library.find(
-    (k) => normalizeUniversityName(k.university_name) === normalizeUniversityName(targetName),
+    (k) => universityNamesMatch(k.university_name, targetName),
   );
 
   const handleResearch = async () => {
@@ -272,9 +274,8 @@ export default function KnowledgeBase() {
       }
 
       const stamp = new Date().toISOString();
-      // Match case-insensitively so "stanford" and "Stanford University" do not
-      // silently create two records for the same school.
-      const existing = (await loadLibrary()).find((k) => normalizeUniversityName(k.university_name) === normalizeUniversityName(uniName));
+      // "Stanford" and "Stanford University" are the same report.
+      const existing = (await loadLibrary()).find((k) => universityNamesMatch(k.university_name, uniName));
 
       const saved = existing
         ? await base44.entities.CollegeKnowledge.update(existing.id, { knowledge: knowledgeText, last_updated: stamp })
@@ -304,7 +305,7 @@ export default function KnowledgeBase() {
     try {
       await base44.entities.CollegeKnowledge.delete(record.id);
       await loadLibrary();
-      if (selectedKey === record.university_name) setSelectedKey(null);
+      if (universityNamesMatch(selectedKey, record.university_name)) setSelectedKey(null);
       toast.success(`Deleted the ${record.university_name} report`);
     } catch (e) {
       toast.error('Could not delete the report', { description: e.message });
@@ -371,7 +372,7 @@ export default function KnowledgeBase() {
               </SelectTrigger>
               <SelectContent>
                 {universities.map((u) => {
-                  const done = library.some((k) => normalizeUniversityName(k.university_name) === normalizeUniversityName(u.name));
+                  const done = library.some((k) => universityNamesMatch(k.university_name, u.name));
                   return (
                     <SelectItem key={u.id} value={u.name}>
                       {u.name}{done ? '  ✓' : ''}
@@ -435,7 +436,7 @@ export default function KnowledgeBase() {
             ) : (
               <div className="max-h-[420px] overflow-y-auto divide-y divide-border">
                 {filteredLibrary.map((record) => {
-                  const active = record.university_name === selectedKey;
+                  const active = universityNamesMatch(record.university_name, selectedKey);
                   return (
                     <div key={record.id} className={`group flex items-start gap-1 px-3 py-2.5 ${active ? 'bg-muted/60' : ''}`}>
                       <button

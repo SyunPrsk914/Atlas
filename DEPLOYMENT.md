@@ -37,6 +37,8 @@ In the Supabase dashboard (left sidebar) → **Project Settings** (gear icon) �
 | **anon / public** key (long `eyJ...` string) | `VITE_SUPABASE_ANON_KEY` + `SUPABASE_ANON_KEY` |
 | **service_role** key (secret) | **Not needed.** Never put it in Vercel's frontend or in this repo. |
 
+The Vercel Supabase integration also creates `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Atlas accepts those, plus `VITE_*` and `SUPABASE_*`. It uses the first value that is a real `https://….supabase.co` project URL — a Postgres connection string in `SUPABASE_URL` is ignored, not passed to the client. Do not wrap values in quotes.
+
 Your **Project Ref** is the `xxxxxxxx` part of the Project URL (also visible in the dashboard header). You'll need it in Part 2.
 
 ### 1.3 Create the tables (run the schema)

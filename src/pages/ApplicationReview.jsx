@@ -12,16 +12,23 @@ import {
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_LABELS,
   PLATFORM_REQUIREMENTS, isSharedEssay, limitUnitFor, measureEssay,
-  normalizeUniversityName,
+  findKnowledgeRecord, isUcasQuestion, ucasCharacterBudget,
 } from '@/lib/essayScope';
 import { buildProfileContext, ibSubjectLines } from '@/lib/profileContext';
+import { formatMaterialsForAI, presentMaterial, isSampleMaterial } from '@/lib/materialRole';
 import { runAI } from '@/lib/ai';
 import { APPLICATION_REVIEW_SCHEMA, APPLICATION_REVIEW_DIMENSIONS } from '@/lib/essayPrompts';
 import ReviewResults from '@/components/review/ReviewResults';
 
 function formatEssays(essays) {
   if (!essays || essays.length === 0) return 'NO ESSAYS EXIST FOR THIS UNIVERSITY. Treat this as a material weakness and say so.';
-  return essays
+  const budget = ucasCharacterBudget(essays);
+  const ucasNote = essays.some(isUcasQuestion)
+    ? `UCAS CHARACTER BUDGET: these answers SHARE ${budget.limit.toLocaleString()} characters including spaces (currently ${budget.total.toLocaleString()}). Do not treat each answer as having 4,000 characters of its own. Minimum 350 each. Never name a university in these answers.
+
+`
+    : '';
+  return ucasNote + essays
     .map((e) => {
       const scope = e.scope === 'common'
         ? `SHARED across the whole ${PLATFORM_LABELS[e.application_platform] || e.application_platform} — sent identically to every school on that platform`
@@ -84,9 +91,9 @@ export default function ApplicationReview() {
 
       setProfile(profiles[0] || null);
       setEssays(essaysApplicableToUniversity(allEssays, uni));
-      setMaterials(mats);
+      setMaterials(mats.map(presentMaterial));
       setKnowledge(
-        knw.find((k) => normalizeUniversityName(k.university_name) === normalizeUniversityName(uni.name)) || null,
+        findKnowledgeRecord(knw, uni.name),
       );
       setTasks(tks);
     } catch (e) {
@@ -142,9 +149,7 @@ ${ibLines.length ? `\nIB subject workload (${ibLines.length} subjects):\n${ibLin
 ${formatEssays(essays)}
 
 --- SUPPORTING MATERIALS ---
-${materials.length > 0
-    ? materials.map((m) => `--- ${m.title} [${m.type}] ---\n${m.content || m.link_url || m.notes || ''}`).join('\n\n')
-    : 'No supporting materials.'}
+${formatMaterialsForAI(materials)}
 
 --- READINESS ---
 - Roadmap tasks completed: ${completedTasks}/${tasks.length}
@@ -357,12 +362,18 @@ Return JSON only.`;
               </Badge>
             )}
           </div>
+          {essays.some(isUcasQuestion) && (
+            <p className={`text-xs mb-2 ${ucasCharacterBudget(essays).over ? 'text-destructive' : 'text-foreground/40'}`}>
+              The three UCAS answers share {ucasCharacterBudget(essays).total.toLocaleString()} / {ucasCharacterBudget(essays).limit.toLocaleString()} characters, including spaces.
+            </p>
+          )}
           {essays.length > 0 ? (
             <div className="space-y-2">
               {essays.map((e) => {
                 const u = limitUnitFor(e);
                 const n = measureEssay(e.content || '', u);
                 const lim = Number(e.word_limit) || 0;
+                const ucasRow = isUcasQuestion(e);
                 const blank = !e.content || !e.content.trim();
                 return (
                   <div key={e.id} className="flex items-center justify-between gap-3 text-sm py-1.5 border-b border-border last:border-0">
@@ -376,7 +387,9 @@ Return JSON only.`;
                     <div className="flex items-center gap-2 text-xs text-foreground/40 shrink-0">
                       <span className="capitalize">{(e.status || 'not_started').replace(/_/g, ' ')}</span>
                       <span>·</span>
-                      <span className={n > lim ? 'text-destructive' : ''}>{n}/{lim || '—'}{u === 'characters' ? 'c' : 'w'}</span>
+                      <span className={(ucasRow ? ucasCharacterBudget(essays).over : n > lim) ? 'text-destructive' : ''}>
+                        {ucasRow ? `${n}c` : `${n}/${lim || '—'}${u === 'characters' ? 'c' : 'w'}`}
+                      </span>
                     </div>
                   </div>
                 );
@@ -391,7 +404,9 @@ Return JSON only.`;
           <div className="bg-card border border-border rounded-xl p-5">
             <h3 className="flex items-center gap-2 text-sm font-medium mb-2"><DollarSign className="w-4 h-4 text-foreground/40" /> Materials ({materials.length})</h3>
             {materials.length > 0 ? (
-              <p className="text-sm text-foreground/50">{materials.map((m) => m.title).join(', ')}</p>
+              <p className="text-sm text-foreground/50">
+                {materials.map((m) => (isSampleMaterial(m) ? `${m.title} (sample, not your writing)` : m.title)).join(', ')}
+              </p>
             ) : <p className="text-sm text-foreground/30">No materials uploaded.</p>}
           </div>
           <div className="bg-card border border-border rounded-xl p-5">

@@ -21,7 +21,7 @@ import {
   NATIONALITIES, SCHOOL_SYSTEMS, GPA_SCALES, CITIZENSHIP_STATUSES,
   CURRICULUM_TYPES, FIRST_GENERATION_OPTIONS, TEST_POLICIES, FUNDING_SOURCES,
 } from '@/lib/profileOptions';
-import { parseIbSubjects, serializeIbSubjects } from '@/lib/profileOptions';
+import { parseIbRecord, filledSubjects, hlCount } from '@/lib/ibDiploma';
 
 /** @param {{ icon: React.ElementType, title: React.ReactNode, description?: string, children: React.ReactNode }} props */
 function SectionCard({ icon: Icon, title, description, children }) {
@@ -194,7 +194,8 @@ export default function Profile() {
     setDirty(true);
   };
 
-  const ibSubjects = useMemo(() => parseIbSubjects(formData.ib_subjects), [formData.ib_subjects]);
+  const ibRecord = useMemo(() => parseIbRecord(formData.ib_subjects), [formData.ib_subjects]);
+  const ibFilled = useMemo(() => filledSubjects(ibRecord), [ibRecord]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -202,8 +203,10 @@ export default function Profile() {
       const payload = {
         ...formData,
         school_system: formData.school_system || 'Other',
-        // The picker owns this field: always write the canonical serialisation.
-        ib_subjects: serializeIbSubjects(ibSubjects),
+        // The picker already wrote the structured record. Re-parsing it into the
+        // old "Physics HL, ..." string would drop TOK, the Extended Essay, and
+        // the language the student typed.
+        ib_subjects: formData.ib_subjects || '',
       };
       const updated = profile
         ? await base44.entities.Profile.update(profile.id, payload)
@@ -351,7 +354,7 @@ export default function Profile() {
 
       <SectionCard icon={GraduationCap} title="Academic Record" description="Grades, and the workload behind them">
         <div className="grid sm:grid-cols-3 gap-4">
-          <Field label="IB predicted total" hint="Out of 45">
+          <Field label="IB predicted total" hint="Out of 45: up to 42 from six subjects, plus 0–3 from TOK and the Extended Essay. The picker can fill this from the predicted grades.">
             <Input
               type="number"
               min="0"
@@ -389,16 +392,14 @@ export default function Profile() {
           <div className="flex items-center justify-between mb-1.5">
             <Label className="text-xs font-medium text-foreground/60">IB Subjects</Label>
             <span className="text-[11px] text-foreground/35">
-              {ibSubjects.length} subject{ibSubjects.length === 1 ? '' : 's'}
-              {ibSubjects.filter((s) => s.level === 'HL').length > 0 &&
-                ` · ${ibSubjects.filter((s) => s.level === 'HL').length} HL`}
+              {ibFilled.length}/6 subjects
+              {` · ${hlCount(ibRecord)} HL`}
             </span>
           </div>
           <IbSubjectPicker
-            value={ibSubjects}
-            onChange={(next) => {
-              set('ib_subjects', serializeIbSubjects(next));
-            }}
+            raw={formData.ib_subjects || ''}
+            onChange={(raw) => set('ib_subjects', raw)}
+            onUsePredictedTotal={(total) => set('ib_predicted_score', total)}
           />
         </div>
       </SectionCard>
@@ -569,7 +570,7 @@ export default function Profile() {
         <div className="flex flex-wrap gap-2">
           {formData.background_summary && <Badge variant="outline">Background written</Badge>}
           {!!formData.ib_predicted_score && <Badge variant="outline">IB {formData.ib_predicted_score}/45</Badge>}
-          {ibSubjects.length > 0 && <Badge variant="outline">{ibSubjects.length} IB subjects</Badge>}
+          {ibFilled.length > 0 && <Badge variant="outline">{ibFilled.length} IB subjects</Badge>}
           {hasSAT && <Badge variant="outline">SAT on file</Badge>}
           {hasIELTS && <Badge variant="outline">IELTS on file</Badge>}
           {(formData.activities || []).length > 0 && <Badge variant="outline">{(formData.activities || []).length} activities</Badge>}

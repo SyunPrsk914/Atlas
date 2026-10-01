@@ -402,10 +402,13 @@ export function buildSharedEssayPlan(platform, existing = []) {
         type: 'personal_statement',
         scope: 'common',
         application_platform: 'common_app',
-        prompt: 'Choose ONE of the seven Common App prompts below, then write 250-650 words.\n\n' + COMMON_APP_PROMPTS.map((p) => `PROMPT ${p.number} (${p.share}% of last cycle chose this):\n${p.text}`).join('\n\n'),
+        // Empty on purpose. Dumping all seven prompts into one field makes the
+        // model try to answer every prompt at once. The editor makes the student
+        // choose one official prompt before a draft is written.
+        prompt: '',
         word_limit: COMMON_APP_PERSONAL_STATEMENT.maxWords,
         limit_unit: 'words',
-        shared_reason: 'Sent identically to every Common App school on your list.',
+        shared_reason: 'Sent identically to every Common App school on your list. Choose one of the seven official prompts in the editor.',
       },
       ...COMMON_APP_AUXILIARY.map((a) => ({
         title: `Common App — ${a.title}`,
@@ -428,18 +431,21 @@ export function buildSharedEssayPlan(platform, existing = []) {
       limit_unit: 'words',
       shared_reason: `The same four answers go to every UC campus. UC requires exactly ${UC_RULES.pick} of ${UC_RULES.of}.`,
     })),
-    ucas: [
-      {
-        title: 'UCAS Personal Statement (shared)',
-        type: 'personal_statement',
-        scope: 'common',
-        application_platform: 'ucas',
-        prompt: UCAS_PROMPT_TEXT,
-        word_limit: UCAS_RULES.totalChars,
-        limit_unit: 'characters',
-        shared_reason: 'ONE statement for all of your UCAS course choices — same wording everywhere.',
-      },
-    ],
+    // Three records, one per official question. The real UCAS form is three
+    // boxes that share one 4,000-character budget — not one essay with all
+    // three prompts pasted in.
+    ucas: UCAS_QUESTIONS.map((q) => ({
+      title: `UCAS Q${q.number} — ${q.label}`,
+      type: 'personal_statement',
+      scope: 'common',
+      application_platform: 'ucas',
+      prompt: q.prompt,
+      word_limit: UCAS_RULES.totalChars,
+      limit_unit: 'characters',
+      prompt_key: q.key,
+      min_chars: q.minChars,
+      shared_reason: `Question ${q.number} of 3. Minimum ${q.minChars} characters. The three answers share ${UCAS_RULES.totalChars.toLocaleString()} characters and go to every course choice.`,
+    })),
     coalition: [
       {
         title: 'Coalition Personal Essay',
@@ -527,6 +533,31 @@ export function normalizeUniversityName(name) {
   return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+/**
+ * "Stanford" and "Stanford University" are the same school. Stripping the word
+ * university is enough; we do not fuzzy-match shorter fragments, which would
+ * collapse York and New York.
+ */
+/** Key used to treat "Stanford" and "Stanford University" as one school. */
+export function universityMatchKey(name) {
+  return normalizeUniversityName(name).replace(/\buniversity\b/g, '').replace(/\s+/g, ' ').trim();
+}
+
+export function universityNamesMatch(a, b) {
+  const left = normalizeUniversityName(a);
+  const right = normalizeUniversityName(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const sa = universityMatchKey(a);
+  const sb = universityMatchKey(b);
+  return sa.length > 3 && sa === sb;
+}
+
+export function findKnowledgeRecord(rows, name) {
+  const list = rows || [];
+  return list.find((row) => universityNamesMatch(row.university_name, name)) || null;
+}
+
 // ---------------------------------------------------------------------------
 // Shared-essay applicability
 // ---------------------------------------------------------------------------
@@ -562,6 +593,76 @@ export function isUniversitySpecific(essay) {
 // ---------------------------------------------------------------------------
 // Length limits — UCAS counts characters, everything else counts words.
 // ---------------------------------------------------------------------------
+export function ucasQuestionFor(essay) {
+  if (!essay) return null;
+  const title = String(essay.title || '');
+  const numbered = title.match(/UCAS\s+Q\s*(\d)/i);
+  if (numbered) {
+    return UCAS_QUESTIONS.find((q) => q.number === Number(numbered[1])) || null;
+  }
+  const prompt = String(essay.prompt || '').trim();
+  if (!prompt) return null;
+  return UCAS_QUESTIONS.find((q) => prompt === q.prompt) || null;
+}
+
+export function isUcasQuestion(essay) {
+  return !!ucasQuestionFor(essay);
+}
+
+/** The old single-box UCAS essay, before the three official questions existed. */
+export function isLegacyUcasStatement(essay) {
+  if (!essay || isUcasQuestion(essay)) return false;
+  if ((essay.application_platform || '') !== 'ucas') return false;
+  return essay.scope === 'common' && /personal statement/i.test(essay.title || '');
+}
+
+export function ucasQuestionsFrom(essays = []) {
+  return UCAS_QUESTIONS.map((question) => ({
+    question,
+    essay: essays.find((essay) => ucasQuestionFor(essay)?.key === question.key) || null,
+  }));
+}
+
+export function ucasCharacterBudget(essays = []) {
+  const parts = ucasQuestionsFrom(essays).map(({ question, essay }) => ({
+    key: question.key,
+    number: question.number,
+    chars: String(essay?.content || '').length,
+    min: question.minChars,
+  }));
+  const total = parts.reduce((sum, part) => sum + part.chars, 0);
+  return {
+    total,
+    limit: UCAS_RULES.totalChars,
+    remaining: UCAS_RULES.totalChars - total,
+    minEach: UCAS_RULES.perAnswerMinChars,
+    parts,
+    over: total > UCAS_RULES.totalChars,
+  };
+}
+
+export function commonAppPromptsInText(text) {
+  const value = String(text || '');
+  return COMMON_APP_PROMPTS.filter((prompt) => value.includes(prompt.text.slice(0, 48)));
+}
+
+export function isAmbiguousCommonAppPrompt(text) {
+  return commonAppPromptsInText(text).length > 1;
+}
+
+export function isCommonAppPersonalStatement(essay) {
+  if (!essay) return false;
+  return essay.scope === 'common'
+    && (essay.application_platform || 'common_app') === 'common_app'
+    && essay.type === 'personal_statement'
+    && /personal statement/i.test(essay.title || '');
+}
+
+export function chosenCommonAppPrompt(essay) {
+  const hits = commonAppPromptsInText(essay?.prompt);
+  return hits.length === 1 ? hits[0] : null;
+}
+
 export function limitUnitFor(essay) {
   if (essay?.limit_unit) return essay.limit_unit;
   // Fallback so UCAS essays stay character-counted even before the optional
@@ -577,6 +678,18 @@ export function measureEssay(text, unit) {
 
 export function formatLimit(unit) {
   return unit === 'characters' ? 'characters' : 'words';
+}
+
+/**
+ * A missing limit must not become 650 words. UCAS is 4,000 characters; a
+ * `|| 650` fallback is how a character-counted statement was saved as a
+ * 650-word essay.
+ */
+export function resolvedEssayLimit(draft) {
+  const n = Number(draft?.word_limit);
+  if (Number.isFinite(n) && n > 0) return n;
+  const unit = draft?.limit_unit || (draft?.application_platform === 'ucas' ? 'characters' : 'words');
+  return unit === 'characters' ? 4000 : 650;
 }
 
 // ---------------------------------------------------------------------------

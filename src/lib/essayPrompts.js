@@ -3,7 +3,10 @@
 // be reviewed (and fixed) in one place.
 
 import { buildProfileContext } from './profileContext';
-import { measureEssay, limitUnitFor, formatLimit } from './applicationData';
+import {
+  measureEssay, limitUnitFor, formatLimit, isUcasQuestion, ucasQuestionFor,
+  ucasCharacterBudget, isAmbiguousCommonAppPrompt,
+} from './applicationData';
 
 /** Shared writing = one answer that is identical at every school on a platform. */
 function platformBrief(university, platform) {
@@ -14,7 +17,7 @@ function platformBrief(university, platform) {
     return `This is a UC Personal Insight Question answer. The same answer goes to every UC campus you select, so keep it campus-agnostic. UC answers 350 words exactly, and the admissions reader is scoring 13 holistic factors — your job is to make your evidence legible, not to be brilliant.`;
   }
   if (platform === 'ucas') {
-    return `This is part of the UCAS personal statement, which is counted in CHARACTERS (4,000 including spaces across all three questions, 350 characters minimum per answer). The SAME statement goes to every course on your UCAS application: never name a university or refer to a specific campus. Oxford expects roughly 80% academic content, and Cambridge caps non-academic material at 20% of the answer it sits in — draft to the tighter of those.`;
+    return `This is ONE answer in the UCAS personal statement, not all three questions. Characters are counted including spaces: 4,000 shared across the three answers, 350 minimum in each box. The same wording goes to every course choice, so never name a university or a specific campus. Oxford expects roughly 80% academic content, and Cambridge caps non-academic material at 20% of the answer it sits in — draft to the tighter of those.`;
   }
   if (platform === 'coalition') {
     return `This is the SHARED Coalition Application personal essay, sent identically to every Coalition member school. No school-specific content.`;
@@ -54,7 +57,15 @@ const HUMAN_VOICE_RULES = `VOICE RULES — this is the single most important sec
 - Concrete over abstract, always: a name, a number, a time, a place, a specific object, a specific thing someone said.
 - Do NOT invent experiences. If the profile does not contain a detail you need, write around it and let the applicant fill it in afterwards.`;
 
-function lengthBrief(essay) {
+function lengthBrief(essay, allEssays) {
+  if (isUcasQuestion(essay)) {
+    const budget = ucasCharacterBudget(allEssays?.length ? allEssays : [essay]);
+    const mine = String(essay.content || '').length;
+    const others = Math.max(0, budget.total - mine);
+    const room = Math.max(0, budget.limit - others);
+    const question = ucasQuestionFor(essay);
+    return `LENGTH: this is UCAS question ${question?.number || ''} of 3 only. Minimum ${question?.minChars || 350} characters in this box. The three answers SHARE ${budget.limit.toLocaleString()} characters including spaces. The other answers currently use ${others.toLocaleString()}, so this answer must stay within ${room.toLocaleString()} characters. Do not write ${budget.limit.toLocaleString()} characters in this box.`;
+  }
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
   const current = measureEssay(essay.content || '', unit);
@@ -64,11 +75,15 @@ function lengthBrief(essay) {
 }
 
 // ---------------------------------------------------------------------------
-export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText }) {
+export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, allEssays }) {
   const unit = limitUnitFor(essay);
-  const limit = Number(essay.word_limit) || 650;
+  const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
+  const promptWarning = isAmbiguousCommonAppPrompt(essay?.prompt)
+    ? 'The prompt field currently contains more than one official prompt. Do not write a draft. Say in essay_analysis that the applicant must choose exactly one prompt first, and leave essay empty.'
+    : '';
 
   return `You are an elite college admissions essay consultant who has read thousands of admitted students' essays. You understand holistic admissions and, above all, THE SPECIFIC ROLE each essay plays.
+${promptWarning}
 
 THE ROLE OF THIS PARTICULAR ESSAY:
 ${essayRoleBrief(essay)}
@@ -89,7 +104,7 @@ THE ESSAY TO WRITE:
 - Programme / major: ${university?.major || 'Not specified'}
 - Essay type: ${essay?.type}
 - Prompt: ${essay?.prompt || 'No prompt supplied — write a personal statement that reveals who the applicant is.'}
-- Limit: ${limit.toLocaleString()} ${formatLimit(unit)}${unit === 'characters' ? ' (counted in characters INCLUDING spaces — a character budget is much tighter than it looks, so be ruthless)' : ''}
+- ${isUcasQuestion(essay) ? lengthBrief(essay, allEssays) : `Limit: ${limit.toLocaleString()} ${formatLimit(unit)}${unit === 'characters' ? ' (counted in characters INCLUDING spaces)' : ''}`}
 
 ${HUMAN_VOICE_RULES}
 
@@ -112,8 +127,10 @@ export const GENERATE_SCHEMA = {
   },
 };
 
-export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes }) {
+export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes, allEssays }) {
   return `You are a senior admissions officer at ${university?.name || 'this university'} reading a stack of real files. Be strict. Most applicants here are qualified and still rejected.
+
+${lengthBrief(essay, allEssays)}
 
 JUDGE ONLY AGAINST WHAT THIS PROMPT ACTUALLY ASKS:
 ${essayRoleBrief(essay)}
@@ -126,7 +143,7 @@ THE ESSAY:
 ${essay?.content || ''}
 ESSAY>>>
 
-${lengthBrief(essay)}
+${lengthBrief(essay, allEssays)}
 
 UNIVERSITY RESEARCH AND IDEAL STUDENT:
 ${knowledgeText || 'No research cached. Judge on the quality of the writing itself.'}
@@ -168,7 +185,7 @@ export const REVIEW_SCHEMA = {
   },
 };
 
-export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText }) {
+export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText, allEssays }) {
   return `You are a master essay editor. Your job is to make this essay more human, more specific, and better aligned to its prompt — without inventing anything.
 
 ${essayRoleBrief(essay)}
@@ -184,7 +201,7 @@ ${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check):
 - Exact phrases flagged: ${(reviewResult.quoted_evidence || []).join(' | ') || 'none reported'}
 ` : ''}
 
-${lengthBrief(essay)}
+${lengthBrief(essay, allEssays)}
 
 UNIVERSITY RESEARCH:
 ${knowledgeText || 'None cached.'}

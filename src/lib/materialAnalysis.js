@@ -27,7 +27,8 @@ const GRANULARITY_RULES = `ANALYSIS METHOD — read the text word by word, not b
 /** Prompt for analysing an essay-like material. */
 export function buildEssayAnalysisPrompt({ title, text, kind = 'essay' }) {
   const kindLabel = {
-    essay: 'a personal statement or essay',
+    essay: 'a personal statement or essay written by the applicant',
+    sample_essay: 'a successful essay written by someone else',
     resume: 'a resume or CV',
     transcript: 'an academic transcript',
     document: 'a supporting document',
@@ -35,9 +36,16 @@ export function buildEssayAnalysisPrompt({ title, text, kind = 'essay' }) {
     other: 'a supporting document',
   }[kind] || 'a document';
 
+  const sampleRule = kind === 'sample_essay'
+    ? `THIS IS A SAMPLE. It was not written by the applicant.
+Study it as craft, word by word: content, expression, voice, tone, the characteristics of the writing, the emotion it evokes, and how each word is used to show what the writer wants the reader to understand.
+Do not score it as the applicant's writing. Do not suggest they submit it. Do not treat any person, place, or event in it as their life.
+`
+    : '';
+
   return `You are a meticulous line editor reviewing ${kindLabel} titled "${title}".
 
-${GRANULARITY_RULES}
+${sampleRule}${GRANULARITY_RULES}
 
 WHAT THE ADMISSIONS COMMITTEE IS ACTUALLY LOOKING FOR:
 - A distinct voice that could only belong to this applicant.
