@@ -1,6 +1,6 @@
-// Shared client for the self-hosted /api/invoke-llm endpoint (the replacement
-// for Base44's Core.InvokeLLM). Used by both the Supabase and the demo
-// backends, so behavior is identical once deployed.
+// Optional hosted-provider client for /api/invoke-llm. The default local
+// Ollama path is implemented separately in ollamaClient.js and never reaches
+// this endpoint. Used only after explicit Hosted mode selection.
 //
 // invokeLLM() keeps the historical contract (returns the parsed object or the
 // string) so `base44.integrations.Core.InvokeLLM` is unchanged for callers.
@@ -48,7 +48,8 @@ export async function invokeLLMDetailed(params, getAuthToken) {
   if (!res.ok || body.ok === false) {
     throw makeError(body.error || `AI request failed (HTTP ${res.status})`, {
       status: res.status,
-      code: body.error?.code,
+      code: body.error?.code || body.code,
+      provider: body.provider,
       raw_preview: body.raw_preview,
     });
   }

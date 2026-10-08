@@ -149,7 +149,12 @@ create table if not exists public.college_knowledge (
   updated_at timestamptz not null default now(),
   university_name text not null,
   knowledge text,
-  last_updated timestamptz
+  last_updated timestamptz,
+  source_url text,
+  source_text text,
+  research_provider text,
+  research_model text,
+  grounded boolean not null default false
 );
 
 -- ---------------------------------------------------------------------------
@@ -206,6 +211,13 @@ alter table public.universities add column if not exists application_platform te
 alter table public.essays add column if not exists limit_unit text;
 
 alter table public.materials add column if not exists analysis jsonb;
+
+-- Knowledge Base source and provider provenance; safe to apply repeatedly.
+alter table public.college_knowledge add column if not exists source_url text;
+alter table public.college_knowledge add column if not exists source_text text;
+alter table public.college_knowledge add column if not exists research_provider text;
+alter table public.college_knowledge add column if not exists research_model text;
+alter table public.college_knowledge add column if not exists grounded boolean not null default false;
 
 alter table public.profiles add column if not exists full_name text;
 alter table public.profiles add column if not exists citizenship_status text;

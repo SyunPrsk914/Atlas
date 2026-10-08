@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -14,6 +15,8 @@ import {
   ExternalLink, CheckCircle2, AlertTriangle, FileText, ChevronDown,
 } from 'lucide-react';
 import { runAI, refreshAIStatus } from '@/lib/ai';
+import { getAIMode } from '@/api/ollamaClient';
+import { fetchPublicAdmissionsPage, normalizePublicPageUrl } from '@/lib/researchSource';
 import { buildProfileContext } from '@/lib/profileContext';
 import { getUniversityPlatform, PLATFORMS, universityNamesMatch, universityMatchKey } from '@/lib/essayScope';
 import { daysSince } from '@/lib/dates';
@@ -29,7 +32,7 @@ import { daysSince } from '@/lib/dates';
 function buildResearchPrompt({ uniName, platform, major, profileText, isUK }) {
   const platformLabel = PLATFORMS[platform]?.label || 'the university’s application system';
 
-  return `You are a senior international admissions researcher. Research ${uniName} admissions using OFFICIAL primary sources only: the university's own admissions pages, its Common Data Set (if the US school publishes one), the UCAS/UC/Common App pages for the platform it uses, and official admissions publications. Today is 30 September 2026, so the relevant cycle is 2026-27 applications for Fall 2027 entry.
+  return `You are a senior international admissions researcher. Research ${uniName} admissions using OFFICIAL primary sources only: the university's own admissions pages, its Common Data Set (if the US school publishes one), the UCAS/UC/Common App pages for the platform it uses, and official admissions publications. Today is 3 October 2026, so the relevant cycle is 2026-27 applications for Fall 2027 entry.
 
 STUDENT CONTEXT (use this to make the research specific, not generic):
 ${profileText || 'No profile saved yet — research for a strong international applicant and note what you assumed.'}
@@ -63,6 +66,19 @@ Required, optional or none. Format, length, and what it assesses.
 Anything specific to international students, plus anything that constrains this student's application given the context above.
 
 Rules: state the year for every statistic. If something is genuinely unknown, write "Not published" rather than guessing — a confident wrong number is worse than an admitted gap.`;
+}
+
+function addOfficialSource(prompt, sourceUrl, sourceText) {
+  if (!sourceUrl || !sourceText) return prompt;
+  return `${prompt}
+
+USER-SUPPLIED PUBLIC OFFICIAL SOURCE PAGE
+Source URL: ${sourceUrl}
+The following text was fetched in the user's browser without cookies. Treat it as primary-source material. Use only facts supported by this text and any successful Gemini Google Search grounding; do not claim to have checked pages that were not supplied or successfully grounded. If the page does not publish a requested fact, say "Not published" rather than guessing.
+
+--- BEGIN SOURCE PAGE TEXT ---
+${sourceText}
+--- END SOURCE PAGE TEXT ---`;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +180,11 @@ export default function KnowledgeBase() {
   const [aiStatus, setAiStatus] = useState(null);
   const [openSection, setOpenSection] = useState(null);
   const [query, setQuery] = useState('');
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceText, setSourceText] = useState('');
+  const [fetchingSource, setFetchingSource] = useState(false);
+  const [sourceFetchMessage, setSourceFetchMessage] = useState('');
+  const [sourceFetchError, setSourceFetchError] = useState('');
 
   const loadLibrary = useCallback(async () => {
     const rows = await base44.entities.CollegeKnowledge.list();
@@ -187,6 +208,8 @@ export default function KnowledgeBase() {
         if (rows.length > 0) {
           const latest = [...rows].sort((a, b) => String(b.last_updated || '').localeCompare(String(a.last_updated || '')))[0];
           setSelectedKey(latest.university_name);
+          setSourceUrl(latest.source_url || '');
+          setSourceText(latest.source_text || '');
         }
       } catch (e) {
         console.error(e);
@@ -236,29 +259,81 @@ export default function KnowledgeBase() {
     (k) => universityNamesMatch(k.university_name, targetName),
   );
 
+  const chooseTarget = (name) => {
+    const report = library.find((item) => universityNamesMatch(item.university_name, name));
+    setSelectedKey(name);
+    setUseCustom(false);
+    setSourceUrl(report?.source_url || '');
+    setSourceText(report?.source_text || '');
+    setSourceFetchMessage('');
+    setSourceFetchError('');
+    setLastMeta(null);
+  };
+
+  const handleFetchSource = async () => {
+    setFetchingSource(true);
+    setSourceFetchError('');
+    setSourceFetchMessage('');
+    try {
+      const result = await fetchPublicAdmissionsPage(sourceUrl);
+      setSourceUrl(result.sourceUrl);
+      setSourceText(result.text);
+      setSourceFetchMessage(`Fetched ${result.text.length.toLocaleString()} characters${result.title ? ` from “${result.title}”` : ''}.`);
+    } catch (error) {
+      setSourceFetchError(error.message || 'Could not fetch this page. You can paste its public text below.');
+    } finally {
+      setFetchingSource(false);
+    }
+  };
+
   const handleResearch = async () => {
     const uniName = targetName;
     if (!uniName) return;
+
+    const mode = getAIMode();
+    let normalizedSourceUrl = '';
+    if (mode !== 'demo' && !sourceText.trim()) {
+      toast.error('Add the official admissions page text first', {
+        description: 'Fetch the public page from your browser, or paste its text. If the site blocks browser fetches, Atlas will not proxy around that block.',
+      });
+      return;
+    }
+    if (sourceUrl.trim()) {
+      try {
+        normalizedSourceUrl = normalizePublicPageUrl(sourceUrl);
+      } catch (error) {
+        toast.error('The source URL is not valid', { description: error.message });
+        return;
+      }
+    }
+    if (mode !== 'demo' && !normalizedSourceUrl) {
+      toast.error('A public source URL is required', {
+        description: 'Enter the official admissions URL used to fetch or copy the page text.',
+      });
+      return;
+    }
 
     setResearching(true);
     setLastMeta(null);
     try {
       const platform = targetUniversity ? getUniversityPlatform(targetUniversity) : (isUK ? 'ucas' : 'common_app');
       const profileText = buildProfileContext(profile);
+      const researchPrompt = buildResearchPrompt({
+        uniName,
+        platform,
+        major: targetUniversity?.major,
+        profileText,
+        isUK,
+      });
+      const prompt = mode === 'demo'
+        ? researchPrompt
+        : addOfficialSource(researchPrompt, normalizedSourceUrl, sourceText.trim());
 
       const { ok, result, meta } = await runAI(
         {
-          prompt: buildResearchPrompt({
-            uniName,
-            platform,
-            major: targetUniversity?.major,
-            profileText,
-            isUK,
-          }),
-          // Web grounding is what makes this feature worth having — ask for it.
-          // The server tells us honestly if it could not be honoured.
-          // No model is pinned here: the server picks the provider's current
-          // default, so this keeps working as models are retired.
+          prompt,
+          // Local Ollama ignores this and uses the source text above. Only a
+          // selected Gemini hosted provider may perform Google Search grounding.
           add_context_from_internet: true,
         },
         { fallbackTitle: `Research failed for ${uniName}` },
@@ -274,12 +349,21 @@ export default function KnowledgeBase() {
       }
 
       const stamp = new Date().toISOString();
+      const reportFields = {
+        knowledge: knowledgeText,
+        last_updated: stamp,
+        source_url: normalizedSourceUrl || null,
+        source_text: sourceText.trim() || null,
+        research_provider: meta.provider || 'demo',
+        research_model: meta.model || null,
+        grounded: meta.grounded === true,
+      };
       // "Stanford" and "Stanford University" are the same report.
-      const existing = (await loadLibrary()).find((k) => universityNamesMatch(k.university_name, uniName));
+      const existing = (await loadLibrary()).find((item) => universityNamesMatch(item.university_name, uniName));
 
       const saved = existing
-        ? await base44.entities.CollegeKnowledge.update(existing.id, { knowledge: knowledgeText, last_updated: stamp })
-        : await base44.entities.CollegeKnowledge.create({ university_name: uniName, knowledge: knowledgeText, last_updated: stamp });
+        ? await base44.entities.CollegeKnowledge.update(existing.id, reportFields)
+        : await base44.entities.CollegeKnowledge.create({ university_name: uniName, ...reportFields });
 
       await loadLibrary();
       setSelectedKey(uniName);
@@ -287,12 +371,17 @@ export default function KnowledgeBase() {
       setLastMeta(meta);
       setUseCustom(false);
       setCustomName('');
+      if (normalizedSourceUrl) setSourceUrl(normalizedSourceUrl);
       toast.success(`Research saved for ${uniName}`, {
         description: existing ? 'Existing report refreshed.' : 'Added to your Knowledge Base.',
       });
       if (saved?.knowledge === undefined) {
         toast.warning('The report was generated but could not be saved', {
           description: 'Check that your Supabase RLS policies allow writes to college_knowledge.',
+        });
+      } else if (sourceText.trim() && saved.source_text === undefined) {
+        toast.warning('The report saved, but its source text was not cached', {
+          description: 'Run the latest supabase/schema.sql in Supabase so source_url, source_text, and grounding metadata can be saved.',
         });
       }
     } finally {
@@ -305,7 +394,12 @@ export default function KnowledgeBase() {
     try {
       await base44.entities.CollegeKnowledge.delete(record.id);
       await loadLibrary();
-      if (universityNamesMatch(selectedKey, record.university_name)) setSelectedKey(null);
+      if (universityNamesMatch(selectedKey, record.university_name)) {
+        setSelectedKey(null);
+        setSourceUrl('');
+        setSourceText('');
+        setLastMeta(null);
+      }
       toast.success(`Deleted the ${record.university_name} report`);
     } catch (e) {
       toast.error('Could not delete the report', { description: e.message });
@@ -320,7 +414,11 @@ export default function KnowledgeBase() {
     );
   }
 
-  const aiOffline = aiStatus && aiStatus.reachable && aiStatus.configured === false;
+  const demoAI = aiStatus?.mode === 'demo';
+  const aiUnavailable = aiStatus && !aiStatus.reachable;
+  const selectedProvider = selected?.research_provider || lastMeta?.provider;
+  const selectedGrounded = selected?.grounded === true || lastMeta?.grounded === true;
+  const selectedDemo = selectedProvider === 'demo' || lastMeta?.demo === true;
 
   return (
     <div className="space-y-6">
@@ -328,8 +426,7 @@ export default function KnowledgeBase() {
         <div>
           <h1 className="font-display text-3xl font-semibold tracking-tight">Knowledge Base</h1>
           <p className="text-foreground/50 mt-1.5">
-            Deep, source-checked research on any university — deadlines, requirements, ideal student, and essay
-            roles. Every report feeds the Essay Builder and the application review.
+            Admissions research grounded in the official public page you provide — deadlines, requirements, ideal student, and essay roles. Every report feeds the Essay Builder and application review.
           </p>
         </div>
         {aiStatus && (
@@ -337,16 +434,23 @@ export default function KnowledgeBase() {
         )}
       </div>
 
-      {aiOffline && (
+      {demoAI && (
         <div className="flex items-start gap-3 p-4 rounded-xl bg-amber-50 border border-amber-200">
           <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div>
-            <p className="text-sm font-medium text-amber-800">No AI provider is connected</p>
+            <p className="text-sm font-medium text-amber-800">Demo AI is active</p>
             <p className="text-sm text-amber-700/80 mt-0.5">
-              Research, essay generation and reviews will return clearly-marked placeholder text until you add
-              <span className="font-mono"> GEMINI_API_KEY </span>
-              (recommended — it also enables live web grounding) to your Vercel project. See DEPLOYMENT.md, Part 2.
+              Reports and other AI outputs are clearly labeled placeholders until you connect a local Ollama model in the AI setup panel. Atlas does not require a hosted key.
             </p>
+          </div>
+        </div>
+      )}
+      {aiUnavailable && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-amber-50 border border-amber-200">
+          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-medium text-amber-800">Selected AI provider is unavailable</p>
+            <p className="text-sm text-amber-700/80 mt-0.5">{aiStatus.message || 'Open AI setup to check Ollama and OLLAMA_ORIGINS.'}</p>
           </div>
         </div>
       )}
@@ -362,9 +466,16 @@ export default function KnowledgeBase() {
             <Select
               value={useCustom ? '__custom__' : (selectedKey || '')}
               onValueChange={(v) => {
-                if (v === '__custom__') { setUseCustom(true); return; }
-                setUseCustom(false);
-                setSelectedKey(v);
+                if (v === '__custom__') {
+                  setUseCustom(true);
+                  setSourceUrl('');
+                  setSourceText('');
+                  setSourceFetchError('');
+                  setSourceFetchMessage('');
+                  setLastMeta(null);
+                  return;
+                }
+                chooseTarget(v);
               }}
             >
               <SelectTrigger className="w-full">
@@ -392,7 +503,7 @@ export default function KnowledgeBase() {
               />
             )}
 
-            <Button
+              <Button
               onClick={handleResearch}
               disabled={researching || !targetName}
               className="w-full"
@@ -401,9 +512,52 @@ export default function KnowledgeBase() {
               {researching ? 'Researching…' : targetResearched ? 'Refresh research' : 'Research university'}
             </Button>
 
+            <div className="space-y-2.5 border-t border-border pt-3">
+              <label className="block text-xs font-medium text-foreground/55" htmlFor="official-admissions-url">
+                Official admissions page URL
+              </label>
+              <div className="flex gap-2">
+                <Input
+                  id="official-admissions-url"
+                  value={sourceUrl}
+                  onChange={(event) => {
+                    setSourceUrl(event.target.value);
+                    setSourceFetchError('');
+                    setSourceFetchMessage('');
+                  }}
+                  placeholder="https://admissions.university.edu/..."
+                  autoComplete="url"
+                />
+                <Button type="button" variant="outline" onClick={handleFetchSource} disabled={fetchingSource || !sourceUrl.trim()}>
+                  {fetchingSource ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+                  <span className="sr-only sm:not-sr-only sm:ml-1">Fetch</span>
+                </Button>
+              </div>
+              {sourceFetchMessage && <p className="text-[11px] text-green-700" role="status">{sourceFetchMessage}</p>}
+              {sourceFetchError && (
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2" role="alert">
+                  {sourceFetchError} Paste the public page text below.
+                </p>
+              )}
+              <label className="block text-xs font-medium text-foreground/55" htmlFor="official-admissions-text">
+                Public page text (required for real-model research)
+              </label>
+              <Textarea
+                id="official-admissions-text"
+                value={sourceText}
+                onChange={(event) => setSourceText(event.target.value)}
+                placeholder="Fetch the page above, or paste the publicly visible admissions-page text here. Atlas never signs in, scrapes behind a login, or bypasses a fetch block."
+                rows={6}
+                className="text-xs"
+              />
+              <p className="text-[11px] text-foreground/40 leading-relaxed">
+                Atlas fetches this URL directly in your browser without cookies or a proxy. If cross-origin access fails, paste the public text. Local Ollama uses this text; only a successful Gemini call can be labeled web-grounded.
+              </p>
+            </div>
+
             <p className="text-xs text-foreground/40 flex items-start gap-1.5">
               <Clock className="w-3 h-3 mt-0.5 shrink-0" />
-              Uses live web search across official sources. Usually 20-60 seconds.
+              Local model speed depends on your computer. Queued calls run in order; hosted-provider quotas, if used, are set by that provider.
             </p>
 
             {profile && (
@@ -440,7 +594,7 @@ export default function KnowledgeBase() {
                   return (
                     <div key={record.id} className={`group flex items-start gap-1 px-3 py-2.5 ${active ? 'bg-muted/60' : ''}`}>
                       <button
-                        onClick={() => { setSelectedKey(record.university_name); setUseCustom(false); }}
+                        onClick={() => chooseTarget(record.university_name)}
                         className="flex-1 text-left min-w-0"
                       >
                         <span className={`block text-sm truncate ${active ? 'font-medium' : ''}`}>
@@ -477,7 +631,7 @@ export default function KnowledgeBase() {
                 {missing.slice(0, 8).map((u) => (
                   <li key={u.id}>
                     <button
-                      onClick={() => { setUseCustom(false); setSelectedKey(u.name); }}
+                      onClick={() => chooseTarget(u.name)}
                       className="text-xs text-accent hover:underline text-left"
                     >
                       {u.name}
@@ -504,20 +658,33 @@ export default function KnowledgeBase() {
             </div>
           )}
 
-          {!researching && lastMeta && (
-            <div className={`flex items-start gap-2.5 p-3 rounded-xl border text-xs ${
-              lastMeta.grounded
-                ? 'bg-green-50 border-green-200 text-green-800'
-                : 'bg-amber-50 border-amber-200 text-amber-800'
-            }`}>
-              {lastMeta.grounded
-                ? <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
-              <span>
-                {lastMeta.grounded
-                  ? `Researched with live web search${lastMeta.model ? ` (${lastMeta.model})` : ''}.`
-                  : lastMeta.warning || 'This report was written from model knowledge, not live sources.'}
-              </span>
+          {!researching && selected && (selectedProvider || selected.source_url) && (
+            <div className={`rounded-xl border p-3 text-xs ${selectedGrounded ? 'bg-green-50 border-green-200 text-green-800' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
+              <div className="flex items-start gap-2">
+                {selectedGrounded
+                  ? <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
+                <div className="space-y-1 min-w-0">
+                  <p className="font-medium">
+                    {selectedDemo
+                      ? 'DEMO OUTPUT — placeholder research, not an AI answer.'
+                      : selectedGrounded
+                        ? `Web-grounded with Gemini${selected.research_model ? ` (${selected.research_model})` : lastMeta?.model ? ` (${lastMeta.model})` : ''}.`
+                        : `NOT WEB-GROUNDED${selectedProvider ? ` — ${selectedProvider}` : ''}. This report used the model and supplied page text; no successful Gemini web grounding was recorded.`}
+                  </p>
+                  {selected.source_url && (
+                    <p className="break-all">
+                      Source page: <a href={selected.source_url} target="_blank" rel="noopener noreferrer" className="underline">{selected.source_url}</a>
+                    </p>
+                  )}
+                  {selected.source_text && (
+                    <details className="pt-1">
+                      <summary className="cursor-pointer">Cached source text ({selected.source_text.length.toLocaleString()} characters)</summary>
+                      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-white/60 p-2 text-[11px]">{selected.source_text}</pre>
+                    </details>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -623,21 +790,21 @@ function AIStatusPill({ status }) {
   if (!status.reachable) {
     return (
       <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title={status.message}>
-        <AlertTriangle className="w-3 h-3" /> AI endpoint not reachable
+        <AlertTriangle className="w-3 h-3" /> Selected AI offline
       </Badge>
     );
   }
-  if (!status.configured) {
+  if (status.mode === 'demo' || !status.configured) {
     return (
-      <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title="No provider key is set on the server. See DEPLOYMENT.md part 2.">
+      <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title="Demo output is labeled. Configure local Ollama in AI setup for real model output.">
         <AlertTriangle className="w-3 h-3" /> Demo AI
       </Badge>
     );
   }
   return (
-    <Badge variant="outline" className="gap-1.5 text-green-700 border-green-300 bg-green-50">
+    <Badge variant="outline" className="gap-1.5 text-green-700 border-green-300 bg-green-50" title={status.provider === 'ollama' ? 'Local Ollama. Not web-grounded.' : 'Optional hosted provider; provider quotas apply.'}>
       <CheckCircle2 className="w-3 h-3" />
-      {status.provider}{status.grounding ? ' · web-grounded' : ''}
+      {status.provider === 'ollama' ? 'Ollama · local' : `${status.provider} · hosted`}
     </Badge>
   );
 }

@@ -20,13 +20,15 @@ function send(res, status, payload) {
 function readEnvStatus() {
   const keys = {
     gemini: !!process.env.GEMINI_API_KEY,
+    nararouter: !!process.env.NARAROUTER_API_KEY,
+    groq: !!process.env.GROQ_API_KEY,
+    openrouter: !!process.env.OPENROUTER_API_KEY,
     openai: !!process.env.OPENAI_API_KEY,
     anthropic: !!process.env.ANTHROPIC_API_KEY,
   };
 
   const explicit = (process.env.LLM_PROVIDER || '').toLowerCase();
-  const provider = explicit
-    || (keys.gemini ? 'gemini' : keys.openai ? 'openai' : keys.anthropic ? 'anthropic' : '');
+  const provider = explicit || Object.keys(keys).find((name) => keys[name]) || '';
 
   return {
     configured: !!provider && keys[provider] === true,

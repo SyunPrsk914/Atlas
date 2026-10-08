@@ -1,7 +1,7 @@
-// /api/invoke-llm — Vercel serverless function replacing Base44's Core.InvokeLLM.
+// /api/invoke-llm — optional hosted-provider endpoint for explicit Hosted mode.
 //
-// The app pays no Base44 credits: the model call is made with YOUR provider API
-// key (Gemini / OpenAI / Anthropic) configured as Vercel environment variables.
+// The default local Ollama path does not call this function. Hosted keys are
+// configured server-side and their provider quotas/prices remain in force.
 //
 // Request body (POST):
 //   {
@@ -45,14 +45,20 @@ const GEMINI_ALIASES = {
 
 const PROVIDER_DEFAULTS = {
   gemini: process.env.GEMINI_MODEL || 'gemini-flash-latest',
+  nararouter: process.env.NARAROUTER_MODEL || 'agnes-3-flash',
   openai: process.env.OPENAI_MODEL || 'gpt-4o',
   anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+  groq: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  openrouter: process.env.OPENROUTER_MODEL || 'openrouter/auto',
 };
 
 function detectProvider() {
   const explicit = (process.env.LLM_PROVIDER || '').toLowerCase();
   if (explicit) return explicit;
   if (process.env.GEMINI_API_KEY) return 'gemini';
+  if (process.env.NARAROUTER_API_KEY) return 'nararouter';
+  if (process.env.GROQ_API_KEY) return 'groq';
+  if (process.env.OPENROUTER_API_KEY) return 'openrouter';
   if (process.env.OPENAI_API_KEY) return 'openai';
   if (process.env.ANTHROPIC_API_KEY) return 'anthropic';
   return '';
@@ -61,8 +67,11 @@ function detectProvider() {
 function apiKeyFor(provider) {
   switch (provider) {
     case 'gemini': return process.env.GEMINI_API_KEY;
+    case 'nararouter': return process.env.NARAROUTER_API_KEY;
     case 'openai': return process.env.OPENAI_API_KEY;
     case 'anthropic': return process.env.ANTHROPIC_API_KEY;
+    case 'groq': return process.env.GROQ_API_KEY;
+    case 'openrouter': return process.env.OPENROUTER_API_KEY;
     default: return '';
   }
 }
@@ -103,27 +112,6 @@ function toGeminiSchema(schema) {
   return out;
 }
 
-/** Build a schema-shaped demo payload (used only when no AI key is configured). */
-function demoSchemaValue(schema, demoText, depth = 0) {
-  if (!schema || typeof schema !== 'object' || depth > 6) return demoText;
-  switch (schema.type) {
-    case 'object': {
-      const out = {};
-      for (const [k, v] of Object.entries(schema.properties || {})) out[k] = demoSchemaValue(v, demoText, depth + 1);
-      return out;
-    }
-    case 'array':
-      return [demoSchemaValue(schema.items, demoText, depth + 1)];
-    case 'number':
-    case 'integer':
-      return 0;
-    case 'boolean':
-      return false;
-    default:
-      return demoText;
-  }
-}
-
 /** Extract a JSON object/array from model text, tolerating code fences. */
 function extractJSON(text) {
   if (typeof text !== 'string') return null;
@@ -159,8 +147,10 @@ ${JSON.stringify(responseJsonSchema)}`;
  */
 function explainProviderError(provider, message, status) {
   const m = String(message || '');
-  if (status === 429 || /rate limit|quota|resource_exhausted/i.test(m)) {
-    return 'The AI provider is rate-limiting you (quota or requests-per-minute exceeded). Wait a minute, or check the billing/quota page for your key in Vercel → Environment Variables.';
+  if (status === 429) {
+    // Preserve the provider's actual error body. Never rewrite a real 429 into
+    // an app-authored success or a generic quota message.
+    return m || `${provider.toUpperCase()} returned HTTP 429.`;
   }
   if (status === 401 || status === 403 || /api key not valid|permission denied|unauthorized/i.test(m)) {
     return `Your ${provider.toUpperCase()} API key was rejected. It is missing, expired, or has the wrong permissions — re-check the key in Vercel → Environment Variables.`;
@@ -188,6 +178,7 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
   let resolved = aliases[model] || model || PROVIDER_DEFAULTS.gemini;
   const wantsJson = !!responseJsonSchema && !addContext;
   let finishReason = '';
+  let grounded = false;
 
   const call = async (modelName) => {
     const generationConfig = {};
@@ -221,6 +212,11 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
     }
     const candidate = data?.candidates?.[0];
     finishReason = candidate?.finishReason || '';
+    const groundingMetadata = candidate?.groundingMetadata;
+    grounded = !!(
+      groundingMetadata?.groundingChunks?.length
+      || groundingMetadata?.webSearchQueries?.length
+    );
     const parts = candidate?.content?.parts || [];
     return parts.map((p) => p.text || '').join('');
   };
@@ -230,6 +226,7 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
     text: await call(modelName),
     model: modelName,
     finishReason,
+    grounded,
   });
 
   try {
@@ -244,33 +241,52 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
   }
 }
 
-async function callOpenAI({ prompt, responseJsonSchema, model, maxTokens }) {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error('OPENAI_API_KEY is not set on the server.');
-  const base = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+async function callOpenAICompatible({ provider = 'openai', prompt, responseJsonSchema, model, maxTokens }) {
+  const key = apiKeyFor(provider);
+  if (!key) throw new Error(`${provider.toUpperCase()}_API_KEY is not set on the server.`);
+  const base = (provider === 'openai'
+    ? process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+    : provider === 'groq'
+      ? process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'
+      : provider === 'openrouter'
+        ? process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
+        : process.env.NARAROUTER_BASE_URL || 'https://router.bynara.id/v1'
+  ).replace(/\/$/, '');
 
   const body = {
-    model: model && !model.startsWith('gemini') && !model.startsWith('claude')
-      ? model
-      : PROVIDER_DEFAULTS.openai,
+    model: model || PROVIDER_DEFAULTS[provider],
     messages: [{ role: 'user', content: prompt }],
   };
   if (responseJsonSchema) body.response_format = { type: 'json_object' };
   if (maxTokens) body.max_tokens = maxTokens;
 
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` };
+  if (provider === 'openrouter') {
+    headers['HTTP-Referer'] = process.env.OPENROUTER_SITE_URL || 'https://atlas.app';
+    headers['X-Title'] = 'Atlas';
+  }
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    headers,
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data?.error?.message || `OpenAI request failed (HTTP ${res.status})`);
+    const providerError = data?.error;
+    const errorMessage = typeof providerError === 'string'
+      ? providerError
+      : providerError?.message || `${provider.toUpperCase()} request failed (HTTP ${res.status})`;
+    const details = [
+      providerError?.type ? `Type: ${providerError.type}` : '',
+      providerError?.request_id ? `Request ID: ${providerError.request_id}` : '',
+    ].filter(Boolean);
+    const err = new Error([errorMessage, ...details].join(' · '));
     err.status = res.status;
-    err.provider = 'openai';
+    err.provider = provider;
+    err.providerCode = providerError?.type;
     throw err;
   }
-  return { text: data?.choices?.[0]?.message?.content || '', model: body.model, finishReason: data?.choices?.[0]?.finish_reason || '' };
+  return { text: data?.choices?.[0]?.message?.content || '', model: data?.model || body.model, finishReason: data?.choices?.[0]?.finish_reason || '' };
 }
 
 async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens }) {
@@ -392,33 +408,16 @@ export async function handleInvokeLLM(req, res) {
     }
   }
 
-  // --- Provider selection ---
-  // Internet-grounded research needs Google Search grounding -> only Gemini.
-  // When a non-Gemini key is the active provider we still answer (so the
-  // screen is usable), but we say out loud that the answer is NOT web-grounded.
+  // Hosted inference is only reached after the user explicitly selects it in
+  // AI setup. Ollama requests never touch this endpoint. Gemini is the only
+  // hosted provider allowed to request Google Search grounding.
   const provider = detectProvider();
   const groundingRequested = !!addContext;
   const groundingPossible = groundingRequested && provider === 'gemini' && !!process.env.GEMINI_API_KEY;
-  const groundingWarning = groundingRequested && !groundingPossible
-    ? 'Web search grounding is only available with Gemini. Set GEMINI_API_KEY and LLM_PROVIDER=gemini in Vercel to get live, source-checked university research — this answer came from the model\'s own knowledge.'
-    : '';
 
   if (!provider || !apiKeyFor(provider)) {
-    // No AI key configured (typical for first-run Demo mode): return clearly
-    // labeled DEMO content that matches the requested shape, so every screen
-    // stays explorable. This is never mistaken for real output — every string
-    // is explicitly marked, and real keys switch it off automatically.
-    const demoText = 'DEMO OUTPUT — no AI provider is connected yet. Add GEMINI_API_KEY (recommended), OPENAI_API_KEY, or ANTHROPIC_API_KEY to your Vercel project (or .env.local) to get real, deeply-researched, university-specific writing. See DEPLOYMENT.md, Part 2.';
-    send(res, 200, {
-      ok: true,
-      result: responseJsonSchema ? demoSchemaValue(responseJsonSchema, demoText) : demoText,
-      meta: {
-        provider: provider || 'none',
-        model: null,
-        grounded: false,
-        demo: true,
-        warning: 'No AI provider key is configured on the server, so this is placeholder text — not a real answer.',
-      },
+    send(res, 503, {
+      error: 'No hosted AI provider is configured for this deployment. Select a local Ollama model in AI setup, or configure an optional hosted provider key.',
     });
     return;
   }
@@ -435,12 +434,23 @@ export async function handleInvokeLLM(req, res) {
         model,
         maxTokens,
       });
-    } else if (provider === 'openai') {
-      out = await callWithModelFallback(
-        (m) => callOpenAI({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens }),
-        model && !model.startsWith('gemini') && !model.startsWith('claude') ? model : PROVIDER_DEFAULTS.openai,
-        PROVIDER_DEFAULTS.openai,
-      );
+    } else if (['openai', 'groq', 'openrouter', 'nararouter'].includes(provider)) {
+      const call = (requestedModel) => callOpenAICompatible({
+        provider,
+        prompt: finalPrompt,
+        responseJsonSchema,
+        model: requestedModel,
+        maxTokens,
+      });
+      // NaraRouter aliases are plan-specific and the gateway reports its real
+      // 4xx/429 errors. Do not retry a failed request with a different model.
+      out = provider === 'nararouter'
+        ? await call(model || PROVIDER_DEFAULTS.nararouter)
+        : await callWithModelFallback(
+          call,
+          model || PROVIDER_DEFAULTS[provider],
+          PROVIDER_DEFAULTS[provider],
+        );
     } else if (provider === 'anthropic') {
       out = await callWithModelFallback(
         (m) => callAnthropic({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens }),
@@ -448,7 +458,7 @@ export async function handleInvokeLLM(req, res) {
         PROVIDER_DEFAULTS.anthropic,
       );
     } else {
-      send(res, 503, { error: `Unknown LLM_PROVIDER "${provider}". Use gemini | openai | anthropic.` });
+      send(res, 503, { error: `Unknown LLM_PROVIDER "${provider}". Use gemini | nararouter | groq | openrouter | openai | anthropic.` });
       return;
     }
 
@@ -462,16 +472,23 @@ export async function handleInvokeLLM(req, res) {
       return;
     }
 
+    const actuallyGrounded = groundingPossible && provider === 'gemini' && !!out.grounded;
+    const warnings = [];
+    if (provider !== 'gemini') {
+      warnings.push(`Not web-grounded: ${provider} does not use Gemini Google Search grounding. This answer is based on the model and any text you supplied.`);
+    } else if (groundingRequested && !actuallyGrounded) {
+      warnings.push('Gemini completed this call without web-grounding metadata. Treat the answer as not web-grounded.');
+    }
+    if (out.finishReason === 'MAX_TOKENS') {
+      warnings.push('The response hit the hosted model output cap and may be incomplete.');
+    }
     const meta = {
       provider,
       model: out.model || null,
-      grounded: groundingPossible,
+      grounded: actuallyGrounded,
       demo: false,
       finish_reason: out.finishReason || '',
-      warning: groundingWarning
-        || (out.finishReason === 'MAX_TOKENS'
-          ? 'The response hit the model output cap and may be incomplete.'
-          : ''),
+      warning: warnings.join(' '),
     };
 
     if (responseJsonSchema) {
@@ -489,9 +506,11 @@ export async function handleInvokeLLM(req, res) {
 
     send(res, 200, { ok: true, result: String(text), meta });
   } catch (e) {
-    const status = e.status === 429 ? 429 : e.status === 401 || e.status === 403 ? 402 : 502;
+    const status = Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 502;
     send(res, status, {
       error: explainProviderError(e.provider || provider, e.message, e.status),
+      provider: e.provider || provider,
+      ...(e.providerCode ? { code: e.providerCode } : {}),
     });
   }
 }

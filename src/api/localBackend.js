@@ -208,8 +208,8 @@ export function createLocalBackend() {
     auth,
     integrations: {
       Core: {
-        // Same endpoint as production. Without a configured provider the API
-        // returns schema-shaped DEMO content so every screen is explorable.
+        // Optional hosted path retained for Base44 SDK compatibility. Current
+        // pages use runAI, which defaults to browser-local Ollama or labeled demo.
         InvokeLLM: (params) => invokeLLM(params, getAuthToken),
 
         // Additive: same call, plus the server's `meta` block (grounding, demo

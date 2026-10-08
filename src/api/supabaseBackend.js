@@ -1,7 +1,7 @@
 // Supabase-backed implementation of the Base44 SDK surface used by this app.
 // Every page talks to `base44.entities.* / auth.* / integrations.Core.* / app.*`
 // unchanged — this module maps that API onto Supabase (Postgres + Auth +
-// Storage), so there are no Base44 credits or token limits involved.
+// Storage), without Base44 runtime dependencies. AI routing is handled by runAI.
 //
 // Entity mapping (old Base44 entity -> Postgres table):
 //   University        -> universities
@@ -32,9 +32,9 @@ const TABLES = {
 // Columns per table, with types used for safe coercion (Base44 accepted empty
 // strings for numbers/dates; Postgres does not).
 //
-// OPTIONAL_COLUMNS lists columns that were added after the first public schema
-// release (`materials.analysis`, `essays.limit_unit`,
-// `universities.application_platform`). They are written only if
+// OPTIONAL_COLUMNS lists additive fields that older Supabase projects may not
+// have yet (`materials.analysis`, `essays.limit_unit`, application platform,
+// Knowledge Base provenance, and extended profile fields). They are written only if
 // the database actually has them: a PostgREST "Could not find the column"
 // error removes the column from the allow-list for the rest of the session and
 // the write is retried without it. That keeps a freshly merged app fully
@@ -44,6 +44,7 @@ const OPTIONAL_COLUMNS = {
   materials: ['analysis'],
   essays: ['limit_unit'],
   universities: ['application_platform'],
+  college_knowledge: ['source_url', 'source_text', 'research_provider', 'research_model', 'grounded'],
   profiles: [
     'full_name', 'citizenship_status', 'curriculum', 'first_generation', 'rank',
     'act_score', 'toefl_total', 'duolingo_english', 'test_policy', 'funding_source',
@@ -84,6 +85,8 @@ const COLUMNS = {
   },
   college_knowledge: {
     university_name: 'text', knowledge: 'text', last_updated: 'date',
+    source_url: 'text', source_text: 'text', research_provider: 'text',
+    research_model: 'text', grounded: 'boolean',
   },
 };
 
@@ -116,29 +119,38 @@ function unwrap({ data, error }, fallback = null) {
 
 /** True when a PostgREST error means "this column is not in the database". */
 function isMissingColumnError(error) {
-  const m = String(error?.message || '');
-  return /PGRST204|Could not find the column|column .* does not exist|42703/i.test(`${error?.code || ''} ${m}`);
+  const message = String(error?.message || '');
+  const code = `${error?.code || ''} ${error?.pgCode || ''}`;
+  // PostgREST's PGRST204 wording inserts the missing column name between
+  // "the" and "column" (for example, "Could not find the 'source_url'
+  // column of 'college_knowledge' in the schema cache").
+  return /PGRST204|Could not find the .*column|column .* does not exist|42703/i.test(`${code} ${message}`);
 }
 
 /**
  * Runs a Supabase call and, if it fails because an OPTIONAL column is not yet
- * present in the database, permanently removes that column from the allow-list
- * and retries once. Lets a newly merged app run against an older Supabase
- * project without forcing an immediate migration.
+ * present in the database, permanently removes the missing optional column
+ * from the allow-list, and retries. It can drop several missing optional
+ * columns before succeeding against an older Supabase project without forcing
+ * an immediate migration.
  */
 function withOptionalColumnFallback(table, optional, run) {
   return async (...args) => {
-    try {
-      return await run(...args);
-    } catch (error) {
-      if (!isMissingColumnError(error)) throw error;
-      const present = COLUMNS[table] || {};
-      const missing = (OPTIONAL_COLUMNS[table] || []).filter(
-        (c) => c in present && error.message.includes(c),
-      );
-      if (missing.length === 0) throw error;
-      missing.forEach((c) => { delete present[c]; });
-      return run(...args);
+    while (true) {
+      try {
+        return await run(...args);
+      } catch (error) {
+        if (!isMissingColumnError(error)) throw error;
+        const present = COLUMNS[table] || {};
+        const missing = (optional || OPTIONAL_COLUMNS[table] || []).filter(
+          (column) => column in present && String(error?.message || '').includes(column),
+        );
+        if (missing.length === 0) throw error;
+        // Older deployments can be missing several additive columns. Remove
+        // each reported column and retry until the write succeeds or a real
+        // (non-optional) schema error is returned.
+        missing.forEach((column) => { delete present[column]; });
+      }
     }
   };
 }
@@ -333,8 +345,8 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
   // ----- integrations ------------------------------------------------------
   const integrations = {
     Core: {
-      // Replaces Base44 Core.InvokeLLM -> POST /api/invoke-llm (Vercel function
-      // calling YOUR Gemini/OpenAI/Anthropic key — no Base44 token limits).
+      // Optional hosted compatibility path -> POST /api/invoke-llm. Current
+      // pages route through runAI and use local Ollama by default.
       InvokeLLM: (params) => invokeLLM(params, getAuthToken),
 
       // Additive: same call, but also returns the server's `meta` block so the
