@@ -6,6 +6,13 @@ export const OLLAMA_CONFIG_KEY = 'atlas_ollama_config_v1';
 export const AI_MODE_KEY = 'atlas_ai_mode_v1';
 export const DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
 export const DEFAULT_OLLAMA_MODEL = 'llama3.2:latest';
+/**
+ * Context window requested for every local call. Ollama's default is much
+ * smaller, and a longer prompt would be cut off without any error. 16k tokens
+ * fits the largest prompt Atlas builds (profile, materials, knowledge base, and
+ * the essay or the analysed part) plus the answer.
+ */
+export const OLLAMA_NUM_CTX = 16384;
 
 let ollamaQueue = Promise.resolve();
 
@@ -191,6 +198,7 @@ async function requestOllama(config, prompt, schema) {
       model: config.model,
       messages: [{ role: 'user', content: prompt }],
       stream: false,
+      options: { num_ctx: OLLAMA_NUM_CTX },
       ...(schema ? { format: schema } : {}),
     }),
   }).catch((error) => {

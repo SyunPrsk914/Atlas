@@ -46,7 +46,7 @@ Your **Project Ref** is the `xxxxxxxx` part of the Project URL (also visible in 
 1. Left sidebar → **SQL Editor** → **New query**.
 2. Open [`supabase/schema.sql`](./supabase/schema.sql) in this repo, copy **the entire file**, paste it in.
 3. Press **Run** (Cmd/Ctrl + Enter). Expected result: `Success. No rows returned`.
-4. Sanity check: left sidebar → **Table Editor** — you should see `universities`, `essays`, `materials`, `profiles`, `roadmap_tasks`, `college_knowledge`.
+4. Sanity check: left sidebar → **Table Editor** — you should see `universities`, `essays`, `materials`, `profiles`, `roadmap_tasks`, `college_knowledge`, `applicant_knowledge`.
 5. Left sidebar → **Storage** — you should see a **public** bucket named `uploads` (created by the same script).
 
 The schema is **idempotent** — running it again is safe. It also installs the same per-user row privacy the Base44 entities had: every row is visible/editable only by the user who created it.
@@ -247,7 +247,7 @@ References: [NaraRouter API docs](https://router.bynara.id/docs), [live plan dat
 
 Hosted free keys are still capped by their provider; check that provider's current pricing/quota terms. Store keys only in a trusted server environment such as local `.env.local` or Vercel Environment Variables, never in a `VITE_*` variable. If the provider returns HTTP 429, Atlas displays its real error and does not convert it to a successful result. Atlas imposes no additional AI request, token, or daily cap.
 
-Google Search grounding is only requested for an explicitly selected Gemini provider. A report is labeled web-grounded only when the successful Gemini response contains grounding metadata. Other answers—including local Ollama and other hosted providers—are labeled **not web-grounded**. Knowledge Base research for Ollama uses the public official page text the user supplies (see Part 4); it does not depend on Gemini Search.
+Google Search grounding is only requested for an explicitly selected Gemini provider. A report is labeled web-grounded only when the successful Gemini response contains grounding metadata. Other answers—including local Ollama and other hosted providers—are labeled **not web-grounded**. University Research for Ollama uses the public official page text the user supplies (see Part 4); it does not depend on Gemini Search.
 
 `GET /api/status` reports optional hosted-key configuration and provider availability without returning any key values. The sidebar AI status pill opens the setup panel, where you can choose Ollama, a configured hosted provider, or clearly labeled Demo mode.
 
@@ -300,9 +300,10 @@ npm run dev                  # http://localhost:5173
 
 - Without Supabase environment values the app uses its existing browser-only Demo backend.
 - Without a selected AI model, AI buttons produce clearly labeled **Demo output**.
+- Node.js 22.13 or newer is required (pdf.js 6 needs it when a PDF is read).
 - To use local real AI, install Ollama and follow Part 2. On default Vite dev, allow `http://localhost:5173` in `OLLAMA_ORIGINS`. Atlas calls the user's browser's `http://127.0.0.1:11434` directly; the Vite and Vercel servers do not proxy local Ollama calls.
 - `/api/invoke-llm` remains only for the optional hosted path. Its API keys stay server-side; hosted-provider limits still apply.
-- Knowledge Base research needs an official public admissions URL and page text. Atlas fetches the page from the browser without cookies. If the site blocks CORS or redirects to login, Atlas says so and lets the user paste public text; it does not proxy around the block or scrape behind a login.
+- University Research needs an official public admissions URL and page text. Atlas fetches the page from the browser without cookies. If the site blocks CORS or redirects to login, Atlas says so and lets the user paste public text; it does not proxy around the block or scrape behind a login.
 
 ---
 
@@ -316,11 +317,12 @@ npm run dev                  # http://localhost:5173
 | `base44.auth.loginWithProvider('google', path)` | `signInWithOAuth` (redirect to `origin + path`) |
 | `base44.auth.resetPasswordRequest/resetPassword` | `resetPasswordForEmail` + `verifyOtp(type=recovery)`/`updateUser` |
 | `base44.auth.me/isAuthenticated/logout/redirectToLogin` | `getUser`/`getSession`/`signOut`/redirect to `/login` |
-| Current AI feature calls through `runAI({prompt, response_json_schema, add_context_from_internet})` | Default: browser → local Ollama `/api/chat` with JSON schema support and one strict retry for invalid JSON. Optional Hosted mode calls `POST /api/invoke-llm`; Gemini grounding is reported only after successful grounding metadata. With no model, the client returns clearly labeled Demo output. |
+| Current AI feature calls through `runAI({prompt, response_json_schema, add_context_from_internet})` | Default: browser → local Ollama `/api/chat` with JSON schema support, a 16,384-token context window (`num_ctx`, so long documents are not cut off silently), and one strict retry for invalid JSON. Optional Hosted mode calls `POST /api/invoke-llm`; Gemini grounding is reported only after successful grounding metadata. With no model, the client returns clearly labeled Demo output. |
 | `base44.integrations.Core.UploadPublicFile({file})` | Supabase Storage `uploads` bucket → returns `{ file_url }` (same shape) |
+| `base44.entities.ApplicantKnowledge.*` (new) | `applicant_knowledge` table (AI Knowledge Base). Written by the Knowledge Base page; read by drafts and reviews |
 | `base44.app.getPublicSettings()` | static `{ id, public_settings }` |
 
-Key files: `src/api/base44Client.js` (Base44 compatibility surface) · `src/api/ollamaClient.js` (direct browser-to-loopback AI + FIFO queue) · `src/lib/ai.js` (selected-provider routing) · `src/lib/researchSource.js` (public page fetch/extraction) · `api/invoke-llm.js` (optional hosted endpoint) · `supabase/schema.sql` (database and RLS).
+Key files: `src/api/base44Client.js` (Base44 compatibility surface) · `src/api/ollamaClient.js` (direct browser-to-loopback AI + FIFO queue) · `src/lib/ai.js` (selected-provider routing) · `src/lib/documentReader.js` (reads PDF, Word, RTF, HTML, text and web links) · `src/lib/materialJobs.js` (automatic reading and analysis) · `src/lib/applicantKnowledge.js` (AI Knowledge Base) · `src/lib/researchSource.js` (public page fetch/extraction) · `api/invoke-llm.js` (optional hosted endpoint) · `supabase/schema.sql` (database and RLS).
 
 The `base44/` folder remains as **reference only** (the original entity schemas that `schema.sql` was derived from). Nothing reads it.
 
@@ -336,7 +338,15 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 | Password reset link says "Invalid reset link" | Using the default Supabase email template | Apply the template in 1.5 (`?token={{ .TokenHash }}`) |
 | AI setup cannot reach Ollama or `/api/tags` | Ollama is stopped, or browser CORS origin is not allowed | Set `OLLAMA_HOST=127.0.0.1:11434` and `OLLAMA_ORIGINS` to the exact Atlas browser origin (Part 2); restart Ollama and probe again |
 | Local model is missing | Model has not been downloaded or the model name differs | Run `ollama pull llama3.2` (or your chosen model); select the exact name returned by `/api/tags` |
-| Knowledge Base page fetch fails | Public page is unavailable or blocks browser CORS | Atlas does not proxy or bypass the block. Paste the publicly visible page text and keep its official URL in the source field |
+| University Research fetch fails | Public page is unavailable or blocks browser CORS | Atlas does not proxy or bypass the block. Paste the publicly visible page text and keep its official URL in the source field |
+| A material says it has no readable text | Scanned or image-only PDF (no text layer); Atlas does not run OCR | Export a text-based PDF from the original, or save the document as `.docx` |
+| A material says the file cannot be opened | Password-protected or damaged PDF | Remove the password or re-export the file, then re-upload it |
+| A material says the file is too large | Over 30 MB | Upload a smaller copy, or split the document |
+| Old Word `.doc` file is refused | Only `.docx`, RTF, HTML, text and PDF are read | Save the file as `.docx` or PDF in Word or Google Docs |
+| Analysis says it did not finish | The local model returned an error or no usable answer | Check that Ollama is running and the model is available. Atlas tries again the next time you open Materials |
+| A long material takes many minutes | Each 6,000-character part is one local-model call, and calls run one at a time | Wait for the progress bar on that material, or use a smaller model. Other AI actions resume when the analysis finishes |
+| AI Knowledge Base says the table is missing | `applicant_knowledge` has not been created yet | Re-run `supabase/schema.sql` (idempotent). Drafts and reviews work without it in the meantime |
+| Demo mode: a large upload fails with a storage error | Demo mode keeps files inside browser storage, which is limited (typically about 5 MB in total) | Use Supabase for real documents; Demo mode is for trying the app
 | Hosted AI call returns HTTP 429 | The hosted provider returned its own quota/rate-limit error | Atlas displays that provider's actual error. Check provider quota/billing or select local Ollama; no key rotation or quota bypass is attempted |
 | Local model returns invalid JSON | Model did not follow the existing response schema | Atlas retries once with a stricter JSON-only instruction; if still invalid, it reports the parse failure rather than substituting demo text |
 | Lists come back empty though data exists | RLS: rows belong to another user | Data is per-account by design (same as Base44). Log in with the same account that created it |
@@ -346,8 +356,9 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 ## Part 7 — Costs, limits, and data safety (honest summary)
 
 - **Atlas AI limits:** Atlas does not add an AI request-per-minute, request-per-day, token, or daily budget. Local Ollama requests are queued in order rather than rejected when another local call is running.
+- **Document analysis:** a material is read up to 200,000 characters (about 30 to 40 pages); beyond that the text is cut and the cut is marked in the stored text. The whole text is analysed, in parts of about 6,000 characters, one local-model call per part (42 parts at most). Local requests run one at a time in click order, so a long analysis delays other AI actions until it finishes.
 - **Local model:** inference is performed by Ollama on the user's computer. It is not a hosted free tier; throughput and supported context size depend on that computer/model. Atlas does not expose the local Ollama port publicly.
 - **Hosted providers:** any hosted provider may cap free usage, throttle requests, charge fees, or return HTTP 429. Those are the provider's rules—not an unlimited service—and Atlas displays the real provider error without bypassing it.
 - **Vercel / Supabase:** their plans and operational limits still apply to hosting, database, auth, and storage; these are separate from an Atlas-imposed AI quota.
-- **Backups:** export irreplaceable application data periodically. The database schema remains idempotent; re-run `supabase/schema.sql` to add the Knowledge Base source/provenance columns to an existing project.
+- **Backups:** export irreplaceable application data periodically. The database schema remains idempotent; re-run `supabase/schema.sql` to add the `applicant_knowledge` table (AI Knowledge Base) and the research source/provenance columns to an existing project.
 - **Privacy:** Supabase data is protected by per-user RLS. Local AI prompts go from the browser directly to loopback Ollama. Optional hosted keys are server-side (never in the Vite bundle), and hosted prompts go to the selected provider; Supabase's service-role key is not used in the frontend.

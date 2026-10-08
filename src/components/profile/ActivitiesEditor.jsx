@@ -19,6 +19,17 @@ const GRADE_LEVELS = ['9', '10', '11', '12', 'PG'];
 
 const MAX_ACTIVITIES = 10;
 const DESC_LIMIT = 150;
+// Hours and weeks are typed into number inputs. Only a finite, non-negative
+// number is kept, capped at what a week or a year can hold, so "-5" or "1e3"
+// cannot be saved.
+const HOURS_PER_WEEK_MAX = 168;
+const WEEKS_PER_YEAR_MAX = 52;
+const cleanAmount = (raw, max, whole = false) => {
+  if (raw === '' || raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(whole ? Math.trunc(n) : n, max);
+};
 
 export default function ActivitiesEditor({ value = [], onChange }) {
   const update = (index, field, val) => {
@@ -124,11 +135,11 @@ export default function ActivitiesEditor({ value = [], onChange }) {
             </div>
             <div>
               <label className="block text-xs font-medium text-foreground/50 mb-1">Hrs / week</label>
-              <Input type="number" value={activity.hours_per_week ?? ''} onChange={(e) => update(i, 'hours_per_week', e.target.value ? parseFloat(e.target.value) : null)} placeholder="0" />
+              <Input type="number" min="0" max={HOURS_PER_WEEK_MAX} step="any" value={activity.hours_per_week ?? ''} onChange={(e) => update(i, 'hours_per_week', cleanAmount(e.target.value, HOURS_PER_WEEK_MAX))} placeholder="0" />
             </div>
             <div>
               <label className="block text-xs font-medium text-foreground/50 mb-1">Weeks / year</label>
-              <Input type="number" value={activity.weeks_per_year ?? ''} onChange={(e) => update(i, 'weeks_per_year', e.target.value ? parseInt(e.target.value) : null)} placeholder="0" />
+              <Input type="number" min="0" max={WEEKS_PER_YEAR_MAX} step="1" value={activity.weeks_per_year ?? ''} onChange={(e) => update(i, 'weeks_per_year', cleanAmount(e.target.value, WEEKS_PER_YEAR_MAX, true))} placeholder="0" />
             </div>
           </div>
         </div>

@@ -2,7 +2,7 @@
 // entry) and were checked against the university's own admissions page.
 //
 // If a school is not in this list, Atlas does not invent a prompt. The student
-// pastes the current wording, or researches the school in the Knowledge Base.
+// pastes the current wording, or researches the school in University Research.
 // Every entry carries its source so the chooser can say where it came from.
 
 import { COMMON_APP_AUXILIARY, COMMON_APP_PROMPTS, UC_PIQS, UCAS_QUESTIONS } from './applicationData';

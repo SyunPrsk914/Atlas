@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Outlet, NavLink, Link } from 'react-router-dom';
-import { LayoutDashboard, User, GraduationCap, PenLine, FolderOpen, Library, Compass, Menu, X, Clock } from 'lucide-react';
+import { LayoutDashboard, User, GraduationCap, PenLine, FolderOpen, Library, Compass, Menu, X, Clock, Brain } from 'lucide-react';
 import AiStatusPill from '@/components/AiStatusPill';
 import { getLastUniversityId } from '@/lib/persist';
 import { base44 } from '@/api/base44Client';
@@ -11,7 +11,8 @@ const navItems = [
   { to: '/universities', label: 'Universities', icon: GraduationCap },
   { to: '/essay-builder', label: 'Essay Builder', icon: PenLine },
   { to: '/materials', label: 'Materials', icon: FolderOpen },
-  { to: '/knowledge-base', label: 'Knowledge Base', icon: Library },
+  { to: '/ai-knowledge', label: 'AI Knowledge Base', icon: Brain },
+  { to: '/knowledge-base', label: 'University Research', icon: Library },
 ];
 
 export default function Layout() {

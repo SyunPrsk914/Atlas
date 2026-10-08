@@ -38,16 +38,6 @@ function essayRoleBrief(essay) {
   return table[type] || table.supplemental;
 }
 
-function materialsContext(materials) {
-  if (!materials.length) return 'No supporting materials have been added yet — rely on the profile and be careful not to invent experiences.';
-  return materials
-    .map((m) => {
-      const body = m.content || m.notes || '(no text — link only)';
-      return `--- ${m.title} [${m.type}]${m.link_url ? ` (${m.link_url})` : ''} ---\n${body}`;
-    })
-    .join('\n\n');
-}
-
 const HUMAN_VOICE_RULES = `VOICE RULES — this is the single most important section:
 - Write like a thoughtful 17-18 year old who is genuinely good at thinking, not like an adult writing about a teenager, and certainly not like a language model.
 - BANNED constructions (do not use these, in any form): "In conclusion", "This experience taught me", "Through this journey", "I realized that", "It was then that I understood", "Looking back", "furthermore", "moreover", "in today's world", "it is important to note", "delve", "tapestry", "a testament to", "embark", "underscore", "navigate the complexities".
@@ -56,6 +46,13 @@ const HUMAN_VOICE_RULES = `VOICE RULES — this is the single most important sec
 - Use plain, precise words. "Used" beats "utilized". "Showed" beats "showcased". "Wanted to" beats "aspired to".
 - Concrete over abstract, always: a name, a number, a time, a place, a specific object, a specific thing someone said.
 - Do NOT invent experiences. If the profile does not contain a detail you need, write around it and let the applicant fill it in afterwards.`;
+
+/** The applicant's own knowledge base (About you, personal points, patterns), when there is one. */
+function applicantSection(applicantText) {
+  const text = String(applicantText || '').trim();
+  if (!text) return '';
+  return `APPLICANT KNOWLEDGE BASE (AI-built and applicant-edited. Keep the writing consistent with who this applicant is. Do not add facts beyond it and the materials):\n${text}\n\n`;
+}
 
 function lengthBrief(essay, allEssays) {
   if (isUcasQuestion(essay)) {
@@ -75,7 +72,7 @@ function lengthBrief(essay, allEssays) {
 }
 
 // ---------------------------------------------------------------------------
-export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, allEssays }) {
+export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, applicantText = '', allEssays }) {
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
   const promptWarning = isAmbiguousCommonAppPrompt(essay?.prompt)
@@ -96,13 +93,14 @@ ${profileText || 'No profile has been saved yet. Write something structurally ex
 SUPPORTING MATERIALS — READ CAREFULLY (this is the core knowledge base you must use):
 ${materialsText}
 
+${applicantSection(applicantText)}
 CRITICAL RULES FOR USING MATERIALS:
 - OWN MATERIALS (resume, past essays, personal notes, transcripts) are FACTS ABOUT THIS STUDENT. USE THEM HEAVILY. Pull specific names, numbers, roles, outcomes, dates, places, and distinctive phrasing that only this applicant could claim. The more you use their real context, the better the draft.
 - SAMPLE / SUCCESSFUL ESSAYS are NOT this student's life. Study them for CRAFT ONLY: how they open, how they structure evidence, how they reflect, what tone they use, how they show emotion with specific words. NEVER copy a person, place, event, or achievement from a sample into this draft.
 - PLATFORM DISTINCTION: Some samples are US (Common App 650w, UC PIQ 350w) and some are UK (UCAS 4000 chars across 3 Qs). When writing for ${platform === 'ucas' ? 'UCAS (UK)' : 'US platforms (Common App, UC, Coalition, Direct)'}, prioritize samples from the SAME system for structural guidance. You may learn voice/tone from any sample, but NEVER apply UK UCAS structure (3 questions sharing 4000 chars, 80% academic) to a US essay, and NEVER apply US Common App structure to a UCAS answer. This is obvious and you must distinguish.
 - If a material has an attached word-by-word analysis, use its findings: keep its strengths, fix its issues, and reuse its specific details.
 
-UNIVERSITY RESEARCH (from the Knowledge Base; if empty, use well-established knowledge and say nothing specific you are unsure of):
+UNIVERSITY RESEARCH (from University Research; if empty, use well-established knowledge and say nothing specific you are unsure of):
 ${knowledgeText}
 
 THE ESSAY TO WRITE:
@@ -133,7 +131,7 @@ export const GENERATE_SCHEMA = {
   },
 };
 
-export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes, allEssays, materialsText = '', profileText = '' }) {
+export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes, allEssays, materialsText = '', profileText = '', applicantText = '' }) {
   return `You are a senior admissions officer at ${university?.name || 'this university'} reading a stack of real files. Be strict. Most applicants here are qualified and still rejected.
 
 ${lengthBrief(essay, allEssays)}
@@ -154,7 +152,7 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH AND IDEAL STUDENT:
 ${knowledgeText || 'No research cached. Judge on the quality of the writing itself.'}
 
-${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials are facts about this student; samples are craft examples only — never treat a sample's life as this student's life. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
+${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials are facts about this student; samples are craft examples only — never treat a sample's life as this student's life. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
 Evaluate on exactly these dimensions, each scored 1-10 where 5 is average for this admissions pool:
 1. prompt_alignment — does it answer THIS prompt, serving ITS role, without stealing another essay's material?
 2. authenticity — could a specific person have written this, or is it generically well-written? Check against profile and own materials — does it sound like THIS applicant?
@@ -193,7 +191,7 @@ export const REVIEW_SCHEMA = {
   },
 };
 
-export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText, allEssays, materialsText = '', profileText = '' }) {
+export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText, allEssays, materialsText = '', profileText = '', applicantText = '' }) {
   return `You are a master essay editor. Your job is to make this essay more human, more specific, and better aligned to its prompt — without inventing anything.
 
 ${essayRoleBrief(essay)}
@@ -214,7 +212,7 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH:
 ${knowledgeText || 'None cached.'}
 
-${profileText ? `APPLICANT PROFILE (use concrete details from here when possible):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials = facts about this student, USE THEM; samples = craft only, never borrow life. Distinguish US vs UK):\n${materialsText}\n` : ''}CURRENT DRAFT:
+${profileText ? `APPLICANT PROFILE (use concrete details from here when possible):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials = facts about this student, USE THEM; samples = craft only, never borrow life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT:
 <<<ESSAY
 ${essay?.content || ''}
 ESSAY>>>

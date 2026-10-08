@@ -13,6 +13,8 @@ import {
   probeOllama,
 } from '@/api/ollamaClient';
 
+export { hasLiveModel, isLiveOutcome } from './aiOutcome';
+
 /**
  * Human-readable explanation for anything that can go wrong between the
  * browser and the model.
@@ -152,6 +154,7 @@ export async function refreshAIStatus() {
 export function peekAIStatus() {
   return statusValue;
 }
+
 
 function demoValue(schema, demoText, depth = 0) {
   if (!schema || typeof schema !== 'object' || depth > 6) return demoText;

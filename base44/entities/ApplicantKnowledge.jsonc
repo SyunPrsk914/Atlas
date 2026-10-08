@@ -1,0 +1,57 @@
+{
+  "name": "ApplicantKnowledge",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "brief",
+        "evidence",
+        "pattern"
+      ]
+    },
+    "category": {
+      "type": "string"
+    },
+    "text": {
+      "type": "string"
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "ai",
+        "manual"
+      ]
+    },
+    "source_label": {
+      "type": "string"
+    },
+    "source_id": {
+      "type": "string"
+    },
+    "platform": {
+      "type": "string"
+    },
+    "sort_order": {
+      "type": "number"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "kind",
+    "text"
+  ],
+  "rls": {
+    "read": {
+      "created_by_id": "{{user.id}}"
+    },
+    "update": {
+      "created_by_id": "{{user.id}}"
+    },
+    "delete": {
+      "created_by_id": "{{user.id}}"
+    }
+  }
+}

@@ -9,10 +9,94 @@ import {
   IB_SLOTS, SUBJECT_GRADES, CORE_GRADES, HL_MAX,
   parseIbRecord, serializeIbRecord, coursesForGroups, courseById, emptySubject,
   languagesFor, subjectDisplayName, hlCount, filledSubjects,
-  corePoints, suggestedDiplomaTotal, ibWarnings,
+  corePoints, suggestedDiplomaTotal, ibWarnings, eeSubjectName, emptyEeCourse,
 } from '@/lib/ibDiploma';
 
 const NONE = '__none__';
+// The Extended Essay may be written in any of the six groups' subjects.
+const EE_COURSES = coursesForGroups([1, 2, 3, 4, 5, 6]);
+
+/**
+ * Extended Essay subject: the same catalogue and the same "not listed — type
+ * it" path as the six diploma subjects, so spelling and naming match everywhere.
+ */
+function ExtendedEssaySubject({ eeCourse, onChange }) {
+  const [customLanguage, setCustomLanguage] = useState(false);
+  const course = courseById(eeCourse.courseId);
+  const languages = course ? languagesFor(course.needsLanguage) : [];
+  const languageIsCustom = customLanguage
+    || (!!eeCourse.language && !languages.includes(eeCourse.language));
+  const displayName = eeSubjectName({ eeCourse });
+
+  return (
+    <div className="space-y-2">
+      <Select
+        value={eeCourse.courseId || NONE}
+        onValueChange={(value) => {
+          setCustomLanguage(false);
+          onChange({ courseId: value === NONE ? '' : value, language: '', customName: '' });
+        }}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="Choose the subject" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NONE}>Not chosen</SelectItem>
+          {EE_COURSES.map((item) => (
+            <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>
+          ))}
+          <SelectItem value="custom">Not listed — type it</SelectItem>
+        </SelectContent>
+      </Select>
+
+      {eeCourse.courseId === 'custom' ? (
+        <Input
+          value={eeCourse.customName || ''}
+          onChange={(e) => onChange({ ...eeCourse, customName: e.target.value })}
+          placeholder="Subject name as your school reports it"
+        />
+      ) : course?.needsLanguage ? (
+        <div className="space-y-2">
+          <Select
+            value={languageIsCustom ? '__other__' : (eeCourse.language || NONE)}
+            onValueChange={(value) => {
+              if (value === '__other__') {
+                setCustomLanguage(true);
+                if (languages.includes(eeCourse.language)) onChange({ ...eeCourse, language: '' });
+                return;
+              }
+              setCustomLanguage(false);
+              onChange({ ...eeCourse, language: value === NONE ? '' : value });
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Choose the language" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE}>Choose the language</SelectItem>
+              {languages.map((language) => (
+                <SelectItem key={language} value={language}>{language}</SelectItem>
+              ))}
+              <SelectItem value="__other__">Other — type the language</SelectItem>
+            </SelectContent>
+          </Select>
+          {languageIsCustom && (
+            <Input
+              autoFocus
+              value={eeCourse.language || ''}
+              onChange={(e) => onChange({ ...eeCourse, language: e.target.value })}
+              placeholder="Type the language — the lists are suggestions, not a closed catalogue"
+            />
+          )}
+        </div>
+      ) : null}
+
+      {displayName && (
+        <p className="text-[11px] text-foreground/40">Reported as “{displayName}”</p>
+      )}
+    </div>
+  );
+}
 
 /**
  * The diploma is six subjects plus TOK and the Extended Essay — eight slots,
@@ -220,10 +304,9 @@ export default function IbSubjectPicker({ raw = '', onChange, onUsePredictedTota
           <p className="text-[11px] text-foreground/45">
             Predicted grade A–E, and the subject the essay is in. CAS is required but not graded, so it is not a slot.
           </p>
-          <Input
-            value={record.eeSubject || ''}
-            onChange={(e) => commit({ ...record, eeSubject: e.target.value })}
-            placeholder="EE subject, e.g. Physics"
+          <ExtendedEssaySubject
+            eeCourse={record.eeCourse || emptyEeCourse()}
+            onChange={(eeCourse) => commit({ ...record, eeCourse })}
           />
           <Select value={record.ee || NONE} onValueChange={(value) => commit({ ...record, ee: value === NONE ? '' : value })}>
             <SelectTrigger className="w-full">

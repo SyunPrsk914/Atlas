@@ -5,33 +5,40 @@ import { base44 } from '@/api/base44Client';
 import {
   GraduationCap, PenLine, FolderOpen, CheckCircle2, Calendar, ArrowRight,
   Sparkles, Library, CircleAlert, ScanText, AlertTriangle,
-  User, Clock, BookOpen, Globe, Target, FileText, BarChart3,
+  User, Clock, Globe, BarChart3, Brain,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { daysUntil } from '@/lib/dates';
+import { daysUntil, startOfLocalDay } from '@/lib/dates';
 import {
   getUniversityPlatform, PLATFORMS, buildSharedEssayPlan, isSharedEssay,
   universityNamesMatch, PLATFORM_REQUIREMENTS,
 } from '@/lib/essayScope';
 import { getLastUniversityId } from '@/lib/persist';
+import { presentMaterial } from '@/lib/materialRole';
+import { buildKnowledgeInputs, knowledgeStatus } from '@/lib/applicantKnowledge';
+import { hasLiveModel } from '@/lib/aiOutcome';
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export default function Dashboard() {
-  const [data, setData] = useState({ universities: [], essays: [], tasks: [], materials: [], knowledge: [], profiles: [] });
+  const [data, setData] = useState({ universities: [], essays: [], tasks: [], materials: [], knowledge: [], profiles: [], applicantKnowledge: null });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
       try {
-        const [universities, essays, tasks, materials, knowledge, profiles] = await Promise.all([
+        const [universities, essays, tasks, materials, knowledge, profiles, applicantKnowledge] = await Promise.all([
           base44.entities.University.list(),
           base44.entities.Essay.list(),
           base44.entities.RoadmapTask.list(),
           base44.entities.Material.list(),
           base44.entities.CollegeKnowledge.list(),
           base44.entities.Profile.list(),
+          // Null when the table is not set up yet; the AI Knowledge Base page explains how to set it up.
+          base44.entities.ApplicantKnowledge.list().catch(() => null),
         ]);
-        setData({ universities, essays, tasks, materials, knowledge, profiles });
+        setData({ universities, essays, tasks, materials, knowledge, profiles, applicantKnowledge });
       } catch (e) {
         console.error(e);
         toast.error('Could not load your dashboard', { description: e.message });
@@ -49,7 +56,7 @@ export default function Dashboard() {
       { key: 'full_name', label: 'Name' },
       { key: 'nationality', label: 'Nationality' },
       { key: 'background_summary', label: 'Background story' },
-      { key: 'ib_predicted_score', label: 'IB / GPA' },
+      { key: 'ib_predicted_score', label: 'IB / GPA', fn: (v, row) => !!v || String(row.gpa_value ?? '').trim() !== '' },
       { key: 'activities', label: 'Activities', fn: (v) => Array.isArray(v) && v.length > 0 },
       { key: 'honors', label: 'Honors', fn: (v) => Array.isArray(v) && v.length > 0 },
     ];
@@ -57,7 +64,7 @@ export default function Dashboard() {
     const missing = [];
     for (const c of checks) {
       const val = p[c.key];
-      const ok = c.fn ? c.fn(val) : !!val && String(val).trim().length > 0;
+      const ok = c.fn ? c.fn(val, p) : !!val && String(val).trim().length > 0;
       if (ok) filled++;
       else missing.push(c.label);
     }
@@ -81,10 +88,30 @@ export default function Dashboard() {
     return Object.values(map);
   }, [data.universities]);
 
+  // Materials as the Materials page shows them (see presentMaterial), so this
+  // page never disagrees with that one.
+  const materialSummary = useMemo(() => {
+    const modelReady = hasLiveModel();
+    const sourced = data.materials.map((m) => presentMaterial(m)).filter((m) => m.document_state !== 'none');
+    const failed = sourced.filter((m) => m.analysis?.status === 'failed').length;
+    const analyzed = sourced.filter((m) => m.analysis?.status === 'ready').length;
+    // Neither analyzed nor failed: still being read, or read and waiting for a model.
+    const open = sourced.filter((m) => m.analysis?.status !== 'failed' && m.analysis?.status !== 'ready').length;
+    return { total: sourced.length, analyzed, failed, open, modelReady };
+  }, [data.materials]);
+
+  // Null when the AI Knowledge Base table is not set up, so no prompt is shown.
+  const knowledgeInfo = useMemo(() => {
+    if (!data.applicantKnowledge || !data.profiles.length) return null;
+    const inputs = buildKnowledgeInputs({ profile: data.profiles, materials: data.materials, essays: data.essays });
+    if (inputs.empty) return null;
+    return knowledgeStatus(data.applicantKnowledge, inputs.fingerprint);
+  }, [data.applicantKnowledge, data.profiles, data.materials, data.essays]);
+
   // The next best action, derived from what is actually missing.
   const nextActions = useMemo(() => {
     const actions = [];
-    const { universities, essays, materials, knowledge, profiles } = data;
+    const { universities, essays, knowledge, profiles } = data;
 
     if (!profiles.length) {
       actions.push({
@@ -131,19 +158,47 @@ export default function Dashboard() {
       }
     }
 
-    const unanalyzed = materials.filter((m) => m.content && m.content.trim() && !m.analysis).length;
-    if (unanalyzed) {
+    if (materialSummary.failed) {
       actions.push({
         to: '/materials',
         icon: ScanText,
-        title: `Analyze ${unanalyzed} material${unanalyzed > 1 ? 's' : ''} word by word`,
-        detail: 'Find the stock phrases, the vague sentences and the over-length ones before an admissions officer does. Analyzed materials power every draft.',
+        title: `Check ${plural(materialSummary.failed, 'material')} Atlas could not read`,
+        detail: 'Open Materials to see why each one failed. Upload a different copy or retry there.',
+        tone: 'normal',
+      });
+    }
+    if (materialSummary.open) {
+      actions.push({
+        to: '/materials',
+        icon: ScanText,
+        title: `Finish ${plural(materialSummary.open, 'material')}`,
+        detail: materialSummary.modelReady
+          ? 'Atlas reads and analyzes each material automatically when you open Materials.'
+          : 'Atlas reads each material automatically. The analysis starts when a local model is connected (AI status in the sidebar).',
+        tone: 'normal',
+      });
+    }
+
+    if (knowledgeInfo && !knowledgeInfo.built) {
+      actions.push({
+        to: '/ai-knowledge',
+        icon: Brain,
+        title: 'Build your AI knowledge base',
+        detail: 'A short profile of you and the patterns of successful applications. Drafts and reviews use it.',
+        tone: 'normal',
+      });
+    } else if (knowledgeInfo?.stale) {
+      actions.push({
+        to: '/ai-knowledge',
+        icon: Brain,
+        title: 'Refresh your AI knowledge base',
+        detail: 'Your profile or materials changed since it was built.',
         tone: 'normal',
       });
     }
 
     return actions.slice(0, 5);
-  }, [data, profileCompleteness]);
+  }, [data, profileCompleteness, materialSummary, knowledgeInfo]);
 
   if (loading) {
     return (
@@ -317,7 +372,7 @@ export default function Dashboard() {
                       <div className="text-xs text-foreground/40">{uni.application_type || 'No round set'}</div>
                     </div>
                     <div className="text-right shrink-0 ml-3">
-                      <div className="text-sm font-medium">{new Date(uni.deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                      <div className="text-sm font-medium">{startOfLocalDay(uni.deadline)?.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
                       <div className={`text-xs ${daysLeft < 0 ? 'text-foreground/30' : daysLeft < 30 ? 'text-destructive' : 'text-foreground/40'}`}>
                         {daysLeft < 0 ? 'Passed' : `${daysLeft} days left`}
                       </div>
@@ -337,8 +392,9 @@ export default function Dashboard() {
           <div className="space-y-1.5">
             {[
               { to: '/essay-builder', icon: PenLine, title: 'Essay Builder', detail: 'Shared writing written once; school-specific writing written once each' },
-              { to: '/knowledge-base', icon: Library, title: 'Knowledge Base', detail: 'Source-checked research on any university' },
-              { to: '/materials', icon: FolderOpen, title: 'Materials', detail: `${data.materials.length} uploaded · ${data.materials.filter((m) => m.analysis).length} analyzed word by word` },
+              { to: '/knowledge-base', icon: Library, title: 'University Research', detail: 'Source-checked research on any university' },
+              { to: '/materials', icon: FolderOpen, title: 'Materials', detail: `${materialSummary.total} uploaded · ${materialSummary.analyzed} analyzed` },
+              { to: '/ai-knowledge', icon: Brain, title: 'AI Knowledge Base', detail: 'What Atlas has learned about you and about successful applications' },
             ].map((item) => (
               <Link key={item.to} to={item.to} className="flex items-center gap-3 p-3 rounded-lg hover:bg-muted transition group">
                 <div className="w-9 h-9 rounded-lg bg-foreground/5 flex items-center justify-center">
@@ -352,10 +408,15 @@ export default function Dashboard() {
               </Link>
             ))}
           </div>
-          {data.materials.some((m) => m.content && m.content.trim() && !m.analysis) && (
+          {(materialSummary.failed > 0 || materialSummary.open > 0) && (
             <div className="flex items-start gap-2 mt-4 pt-4 border-t border-border text-xs text-foreground/45">
               <CircleAlert className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-              Some materials have text but have not been analyzed word by word yet.
+              <span>
+                {[
+                  materialSummary.failed > 0 && `${plural(materialSummary.failed, 'material')} Atlas could not read or analyze.`,
+                  materialSummary.open > 0 && `${plural(materialSummary.open, 'material')} not analyzed yet.`,
+                ].filter(Boolean).join(' ')}
+              </span>
             </div>
           )}
         </div>
