@@ -90,11 +90,17 @@ ${essayRoleBrief(essay)}
 
 ${platformBrief(university, platform)}
 
-STUDENT PROFILE (use every relevant detail; do not ignore any of it):
+STUDENT PROFILE (use every relevant detail; do not ignore any of it. This is the foundation — every essay must sound like THIS person):
 ${profileText || 'No profile has been saved yet. Write something structurally excellent and leave clear gaps for the applicant to fill with their own details — never invent a life for them.'}
 
-SUPPORTING MATERIALS (the applicant has written or collected these — mine them for concrete detail):
+SUPPORTING MATERIALS — READ CAREFULLY (this is the core knowledge base you must use):
 ${materialsText}
+
+CRITICAL RULES FOR USING MATERIALS:
+- OWN MATERIALS (resume, past essays, personal notes, transcripts) are FACTS ABOUT THIS STUDENT. USE THEM HEAVILY. Pull specific names, numbers, roles, outcomes, dates, places, and distinctive phrasing that only this applicant could claim. The more you use their real context, the better the draft.
+- SAMPLE / SUCCESSFUL ESSAYS are NOT this student's life. Study them for CRAFT ONLY: how they open, how they structure evidence, how they reflect, what tone they use, how they show emotion with specific words. NEVER copy a person, place, event, or achievement from a sample into this draft.
+- PLATFORM DISTINCTION: Some samples are US (Common App 650w, UC PIQ 350w) and some are UK (UCAS 4000 chars across 3 Qs). When writing for ${platform === 'ucas' ? 'UCAS (UK)' : 'US platforms (Common App, UC, Coalition, Direct)'}, prioritize samples from the SAME system for structural guidance. You may learn voice/tone from any sample, but NEVER apply UK UCAS structure (3 questions sharing 4000 chars, 80% academic) to a US essay, and NEVER apply US Common App structure to a UCAS answer. This is obvious and you must distinguish.
+- If a material has an attached word-by-word analysis, use its findings: keep its strengths, fix its issues, and reuse its specific details.
 
 UNIVERSITY RESEARCH (from the Knowledge Base; if empty, use well-established knowledge and say nothing specific you are unsure of):
 ${knowledgeText}
@@ -127,7 +133,7 @@ export const GENERATE_SCHEMA = {
   },
 };
 
-export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes, allEssays }) {
+export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes, allEssays, materialsText = '', profileText = '' }) {
   return `You are a senior admissions officer at ${university?.name || 'this university'} reading a stack of real files. Be strict. Most applicants here are qualified and still rejected.
 
 ${lengthBrief(essay, allEssays)}
@@ -148,17 +154,19 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH AND IDEAL STUDENT:
 ${knowledgeText || 'No research cached. Judge on the quality of the writing itself.'}
 
-${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
+${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials are facts about this student; samples are craft examples only — never treat a sample's life as this student's life. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
 Evaluate on exactly these dimensions, each scored 1-10 where 5 is average for this admissions pool:
 1. prompt_alignment — does it answer THIS prompt, serving ITS role, without stealing another essay's material?
-2. authenticity — could a specific person have written this, or is it generically well-written?
-3. specificity — names, numbers, concrete actions, or abstraction?
+2. authenticity — could a specific person have written this, or is it generically well-written? Check against profile and own materials — does it sound like THIS applicant?
+3. specificity — names, numbers, concrete actions, or abstraction? Does it use the concrete details from their own materials?
 4. structure — does the reader get to a point, or wander?
 5. voice — natural, precise, age-appropriate, free of AI tells?
-6. risk — what would an adversarial reader object to? Overclaiming, humblebragging, a lesson that is not earned, a detail that seems borrowed.
+6. risk — what would an adversarial reader object to? Overclaiming, humblebragging, a lesson that is not earned, a detail that seems borrowed from a sample.
 7. length — does it respect its limit, and does it earn every word it spends?
 
 Be concrete: quote the exact phrases you are objecting to. "Feels AI-generated" is not a finding; "\"In the end, this experience taught me that…" appears in the third paragraph" is.
+
+If the essay fails to use available personal context from materials, call that out as a weakness.
 
 Return JSON only.`;
 }
@@ -185,7 +193,7 @@ export const REVIEW_SCHEMA = {
   },
 };
 
-export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText, allEssays }) {
+export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText, allEssays, materialsText = '', profileText = '' }) {
   return `You are a master essay editor. Your job is to make this essay more human, more specific, and better aligned to its prompt — without inventing anything.
 
 ${essayRoleBrief(essay)}
@@ -206,13 +214,15 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH:
 ${knowledgeText || 'None cached.'}
 
-CURRENT DRAFT:
+${profileText ? `APPLICANT PROFILE (use concrete details from here when possible):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials = facts about this student, USE THEM; samples = craft only, never borrow life. Distinguish US vs UK):\n${materialsText}\n` : ''}CURRENT DRAFT:
 <<<ESSAY
 ${essay?.content || ''}
 ESSAY>>>
 
 Rules:
 - Do not invent experiences, names, numbers, or outcomes. If a change needs a fact you do not have, leave the sentence out rather than guessing.
+- USE personal context from own materials as much as possible — names, numbers, specific roles, outcomes. If the draft is generic, inject their real details.
+- For craft, you may borrow technique from samples that match this platform (US samples for US essays, UK samples for UCAS), but never borrow a life event.
 - Cut, do not pad. If the draft is at its limit, every addition must be paid for by a deletion.
 ${limitUnitFor(essay) === 'characters' ? '- This limit is in CHARACTERS including spaces. Check your output length before returning it.' : '- Stay inside the word limit.'}
 

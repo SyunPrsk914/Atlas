@@ -1,7 +1,9 @@
-import { useState } from 'react';
-import { Outlet, NavLink } from 'react-router-dom';
-import { LayoutDashboard, User, GraduationCap, PenLine, FolderOpen, Library, Compass, Menu, X } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Outlet, NavLink, Link } from 'react-router-dom';
+import { LayoutDashboard, User, GraduationCap, PenLine, FolderOpen, Library, Compass, Menu, X, Clock } from 'lucide-react';
 import AiStatusPill from '@/components/AiStatusPill';
+import { getLastUniversityId } from '@/lib/persist';
+import { base44 } from '@/api/base44Client';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -14,6 +16,41 @@ const navItems = [
 
 export default function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [lastUniName, setLastUniName] = useState(null);
+  const [lastUniId, setLastUniId] = useState(null);
+
+  useEffect(() => {
+    const id = getLastUniversityId();
+    if (!id) return;
+    setLastUniId(id);
+    base44.entities.University.get(id).then((u) => {
+      if (u) setLastUniName(u.name);
+    }).catch(() => {});
+    // Listen for storage changes (when EssayBuilder updates last uni)
+    const handler = () => {
+      const newId = getLastUniversityId();
+      if (newId && newId !== id) {
+        setLastUniId(newId);
+        base44.entities.University.get(newId).then((u) => {
+          if (u) setLastUniName(u.name);
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener('storage', handler);
+    const interval = setInterval(() => {
+      const cur = getLastUniversityId();
+      if (cur && cur !== lastUniId) {
+        setLastUniId(cur);
+        base44.entities.University.get(cur).then((u) => {
+          if (u) setLastUniName(u.name);
+        }).catch(() => {});
+      }
+    }, 2000);
+    return () => {
+      window.removeEventListener('storage', handler);
+      clearInterval(interval);
+    };
+  }, [lastUniId]);
 
   const closeMobile = () => setMobileOpen(false);
 
@@ -91,9 +128,19 @@ export default function Layout() {
           ))}
         </nav>
         <div className="px-6 py-5 border-t border-border space-y-3">
+          {lastUniName && lastUniId && (
+            <Link to={`/essay-builder?university=${lastUniId}`} className="block p-2.5 rounded-lg bg-muted/50 hover:bg-muted border border-border/50 transition">
+              <div className="flex items-center gap-1.5 text-[11px] text-foreground/40 mb-1">
+                <Clock className="w-3 h-3" />
+                Last session
+              </div>
+              <div className="text-xs font-medium truncate">{lastUniName}</div>
+              <div className="text-[11px] text-foreground/40">Essay Builder →</div>
+            </Link>
+          )}
           <AiStatusPill />
           <p className="text-[11px] text-foreground/35 leading-relaxed">
-            Your private workspace. All data is yours alone.
+            Your private workspace. All data is yours alone. Reviews and essay selections are cached so they survive navigation.
           </p>
         </div>
       </aside>

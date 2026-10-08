@@ -24,8 +24,11 @@ const GRANULARITY_RULES = `ANALYSIS METHOD — read the text word by word, not b
 4. Do not invent problems. If the text is clean in an area, say so in the summary rather than manufacturing findings.
 5. Do not rewrite the whole piece — this is a diagnosis, not a rewrite.`;
 
-/** Prompt for analysing an essay-like material. */
-export function buildEssayAnalysisPrompt({ title, text, kind = 'essay' }) {
+/** Prompt for analysing an essay-like material.
+ *  `contextNotes` is applicant-provided context ABOUT the document — it must
+ *  NOT be analyzed as if it were the document itself.
+ */
+export function buildEssayAnalysisPrompt({ title, text, kind = 'essay', contextNotes = '', linkUrl = '', fileUrl = '' }) {
   const kindLabel = {
     essay: 'a personal statement or essay written by the applicant',
     sample_essay: 'a successful essay written by someone else',
@@ -40,23 +43,46 @@ export function buildEssayAnalysisPrompt({ title, text, kind = 'essay' }) {
     ? `THIS IS A SAMPLE. It was not written by the applicant.
 Study it as craft, word by word: content, expression, voice, tone, the characteristics of the writing, the emotion it evokes, and how each word is used to show what the writer wants the reader to understand.
 Do not score it as the applicant's writing. Do not suggest they submit it. Do not treat any person, place, or event in it as their life.
+For a sample, your job is to extract reusable technique (opening, structure, evidence density, reflection move, closing) that the applicant can apply to their OWN story.
+`
+    : `THIS IS THE APPLICANT'S OWN MATERIAL. It is evidence about their life.
+Read it for concrete facts, experiences, values, and voice that can be reused when drafting essays. Extract names, numbers, roles, outcomes, and any distinctive phrasing that is truly theirs.
+`;
+
+  const contextBlock = contextNotes && String(contextNotes).trim()
+    ? `APPLICANT-PROVIDED CONTEXT ABOUT THIS MATERIAL (DO NOT ANALYZE THIS TEXT FOR AUTHENTICITY, AI PATTERNS, OR STYLE — it is only a hint about what the document is):
+---
+${String(contextNotes).trim()}
+---
+The context above is NOT the document. Do NOT quote it, do NOT score it, do NOT say "this is not authentic" about it. Use it only to understand what kind of information to expect in the document below.
 `
     : '';
 
+  const sourceBlock = [
+    linkUrl ? `SOURCE LINK (if the text below is empty, the document lives at this URL): ${linkUrl}` : '',
+    fileUrl ? `ATTACHED FILE: ${fileUrl}` : '',
+  ].filter(Boolean).join('\n');
+
   return `You are a meticulous line editor reviewing ${kindLabel} titled "${title}".
 
-${sampleRule}${GRANULARITY_RULES}
+${sampleRule}${contextBlock}${sourceBlock ? `${sourceBlock}\n\n` : ''}${GRANULARITY_RULES}
 
 WHAT THE ADMISSIONS COMMITTEE IS ACTUALLY LOOKING FOR:
 - A distinct voice that could only belong to this applicant.
 - Evidence rather than assertion: names, numbers, roles, outcomes.
 - Reflection that changes something, not a moral at the end of the story.
 - For a resume/CV: signal density, quantified impact, and whether it reads as a list of duties.
+- For a sample: what craft move makes it work, and how could that move be applied to a completely different life?
+
+CRITICAL RULE ABOUT CONTEXT:
+The applicant sometimes writes a short note in a separate "Context / Notes" field to tell you what this file is (e.g., "This is my robotics club reflection" or "UK sample from Oxford 2024"). That note is NEVER the text to analyze. Analyze ONLY the TEXT TO ANALYZE block below. If you analyze the context note and say "this is not authentic" or "this sounds like AI", you are making a fundamental mistake.
 
 TEXT TO ANALYZE (between the markers; do not include the markers in offsets):
 <<<TEXT
 ${text}
 TEXT>>>
+
+If the TEXT TO ANALYZE block is empty but a SOURCE LINK is given, say so in the summary: "No pasted text — only a link was provided" and give guidance on what to look for when the applicant opens that link, rather than inventing an analysis.
 
 Return findings as a flat list. Use these exact "kind" values:
 - "strength" — something that is genuinely working and should be protected while editing.

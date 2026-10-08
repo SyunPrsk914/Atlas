@@ -29,6 +29,12 @@ import {
 } from '@/lib/essayScope';
 import { formatMaterialsForAI } from '@/lib/materialRole';
 import { missingSchoolPrompts, promptsForUniversity, toEssayDraft } from '@/lib/supplementPrompts';
+import {
+  getLastUniversityId, setLastUniversityId,
+  getLastEssayId, setLastEssayId,
+  getCachedEssayReview, setCachedEssayReview,
+  getCachedEssayGen, setCachedEssayGen,
+} from '@/lib/persist';
 
 const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label: s }).label;
 
@@ -43,8 +49,10 @@ export default function EssayBuilder() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [reviewResult, setReviewResult] = useState(null);
+  const [reviewCachedAt, setReviewCachedAt] = useState(null);
   const [genAnalysis, setGenAnalysis] = useState(null);
   const [genGaps, setGenGaps] = useState([]);
+  const [genCachedAt, setGenCachedAt] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [metaExpanded, setMetaExpanded] = useState(true);
@@ -66,8 +74,14 @@ export default function EssayBuilder() {
         const unis = await base44.entities.University.list();
         setUniversities(unis);
         const uniParam = searchParams.get('university');
-        const initial = (uniParam && unis.find((u) => u.id === uniParam)) || unis[0] || null;
+        const lastUniId = getLastUniversityId();
+        const initial =
+          (uniParam && unis.find((u) => u.id === uniParam)) ||
+          (lastUniId && unis.find((u) => u.id === lastUniId)) ||
+          unis[0] ||
+          null;
         setSelectedUni(initial);
+        if (initial) setLastUniversityId(initial.id);
         if (!unis.length) setLoading(false);
       } catch (e) {
         console.error(e);
@@ -83,12 +97,40 @@ export default function EssayBuilder() {
       try {
         const ess = await loadEssays();
         const essayParam = searchParams.get('essay');
+        const lastEssayId = getLastEssayId();
+        let essayToSelect = null;
         if (essayParam) {
-          const essay = ess.find((e) => e.id === essayParam);
-          if (essay) {
-            setSelectedEssay(essay);
+          essayToSelect = ess.find((e) => e.id === essayParam) || null;
+        }
+        if (!essayToSelect && lastEssayId) {
+          // Only restore last essay if it belongs to this university/platform
+          const candidate = ess.find((e) => e.id === lastEssayId);
+          if (candidate) {
+            const applicableToCurrent = essaysApplicableToUniversity([candidate], selectedUni).length > 0;
+            if (applicableToCurrent) essayToSelect = candidate;
+          }
+        }
+        if (essayToSelect) {
+          setSelectedEssay(essayToSelect);
+          setLastEssayId(essayToSelect.id);
+          // Restore cached review/gen if any — keeps results when navigating
+          const cachedReview = getCachedEssayReview(essayToSelect.id);
+          if (cachedReview?.result) {
+            setReviewResult(cachedReview.result);
+            setReviewCachedAt(cachedReview.savedAt || null);
+          } else {
             setReviewResult(null);
+            setReviewCachedAt(null);
+          }
+          const cachedGen = getCachedEssayGen(essayToSelect.id);
+          if (cachedGen) {
+            setGenAnalysis(cachedGen.analysis || null);
+            setGenGaps(cachedGen.gaps || []);
+            setGenCachedAt(cachedGen.savedAt || null);
+          } else {
             setGenAnalysis(null);
+            setGenGaps([]);
+            setGenCachedAt(null);
           }
         }
       } catch (e) {
@@ -119,9 +161,26 @@ export default function EssayBuilder() {
     const stayingInUcas = isUcasQuestion(essay) && isUcasQuestion(selectedEssay);
     if (dirty && !stayingInUcas && !window.confirm('You have unsaved changes on the current essay. Discard them?')) return;
     setSelectedEssay(essay);
-    setReviewResult(null);
-    setGenAnalysis(null);
-    setGenGaps([]);
+    setLastEssayId(essay.id);
+    // Restore cached results for this essay if we have them
+    const cachedReview = getCachedEssayReview(essay.id);
+    const cachedGen = getCachedEssayGen(essay.id);
+    if (cachedReview?.result) {
+      setReviewResult(cachedReview.result);
+      setReviewCachedAt(cachedReview.savedAt || null);
+    } else {
+      setReviewResult(null);
+      setReviewCachedAt(null);
+    }
+    if (cachedGen) {
+      setGenAnalysis(cachedGen.analysis || null);
+      setGenGaps(cachedGen.gaps || []);
+      setGenCachedAt(cachedGen.savedAt || null);
+    } else {
+      setGenAnalysis(null);
+      setGenGaps([]);
+      setGenCachedAt(null);
+    }
     if (!stayingInUcas) setDirty(false);
   };
 
@@ -129,9 +188,13 @@ export default function EssayBuilder() {
     if (dirty && !window.confirm('You have unsaved changes. Discard them?')) return;
     const uni = universities.find((u) => u.id === uniId);
     setSelectedUni(uni);
+    if (uni) setLastUniversityId(uni.id);
     setSelectedEssay(null);
     setReviewResult(null);
+    setReviewCachedAt(null);
     setGenAnalysis(null);
+    setGenGaps([]);
+    setGenCachedAt(null);
     setDirty(false);
   };
 
@@ -248,9 +311,10 @@ export default function EssayBuilder() {
       base44.entities.Material.list(),
     ]);
     const profileText = buildProfileContext(profiles[0] || {}, { includeLeadershipBrief: true });
-    const materialsText = formatMaterialsForAI(materials);
+    // Platform-aware materials formatting so US/UK samples are distinguished
+    const materialsText = formatMaterialsForAI(materials, { platform });
     const knowledgeRows = await base44.entities.CollegeKnowledge.list();
-    const knowledge = findKnowledgeRecord(knowledgeRows, selectedUni.name);
+    const knowledge = findKnowledgeRecord(knowledgeRows, selectedUni?.name || '');
     const knowledgeText = knowledge?.knowledge
       || 'No research cached for this university yet. Research it in the Knowledge Base for a far more specific essay — this draft will rely on general knowledge only.';
     return { profileText, materialsText, knowledgeText };
@@ -290,11 +354,17 @@ export default function EssayBuilder() {
         toast.error('The AI returned an empty draft', { description: 'Try again, or lower the length you asked for.' });
         return;
       }
-      setGenAnalysis(result.essay_analysis || '');
-      setGenGaps(Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : []);
+      const analysis = result.essay_analysis || '';
+      const gaps = Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : [];
+      setGenAnalysis(analysis);
+      setGenGaps(gaps);
+      const now = new Date().toISOString();
+      setGenCachedAt(now);
+      // Persist generation analysis so it survives navigation
+      setCachedEssayGen(selectedEssay.id, { analysis, gaps });
       await persist({ content: String(text).trim(), status: 'drafting' });
       toast.success('Draft written', {
-        description: result.gaps_for_applicant?.length
+        description: gaps.length
           ? 'Check the "fill these in" list — the AI deliberately left gaps rather than inventing your life.'
           : 'Read it, then edit it in your own voice.',
       });
@@ -310,17 +380,20 @@ export default function EssayBuilder() {
     setBusy('review');
     setReviewResult(null);
     try {
-      const { knowledgeText } = await gatherContext();
+      const { profileText, materialsText, knowledgeText } = await gatherContext();
       const { ok, result } = await runAI({
         prompt: buildReviewPrompt({
           essay: selectedEssay, university: selectedUni, platform,
           knowledgeText, reviewNotes: selectedEssay.review_notes, allEssays: essays,
+          materialsText, profileText,
         }),
         response_json_schema: REVIEW_SCHEMA,
       }, { fallbackTitle: 'The review could not be completed' });
 
       if (!ok) return;
       setReviewResult(result);
+      setReviewCachedAt(new Date().toISOString());
+      setCachedEssayReview(selectedEssay.id, result);
       await persist({ status: 'in_review', review_notes: JSON.stringify(result, null, 2) });
       toast.success(`Reviewed: ${result.overall_score}/10`, {
         description: `${(result.weaknesses || []).length} weakness(es) and ${(result.priority_improvements || []).length} priority fix(es) found.`,
@@ -336,11 +409,12 @@ export default function EssayBuilder() {
     if (!selectedEssay?.content) return;
     setBusy('polish');
     try {
-      const { knowledgeText } = await gatherContext();
+      const { profileText, materialsText, knowledgeText } = await gatherContext();
       const { ok, result } = await runAI({
         prompt: buildPolishPrompt({
           essay: selectedEssay, university: selectedUni, platform,
           reviewResult, knowledgeText, allEssays: essays,
+          materialsText, profileText,
         }),
       }, { fallbackTitle: 'Could not polish this essay' });
 
@@ -511,11 +585,12 @@ export default function EssayBuilder() {
   return (
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
+        <div className="max-w-2xl">
           <h1 className="font-display text-3xl font-semibold tracking-tight">Essay Builder</h1>
-          <p className="text-foreground/50 mt-1.5 max-w-2xl">
+          <p className="text-foreground/50 mt-1.5">
             Shared writing is written once and sent to every school on the platform. School-specific writing is
             written for one school. Atlas keeps them apart so you never write the same essay twice.
+            <span className="block text-xs text-foreground/40 mt-1">Your last university and essay are remembered, so you return to where you left off — not always Stanford.</span>
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -536,6 +611,12 @@ export default function EssayBuilder() {
             <p className="text-sm text-foreground/60 flex-1 min-w-[240px]">
               {PLATFORM_REQUIREMENTS[platform]?.summary}
             </p>
+            {selectedUni && (
+              <Badge variant="secondary" className="text-[11px] gap-1">
+                <CheckCircle2 className="w-3 h-3" />
+                Last session: {selectedUni.name}
+              </Badge>
+            )}
           </div>
           <p className="text-xs text-foreground/45 mt-2 flex items-start gap-1.5">
             <Info className="w-3.5 h-3.5 mt-px shrink-0" />
@@ -770,9 +851,14 @@ export default function EssayBuilder() {
 
               {genAnalysis && (
                 <div className="bg-accent/5 border border-accent/20 rounded-xl p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Sparkles className="w-4 h-4 text-accent" />
-                    <span className="text-sm font-medium">Why this essay, in this slot</span>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-accent" />
+                      <span className="text-sm font-medium">Why this essay, in this slot</span>
+                    </div>
+                    {genCachedAt && (
+                      <span className="text-[11px] text-foreground/35">cached {new Date(genCachedAt).toLocaleDateString()} — stays when you navigate</span>
+                    )}
                   </div>
                   <p className="text-sm text-foreground/60 leading-relaxed">{genAnalysis}</p>
                   {genGaps.length > 0 && (
@@ -843,7 +929,7 @@ export default function EssayBuilder() {
               </div>
               )}
 
-              <EssayReviewPanel reviewResult={reviewResult} onPolish={handlePolish} polishing={busy === 'polish'} />
+              <EssayReviewPanel reviewResult={reviewResult} cachedAt={reviewCachedAt} onPolish={handlePolish} polishing={busy === 'polish'} />
             </div>
           )}
         </div>
