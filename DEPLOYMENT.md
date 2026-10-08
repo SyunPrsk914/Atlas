@@ -1,18 +1,18 @@
-# Deploying Atlas on Vercel + Supabase (no Base44, no token limits)
+# Deploying Atlas on Vercel + Supabase (local-first AI)
 
-This repo has been migrated **off Base44**. The UI you already know is unchanged — every page still calls the same `base44.*` API surface — but underneath, one compatibility layer (`src/api/base44Client.js`) now talks to:
+This repo has been migrated **off Base44**. React, Vite, Tailwind, the Supabase backend, and the existing pages remain in place. A compatibility layer (`src/api/base44Client.js`) keeps the existing `base44.*` data/auth surface working, while AI uses:
 
-| What Base44 did | What Atlas uses now | Where it lives |
+| Capability | Current implementation | Where it lives |
 |---|---|---|
-| Entity tables (University, Essay, Material, Profile, RoadmapTask, CollegeKnowledge) | **Supabase Postgres** tables + Row-Level Security | `supabase/schema.sql` |
-| `Core.InvokeLLM` (AI with Base44 credits) | **Your own LLM key** (Gemini / OpenAI / Anthropic) via a serverless function | `api/invoke-llm.js` |
-| `Core.UploadPublicFile` | **Supabase Storage** public `uploads` bucket | `src/api/supabaseBackend.js` |
-| Auth (email+password, OTP, Google) | **Supabase Auth** | `src/api/supabaseBackend.js` |
-| Base44 hosting / tokens / limits | **Vercel** hosting — nothing to top up, ever | this document |
+| Entity tables and row privacy | **Supabase Postgres + RLS** | `supabase/schema.sql` |
+| Default real AI | **Ollama on the user's own computer**, called directly by the browser at `http://127.0.0.1:11434` | `src/api/ollamaClient.js` |
+| Optional hosted AI | User/deployment-supplied NaraRouter, Gemini, Groq, OpenRouter, OpenAI, or Anthropic key; provider quotas apply | `api/invoke-llm.js` |
+| Auth and file upload | **Supabase Auth + Storage** | `src/api/supabaseBackend.js` |
+| Hosting | **Vercel** static frontend; it is not in the local Ollama request path | this document |
 
-**Total cost:** $0 platform fees on free tiers; you only pay your LLM provider per call (Gemini has a generous free tier). No credits, no monthly token cap.
+**Atlas itself adds no AI request, token, or daily quota.** Local Ollama inference uses your computer and is not metered by Atlas. Hosted providers may impose their own usage caps, rate limits, pricing, and availability; Atlas does not claim a hosted API is unlimited.
 
-> **Before you start:** the app also runs with **zero configuration** — `npm install && npm run dev` opens a clearly-labeled *Demo mode* (data saved in your browser, AI returns demo output). Use it to explore the UI; then follow this guide to go live.
+> **Before you start:** `npm install && npm run dev` opens a clearly labeled *Demo mode* until you connect a model in the app's **AI setup** panel. A hosted key is optional. Follow Part 2 to install local Ollama and configure its browser origin.
 
 ---
 
@@ -119,23 +119,137 @@ This is a two-location setup:
 
 ---
 
-## Part 2 — Your AI key (the brain of the essay builder)
+## Part 2 — Local Ollama (default AI path)
 
-The AI features (essay drafting/review/polish, deep college research, holistic application review) call `api/invoke-llm.js`, which uses **your** key. **Gemini is recommended** because the Knowledge Base's "research this college on the internet" mode uses Gemini's Google-Search grounding (the other providers can't browse).
+Atlas's default real-model path is a model running on **your own computer**. The browser talks directly to `http://127.0.0.1:11434`; the request does not go to Vercel or a hosted AI proxy. The local base URL and installed model are saved in this browser's `localStorage`. Open **AI setup** from the AI status pill, enter the URL/model, and choose **Probe & save local model**. Atlas calls `/api/tags` and only saves the setting if that probe succeeds and the selected model is installed.
 
-| Provider | Where to get the key | Env var | Free tier |
-|---|---|---|---|
-| **Google Gemini** (recommended) | **https://aistudio.google.com** → **Get API key** → Create API key (or via console.cloud.google.com → APIs & Services → Credentials) | `GEMINI_API_KEY` | Generous free tier on the Flash models |
-| OpenAI | **https://platform.openai.com/api-keys** | `OPENAI_API_KEY` | Pay per use |
-| Anthropic | **https://console.anthropic.com/settings/keys** | `ANTHROPIC_API_KEY` | Pay per use |
+### Install and download a model
 
-You can set one or several; `LLM_PROVIDER` picks the default (`gemini`/`openai`/`anthropic`), and internet-research calls automatically use Gemini when `GEMINI_API_KEY` exists.
+Install Ollama with the official command for your OS:
 
-Model defaults (overridable via `GEMINI_MODEL`, `OPENAI_MODEL`, `ANTHROPIC_MODEL`): `gemini-flash-latest`, `gpt-4o`, `claude-sonnet-4-6`.
+- **macOS or Linux:** run `curl -fsSL https://ollama.com/install.sh | sh`.
+- **Windows PowerShell:** run `irm https://ollama.com/install.ps1 | iex`.
+- **macOS desktop-app alternative:** download from <https://ollama.com/download/mac>.
 
-Gemini defaults to the `gemini-flash-latest` pointer on purpose. Google retires concrete model IDs regularly, and a pinned ID that has been retired would break every AI feature. If the app is ever pointed at a model that is no longer offered, the endpoint retries once with the provider default and logs a warning, so a retired model degrades to a slightly different model rather than an error. Set `GEMINI_MODEL` only if you need a specific pin.
+Start Ollama, then download a local model (example):
 
-**Check your setup at any time:** `GET /api/status` returns the configuration (never the keys) as JSON — `configured`, `provider`, `model`, `grounding`, and which providers have a key. The same information appears as a pill in the app's sidebar and mobile header, so you can confirm the connection before waiting on a long generation.
+```bash
+ollama pull llama3.2
+```
+
+The model's exact installed name appears in `/api/tags` and the AI setup panel. Atlas excludes Ollama Cloud model names and only accepts on-device models. Hardware and model size determine response speed.
+
+### Allow this Atlas page with `OLLAMA_ORIGINS`
+
+Ollama must allow the **origin of the Atlas page open in your browser**. Use the exact origin, with no path or trailing slash. For local Vite development that is usually `http://localhost:5173`. For a deployment, add its exact origin too (for example `https://atlas.example.com`; for an Arena preview, use that preview's exact browser origin). Multiple origins are comma-separated. Do not use `*`.
+
+Keep Ollama bound to loopback. It defaults to `127.0.0.1:11434`; the commands below set that explicitly. Do not use `0.0.0.0`, port-forward `11434`, configure a public tunnel, or expose the Ollama server to the internet.
+
+**macOS desktop app:** set the variables and restart Ollama from the menu bar:
+
+```bash
+launchctl setenv OLLAMA_NO_CLOUD "1"
+launchctl setenv OLLAMA_HOST "127.0.0.1:11434"
+launchctl setenv OLLAMA_ORIGINS "http://localhost:5173,https://YOUR-ATLAS-ORIGIN"
+```
+
+Replace `https://YOUR-ATLAS-ORIGIN` with the deployed Atlas origin; omit it if you only use local Vite. Quit and reopen Ollama after setting these values.
+
+**Linux systemd service:** run `sudo systemctl edit ollama.service`, add the following under `[Service]`, save, then reload and restart:
+
+```ini
+[Service]
+Environment="OLLAMA_NO_CLOUD=1"
+Environment="OLLAMA_HOST=127.0.0.1:11434"
+Environment="OLLAMA_ORIGINS=http://localhost:5173,https://YOUR-ATLAS-ORIGIN"
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+**Windows PowerShell:** set the user-level variables, quit Ollama from the system tray, then start it again from the Start menu:
+
+```powershell
+[Environment]::SetEnvironmentVariable("OLLAMA_NO_CLOUD", "1", "User")
+[Environment]::SetEnvironmentVariable("OLLAMA_HOST", "127.0.0.1:11434", "User")
+[Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "http://localhost:5173,https://YOUR-ATLAS-ORIGIN", "User")
+```
+
+You can instead run the Ollama server in a terminal after quitting its background service:
+
+```bash
+OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11434 OLLAMA_ORIGINS="http://localhost:5173,https://YOUR-ATLAS-ORIGIN" ollama serve
+```
+
+```powershell
+$env:OLLAMA_NO_CLOUD = "1"
+$env:OLLAMA_HOST = "127.0.0.1:11434"
+$env:OLLAMA_ORIGINS = "http://localhost:5173,https://YOUR-ATLAS-ORIGIN"
+ollama serve
+```
+
+If the browser reports a CORS/network error, check the exact origin in `OLLAMA_ORIGINS`, confirm Ollama is running, then reopen **AI setup** and probe again. If a local model is configured but unavailable, Atlas reports the failure; it does not silently fall back to demo or a hosted provider.
+
+### Optional hosted providers
+
+A hosted provider is not required. For users who explicitly select **Hosted provider** in AI setup, the server-side compatibility function can use these optional keys:
+
+| Provider | Server environment variable | Optional model/base URL settings |
+|---|---|---|
+| Gemini | `GEMINI_API_KEY` | `GEMINI_MODEL` (default `gemini-flash-latest`) |
+| NaraRouter | `NARAROUTER_API_KEY` | `NARAROUTER_MODEL` (default `agnes-3-flash`), optional `NARAROUTER_BASE_URL` |
+| Groq | `GROQ_API_KEY` | `GROQ_MODEL`, optional `GROQ_BASE_URL` |
+| OpenRouter | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` (default `openrouter/auto`), optional `OPENROUTER_BASE_URL` |
+| OpenAI | `OPENAI_API_KEY` | `OPENAI_MODEL`, optional `OPENAI_BASE_URL` |
+| Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
+
+#### Connect NaraRouter instead of Gemini
+
+NaraRouter exposes an OpenAI Chat Completions-compatible endpoint. Atlas connects to `https://router.bynara.id/v1/chat/completions` from its server-side `/api/invoke-llm` function; the NaraRouter key is never put in browser storage or the Vite bundle. The adapter sends the same existing prompts and JSON-mode calls used by other hosted providers. NaraRouter-specific HTTP errors, including 429, are returned as failures—Atlas does not retry with another Nara model or bypass its limits.
+
+1. Create an account at [router.bynara.id](https://router.bynara.id/register), create an API key under **API keys**, and copy it when shown. NaraRouter documents `sk-nry-` key prefixes and Bearer-token authentication.
+2. Add these server-side variables in **Vercel → Project → Settings → Environment Variables**. For local development, put them in the ignored `.env.local` file and restart `npm run dev`:
+
+   ```dotenv
+   LLM_PROVIDER=nararouter
+   NARAROUTER_API_KEY=sk-nry-your-secret-key
+   NARAROUTER_MODEL=agnes-3-flash
+   # Optional; this is already the default:
+   NARAROUTER_BASE_URL=https://router.bynara.id/v1
+   ```
+
+   Set `LLM_PROVIDER=nararouter` when Gemini is also configured; it explicitly selects NaraRouter rather than relying on key auto-detection. Do not put the secret in `VITE_*`, paste it into chat, or commit it.
+3. For Vercel, redeploy after saving the variables. In Atlas, open the AI status pill → **AI setup** → **Use hosted provider**. In local development, restart the dev server and select the same mode. Local Ollama remains the default until Hosted is selected.
+4. Check which model aliases your key can use with the authenticated models endpoint, then set `NARAROUTER_MODEL` to one of them:
+
+   ```bash
+   curl -sS https://router.bynara.id/v1/models \
+     -H "Authorization: Bearer $NARAROUTER_API_KEY"
+   ```
+
+   The current public Free-plan data lists `agnes-3-flash` (the Atlas default), along with `agnes-2.5-flash`, `exo-stealh`, `jev`, `laguna-s-2.1`, `ling-3.0-flash-fin-free`, `ling-3.0-flash-sante-free`, `nemotron-3-super-free`, `nemotron-3-ultra-free`, and `nemotron-3.5-lightning-free`. Use your key's `/v1/models` result as the final authority; model access and aliases can change. The NaraRouter homepage also demonstrates `auto/bynara`, but the explicit Free-plan alias avoids assuming that an automatic route is included in your account.
+5. Optional direct key check (this sends a test prompt to NaraRouter, not through Atlas):
+
+   ```bash
+   curl -sS https://router.bynara.id/v1/chat/completions \
+     -H "Authorization: Bearer $NARAROUTER_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"agnes-3-flash","messages":[{"role":"user","content":"Reply with OK."}]}'
+   ```
+
+**Free-tier limits are NaraRouter's, not Atlas's.** As checked on 9 October 2026, NaraRouter's live public `/api/plans` and pricing page report **7,000,000 tokens/day** and **15 requests/minute** for Free. Its developer-docs quota table still shows a **5,000,000-token base-class** figure. Treat NaraRouter's account dashboard/live plan data as authoritative for your quota, and authenticated `/v1/models` as authoritative for aliases your key can use. Nara also documents concurrency/model-tier limits; its actual HTTP 429/403 errors are shown rather than retried or converted to success. The service's plans, included models, and quota can change.
+
+**Privacy / student-data warning:** NaraRouter's privacy policy says gateway prompt/output retention is off by default, but prompts are transmitted to the selected upstream model provider and then subject to that provider's own terms. The same policy says the service is not directed to people under 18. Atlas can send profiles, essays, and uploaded material to a selected hosted provider, so review NaraRouter and upstream policies and do not route minors' sensitive data unless that use is authorised and appropriate. If unsure, use local Ollama instead.
+
+References: [NaraRouter API docs](https://router.bynara.id/docs), [live plan data](https://router.bynara.id/api/plans), [pricing](https://router.bynara.id/pricing), [privacy policy](https://router.bynara.id/privacy).
+
+Hosted free keys are still capped by their provider; check that provider's current pricing/quota terms. Store keys only in a trusted server environment such as local `.env.local` or Vercel Environment Variables, never in a `VITE_*` variable. If the provider returns HTTP 429, Atlas displays its real error and does not convert it to a successful result. Atlas imposes no additional AI request, token, or daily cap.
+
+Google Search grounding is only requested for an explicitly selected Gemini provider. A report is labeled web-grounded only when the successful Gemini response contains grounding metadata. Other answers—including local Ollama and other hosted providers—are labeled **not web-grounded**. Knowledge Base research for Ollama uses the public official page text the user supplies (see Part 4); it does not depend on Gemini Search.
+
+`GET /api/status` reports optional hosted-key configuration and provider availability without returning any key values. The sidebar AI status pill opens the setup panel, where you can choose Ollama, a configured hosted provider, or clearly labeled Demo mode.
 
 ---
 
@@ -150,7 +264,7 @@ This repo is already on GitHub (`SyunPrsk914/Atlas`). Any push to it can be auto
 1. Go to **https://vercel.com** → sign in with GitHub → **Add New… → Project**.
 2. Import the `Atlas` repository.
 3. Vercel auto-detects **Vite**: keep **Framework Preset = Vite**, **Build Command = `npm run build`**, **Output Directory = `dist`** (defaults are correct).
-4. **Environment Variables** — expand this section and add every row below (copy/paste). Values come from Parts 1–2:
+4. **Environment Variables** — add the Supabase rows below if using Supabase. These are not AI keys:
 
 | Name | Value | Where the value comes from |
 |---|---|---|
@@ -158,8 +272,8 @@ This repo is already on GitHub (`SyunPrsk914/Atlas`). Any push to it can be auto
 | `VITE_SUPABASE_ANON_KEY` | `eyJ...` | Supabase → Settings → API → **anon public** |
 | `SUPABASE_URL` | same as `VITE_SUPABASE_URL` | same |
 | `SUPABASE_ANON_KEY` | same as `VITE_SUPABASE_ANON_KEY` | same |
-| `LLM_PROVIDER` | `gemini` (or `openai` / `anthropic`) | your choice |
-| `GEMINI_API_KEY` | `AIza...` | Google AI Studio → API keys (Part 2) |
+
+No AI key is required to deploy or use local Ollama. If you want an optional hosted provider, set its server-side environment variable(s) from Part 2; never use a `VITE_*` prefix for an AI key.
 
 5. **Deploy**.
 
@@ -180,13 +294,15 @@ Vercel → Project → **Settings → Domains** → add your domain and follow t
 
 ```bash
 npm install
-cp .env.example .env.local   # then fill in the Supabase values (and optionally GEMINI_API_KEY)
+cp .env.example .env.local   # optional: fill in Supabase values for persistent data/auth
 npm run dev                  # http://localhost:5173
 ```
 
-- With `.env.local` filled → local dev uses **your real Supabase project**.
-- Without any env vars → **Demo mode** (browser-only storage, demo AI output). Great for UI work; a badge in the corner tells you which mode you're in.
-- The Vite dev server also serves `/api/invoke-llm`, so AI calls work locally exactly like on Vercel. To use real AI locally, put `GEMINI_API_KEY` (etc.) in `.env.local` — those keys are read by the dev server, not the browser.
+- Without Supabase environment values the app uses its existing browser-only Demo backend.
+- Without a selected AI model, AI buttons produce clearly labeled **Demo output**.
+- To use local real AI, install Ollama and follow Part 2. On default Vite dev, allow `http://localhost:5173` in `OLLAMA_ORIGINS`. Atlas calls the user's browser's `http://127.0.0.1:11434` directly; the Vite and Vercel servers do not proxy local Ollama calls.
+- `/api/invoke-llm` remains only for the optional hosted path. Its API keys stay server-side; hosted-provider limits still apply.
+- Knowledge Base research needs an official public admissions URL and page text. Atlas fetches the page from the browser without cookies. If the site blocks CORS or redirects to login, Atlas says so and lets the user paste public text; it does not proxy around the block or scrape behind a login.
 
 ---
 
@@ -200,11 +316,11 @@ npm run dev                  # http://localhost:5173
 | `base44.auth.loginWithProvider('google', path)` | `signInWithOAuth` (redirect to `origin + path`) |
 | `base44.auth.resetPasswordRequest/resetPassword` | `resetPasswordForEmail` + `verifyOtp(type=recovery)`/`updateUser` |
 | `base44.auth.me/isAuthenticated/logout/redirectToLogin` | `getUser`/`getSession`/`signOut`/redirect to `/login` |
-| `base44.integrations.Core.InvokeLLM({prompt, response_json_schema, add_context_from_internet, model})` | `POST /api/invoke-llm` → Gemini/OpenAI/Anthropic. JSON schemas are honored (returns parsed objects). `add_context_from_internet` uses Gemini Google-Search grounding. |
+| Current AI feature calls through `runAI({prompt, response_json_schema, add_context_from_internet})` | Default: browser → local Ollama `/api/chat` with JSON schema support and one strict retry for invalid JSON. Optional Hosted mode calls `POST /api/invoke-llm`; Gemini grounding is reported only after successful grounding metadata. With no model, the client returns clearly labeled Demo output. |
 | `base44.integrations.Core.UploadPublicFile({file})` | Supabase Storage `uploads` bucket → returns `{ file_url }` (same shape) |
 | `base44.app.getPublicSettings()` | static `{ id, public_settings }` |
 
-Key files: `src/api/base44Client.js` (entry / mode switch) · `src/api/supabaseBackend.js` (production backend) · `src/api/localBackend.js` (demo backend) · `api/invoke-llm.js` (AI endpoint) · `supabase/schema.sql` (database).
+Key files: `src/api/base44Client.js` (Base44 compatibility surface) · `src/api/ollamaClient.js` (direct browser-to-loopback AI + FIFO queue) · `src/lib/ai.js` (selected-provider routing) · `src/lib/researchSource.js` (public page fetch/extraction) · `api/invoke-llm.js` (optional hosted endpoint) · `supabase/schema.sql` (database and RLS).
 
 The `base44/` folder remains as **reference only** (the original entity schemas that `schema.sql` was derived from). Nothing reads it.
 
@@ -218,16 +334,20 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 | Never receive the signup/reset email | Supabase's ~3/hour email cap, or spam folder | Check spam; configure custom SMTP (end of 1.5) |
 | Google login flashes and returns to login | Redirect URL mismatch | Supabase → Auth → Redirect URLs must include `https://YOUR-APP.vercel.app/**` **and** Google's authorized redirect URI must be exactly `https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback` |
 | Password reset link says "Invalid reset link" | Using the default Supabase email template | Apply the template in 1.5 (`?token={{ .TokenHash }}`) |
-| AI button fails with "No LLM provider configured" | Missing API key in Vercel | Add `GEMINI_API_KEY` (or another) in Vercel env vars and **redeploy** (`vercel --prod` or push; env vars are baked at build/deploy for `VITE_*`, read at runtime for the server key — a redeploy is the safe move) |
-| AI returns a schema/JSON error | Model returned malformed JSON | Just retry; the endpoint already extracts JSON from fenced/markdown replies |
+| AI setup cannot reach Ollama or `/api/tags` | Ollama is stopped, or browser CORS origin is not allowed | Set `OLLAMA_HOST=127.0.0.1:11434` and `OLLAMA_ORIGINS` to the exact Atlas browser origin (Part 2); restart Ollama and probe again |
+| Local model is missing | Model has not been downloaded or the model name differs | Run `ollama pull llama3.2` (or your chosen model); select the exact name returned by `/api/tags` |
+| Knowledge Base page fetch fails | Public page is unavailable or blocks browser CORS | Atlas does not proxy or bypass the block. Paste the publicly visible page text and keep its official URL in the source field |
+| Hosted AI call returns HTTP 429 | The hosted provider returned its own quota/rate-limit error | Atlas displays that provider's actual error. Check provider quota/billing or select local Ollama; no key rotation or quota bypass is attempted |
+| Local model returns invalid JSON | Model did not follow the existing response schema | Atlas retries once with a stricter JSON-only instruction; if still invalid, it reports the parse failure rather than substituting demo text |
 | Lists come back empty though data exists | RLS: rows belong to another user | Data is per-account by design (same as Base44). Log in with the same account that created it |
 | `filter({ university_name: "X" })` misses rows | Case/spacing differs | Equality match is exact (same as Base44) |
 | Uploads fail with 403 | Row not in `uploads` bucket or bucket missing | Re-run `supabase/schema.sql` (idempotent) — it (re)creates the bucket and policies |
 
 ## Part 7 — Costs, limits, and data safety (honest summary)
 
-- **Vercel Hobby:** free — 100 GB bandwidth/mo, serverless functions included. More than enough for one user.
-- **Supabase Free:** 500 MB database, 1 GB file storage, 50,000 monthly active users, 500k edge function invocations (unused here). Your data will be megabytes at most.
-- **LLM:** the only metered part. The Flash model on the free tier covers heavy personal use; otherwise cents per essay draft.
-- **Backups:** Supabase free tier keeps 7 days of daily backups (Dashboard → Database → Backups). For irreplaceable essay work, periodically use SQL Editor → `copy (select * from essays) to stdout with csv header` or the Table Editor CSV export.
-- **Privacy:** essay/profile data is protected by per-user RLS; the AI endpoint requires a logged-in Supabase session (JWT-verified server-side); your LLM provider key never reaches the browser.
+- **Atlas AI limits:** Atlas does not add an AI request-per-minute, request-per-day, token, or daily budget. Local Ollama requests are queued in order rather than rejected when another local call is running.
+- **Local model:** inference is performed by Ollama on the user's computer. It is not a hosted free tier; throughput and supported context size depend on that computer/model. Atlas does not expose the local Ollama port publicly.
+- **Hosted providers:** any hosted provider may cap free usage, throttle requests, charge fees, or return HTTP 429. Those are the provider's rules—not an unlimited service—and Atlas displays the real provider error without bypassing it.
+- **Vercel / Supabase:** their plans and operational limits still apply to hosting, database, auth, and storage; these are separate from an Atlas-imposed AI quota.
+- **Backups:** export irreplaceable application data periodically. The database schema remains idempotent; re-run `supabase/schema.sql` to add the Knowledge Base source/provenance columns to an existing project.
+- **Privacy:** Supabase data is protected by per-user RLS. Local AI prompts go from the browser directly to loopback Ollama. Optional hosted keys are server-side (never in the Vite bundle), and hosted prompts go to the selected provider; Supabase's service-role key is not used in the frontend.

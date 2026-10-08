@@ -11,6 +11,8 @@
  *   status?: number,
  *   raw_preview?: string,
  *   pgCode?: string,
+ *   provider?: string,
+ *   models?: string[],
  *   cause?: unknown,
  * }} ErrorDetails
  */
