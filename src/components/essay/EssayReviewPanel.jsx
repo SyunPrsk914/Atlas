@@ -20,7 +20,7 @@ function MiniScore({ label, score }) {
   );
 }
 
-export default function EssayReviewPanel({ reviewResult, onPolish, polishing }) {
+export default function EssayReviewPanel({ reviewResult, onPolish, polishing, cachedAt }) {
   if (!reviewResult) return null;
 
   const overall = Number(reviewResult.overall_score) || 0;
@@ -31,6 +31,9 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing }) 
         <div className="flex items-center gap-2">
           <ClipboardCheck className="w-4 h-4 text-foreground/50" />
           <span className="font-display text-lg font-semibold">Admissions Review</span>
+          {cachedAt && (
+            <span className="text-[11px] text-foreground/35 ml-2">cached {new Date(cachedAt).toLocaleDateString()} — stays when you navigate</span>
+          )}
         </div>
         <div className="flex items-baseline gap-1.5">
           <span className="text-sm text-foreground/40">Score</span>

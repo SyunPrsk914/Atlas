@@ -22,7 +22,7 @@ const verdictStyles = {
   'Safety': 'bg-green-100 text-green-800 border-green-300',
 };
 
-export default function ReviewResults({ result }) {
+export default function ReviewResults({ result, cachedAt }) {
   if (!result) return null;
 
   const pct = Math.round(result.acceptance_probability || 0);
@@ -37,6 +37,9 @@ export default function ReviewResults({ result }) {
           <div>
             <p className="text-sm text-foreground/50 mb-1">Acceptance Probability</p>
             <span className={`font-display text-5xl font-bold ${colors.text}`}>{pct}%</span>
+            {cachedAt && (
+              <p className="text-[11px] text-foreground/40 mt-1">Cached {new Date(cachedAt).toLocaleString()} — stays when you navigate away</p>
+            )}
           </div>
           <div className="text-right">
             <p className="text-sm text-foreground/50 mb-1.5">Verdict</p>
@@ -48,6 +51,9 @@ export default function ReviewResults({ result }) {
         <div className="mt-4 h-3 bg-muted rounded-full overflow-hidden">
           <div className={`h-full ${colors.bar} rounded-full transition-all duration-1000`} style={{ width: `${Math.min(pct, 100)}%` }} />
         </div>
+        <p className="text-[11px] text-foreground/35 mt-2">
+          This is an AI estimate against the published admitted profile. Most qualified applicants are still rejected. Use it to prioritize fixes, not as a guarantee.
+        </p>
       </div>
 
       {/* Dimensions */}

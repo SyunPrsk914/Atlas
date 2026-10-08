@@ -16,6 +16,7 @@ import {
   findKnowledgeRecord, resolvedEssayLimit, ucasCharacterBudget, isUcasQuestion,
 } from '@/lib/essayScope';
 import { daysUntil } from '@/lib/dates';
+import ApplicationTimeline from '@/components/ApplicationTimeline';
 
 const categoryLabels = {
   testing: 'Testing',
@@ -414,7 +415,7 @@ export default function UniversityDetail() {
           )}
         </TabsContent>
 
-        <TabsContent value="how" className="mt-4">
+        <TabsContent value="how" className="mt-4 space-y-4">
           <div className="bg-card border border-border rounded-xl p-5 space-y-4">
             <div className="flex items-center gap-2">
               <Info className="w-4 h-4 text-foreground/40" />
@@ -441,6 +442,7 @@ export default function UniversityDetail() {
               {PLATFORM_REQUIREMENTS[platform]?.reviewFocus}
             </p>
           </div>
+          <ApplicationTimeline country={university.country} platform={platform} />
         </TabsContent>
 
         <TabsContent value="notes" className="mt-4">

@@ -5,13 +5,16 @@ import { base44 } from '@/api/base44Client';
 import {
   GraduationCap, PenLine, FolderOpen, CheckCircle2, Calendar, ArrowRight,
   Sparkles, Library, CircleAlert, ScanText, AlertTriangle,
+  User, Clock, BookOpen, Globe, Target, FileText, BarChart3,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { daysUntil } from '@/lib/dates';
 import {
   getUniversityPlatform, PLATFORMS, buildSharedEssayPlan, isSharedEssay,
-  universityNamesMatch,
+  universityNamesMatch, PLATFORM_REQUIREMENTS,
 } from '@/lib/essayScope';
+import { getLastUniversityId } from '@/lib/persist';
 
 export default function Dashboard() {
   const [data, setData] = useState({ universities: [], essays: [], tasks: [], materials: [], knowledge: [], profiles: [] });
@@ -38,6 +41,46 @@ export default function Dashboard() {
     })();
   }, []);
 
+  // Profile completeness calculation
+  const profileCompleteness = useMemo(() => {
+    const p = data.profiles[0];
+    if (!p) return { pct: 0, missing: ['No profile yet'] };
+    const checks = [
+      { key: 'full_name', label: 'Name' },
+      { key: 'nationality', label: 'Nationality' },
+      { key: 'background_summary', label: 'Background story' },
+      { key: 'ib_predicted_score', label: 'IB / GPA' },
+      { key: 'activities', label: 'Activities', fn: (v) => Array.isArray(v) && v.length > 0 },
+      { key: 'honors', label: 'Honors', fn: (v) => Array.isArray(v) && v.length > 0 },
+    ];
+    let filled = 0;
+    const missing = [];
+    for (const c of checks) {
+      const val = p[c.key];
+      const ok = c.fn ? c.fn(val) : !!val && String(val).trim().length > 0;
+      if (ok) filled++;
+      else missing.push(c.label);
+    }
+    return { pct: Math.round((filled / checks.length) * 100), missing };
+  }, [data.profiles]);
+
+  const lastUni = useMemo(() => {
+    const lastId = getLastUniversityId();
+    if (!lastId) return null;
+    return data.universities.find((u) => u.id === lastId) || null;
+  }, [data.universities]);
+
+  const essaysByPlatform = useMemo(() => {
+    const map = {};
+    for (const u of data.universities) {
+      const plat = getUniversityPlatform(u);
+      if (!map[plat]) map[plat] = { platform: plat, count: 0, universities: [] };
+      map[plat].count++;
+      map[plat].universities.push(u.name);
+    }
+    return Object.values(map);
+  }, [data.universities]);
+
   // The next best action, derived from what is actually missing.
   const nextActions = useMemo(() => {
     const actions = [];
@@ -49,6 +92,14 @@ export default function Dashboard() {
         icon: GraduationCap,
         title: 'Fill in your profile',
         detail: 'Nothing else works properly until this does. Essays, reviews and research all start here.',
+        tone: 'urgent',
+      });
+    } else if (profileCompleteness.pct < 70) {
+      actions.push({
+        to: '/profile',
+        icon: User,
+        title: `Complete your profile (${profileCompleteness.pct}%)`,
+        detail: `Missing: ${profileCompleteness.missing.join(', ')}. The AI needs these to personalize drafts.`,
         tone: 'urgent',
       });
     }
@@ -86,13 +137,13 @@ export default function Dashboard() {
         to: '/materials',
         icon: ScanText,
         title: `Analyze ${unanalyzed} material${unanalyzed > 1 ? 's' : ''} word by word`,
-        detail: 'Find the stock phrases, the vague sentences and the over-length ones before an admissions officer does.',
+        detail: 'Find the stock phrases, the vague sentences and the over-length ones before an admissions officer does. Analyzed materials power every draft.',
         tone: 'normal',
       });
     }
 
-    return actions.slice(0, 4);
-  }, [data]);
+    return actions.slice(0, 5);
+  }, [data, profileCompleteness]);
 
   if (loading) {
     return (
@@ -123,9 +174,33 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="font-display text-3xl font-semibold tracking-tight">Welcome back</h1>
-        <p className="text-foreground/50 mt-1.5">Your college application journey, all in one place.</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="font-display text-3xl font-semibold tracking-tight">Welcome back</h1>
+          <p className="text-foreground/50 mt-1.5 max-w-2xl">
+            Your college application command center — US Common App, UC, and UK UCAS in one place.
+            Profile → Research → Essays → Review. Each step feeds the next.
+          </p>
+          {lastUni && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-foreground/40">
+              <Clock className="w-3 h-3" />
+              Last session: <Link to={`/essay-builder?university=${lastUni.id}`} className="text-accent hover:underline">{lastUni.name}</Link>
+              <span className="text-foreground/25">· Essay Builder remembers where you left off</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="bg-card border border-border rounded-xl px-4 py-2.5 text-xs">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="w-3.5 h-3.5 text-foreground/40" />
+              <span className="text-foreground/50">Profile</span>
+              <span className={`font-medium ${profileCompleteness.pct < 50 ? 'text-red-600' : profileCompleteness.pct < 80 ? 'text-amber-600' : 'text-green-600'}`}>{profileCompleteness.pct}%</span>
+            </div>
+            <div className="h-1 bg-muted rounded-full mt-1.5 w-24 overflow-hidden">
+              <div className="h-full bg-accent rounded-full" style={{ width: `${profileCompleteness.pct}%` }} />
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -143,6 +218,28 @@ export default function Dashboard() {
           </Link>
         ))}
       </div>
+
+      {/* Application systems overview */}
+      {essaysByPlatform.length > 0 && (
+        <div className="bg-card border border-border rounded-xl p-5">
+          <h2 className="font-medium text-sm mb-3 flex items-center gap-2">
+            <Globe className="w-4 h-4 text-foreground/40" />
+            Your application systems
+          </h2>
+          <div className="grid sm:grid-cols-3 gap-3">
+            {essaysByPlatform.map((item) => (
+              <div key={item.platform} className="p-3 rounded-lg bg-muted/30 border border-border/50">
+                <div className="flex items-center gap-2 mb-1">
+                  <Badge variant="outline" className="text-[10px]">{PLATFORMS[item.platform]?.short}</Badge>
+                  <span className="text-xs text-foreground/50">{item.count} {item.count > 1 ? 'universities' : 'university'}</span>
+                </div>
+                <p className="text-xs text-foreground/60 leading-relaxed line-clamp-2">{PLATFORM_REQUIREMENTS[item.platform]?.summary}</p>
+                <p className="text-[11px] text-foreground/35 mt-1 truncate">{item.universities.join(', ')}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {nextActions.length > 0 && (
         <div className="bg-card border border-border rounded-xl p-6">

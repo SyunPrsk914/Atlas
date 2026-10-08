@@ -350,7 +350,7 @@ export default function Materials() {
     const text = mat.content || '';
     if (!text.trim()) {
       toast.error('Nothing to analyze', {
-        description: 'Paste the text into the Content field first — Atlas reads the words you give it.',
+        description: 'Paste the actual document text into the Content field — Atlas analyzes that, not the Context/Notes. If you only have a link, paste the page text.',
       });
       return;
     }
@@ -358,7 +358,14 @@ export default function Materials() {
     try {
       const { ok, result } = await runAI(
         {
-          prompt: buildEssayAnalysisPrompt({ title: mat.title, text, kind: mat.type }),
+          prompt: buildEssayAnalysisPrompt({
+            title: mat.title,
+            text,
+            kind: mat.type,
+            contextNotes: mat.notes || '',
+            linkUrl: mat.link_url || '',
+            fileUrl: mat.file_url || '',
+          }),
           response_json_schema: ESSAY_ANALYSIS_SCHEMA,
         },
         { fallbackTitle: `Analysis failed for "${mat.title}"` },
@@ -412,16 +419,18 @@ export default function Materials() {
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
+        <div className="max-w-2xl">
           <h1 className="font-display text-3xl font-semibold tracking-tight">Materials</h1>
-          <p className="text-foreground/50 mt-1.5">
-            Your own documents, links, and past essays are evidence about you. A successful essay is someone
-            else’s writing — Atlas studies the craft and must not treat that life as yours.
+          <p className="text-foreground/50 mt-1.5 leading-relaxed">
+            Your own documents, links, and past essays are evidence about you — Atlas uses them to personalize every draft and review.
+            A successful essay from someone else is kept separately: Atlas studies its craft (voice, structure, reflection) but never treats that life as yours.
+            <span className="block mt-1 text-xs text-foreground/40">Tip: Paste the full document text into Content. Use Context/Notes only to tell the AI what this file is (e.g., “My robotics club reflection, junior year” or “UK sample — Oxford PPE 2024”). The AI analyzes Content only.</span>
           </p>
           {materials.length > 0 && (
-            <p className="text-xs text-foreground/40 mt-1">
-              {analyzedCount} of {materials.length} analyzed
-              {analyzedCount < materials.length && ' — analyze the rest for a complete picture.'}
+            <p className="text-xs text-foreground/40 mt-2 flex items-center gap-2">
+              <span>{analyzedCount} of {materials.length} analyzed</span>
+              {analyzedCount < materials.length && <span className="text-amber-600">— analyze the rest for a complete picture.</span>}
+              <span className="text-foreground/30">· Materials are preserved across sessions and used in every essay draft and holistic review.</span>
             </p>
           )}
         </div>
@@ -495,20 +504,30 @@ export default function Materials() {
                               </Badge>
                             )}
                           </div>
-                          {mat.content && <p className={`text-xs text-foreground/40 mt-0.5 ${expanded ? '' : 'line-clamp-2'}`}>{mat.content}</p>}
+                          {mat.content && (
+                            <div className="mt-1">
+                              <span className="text-[10px] uppercase tracking-wide text-foreground/35">Content — analyzed word by word</span>
+                              <p className={`text-xs text-foreground/60 mt-0.5 ${expanded ? '' : 'line-clamp-2'}`}>{mat.content}</p>
+                            </div>
+                          )}
                           {mat.link_url && (
-                            <a href={mat.link_url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent hover:underline mt-0.5 inline-flex items-center gap-1">
+                            <a href={mat.link_url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent hover:underline mt-1 inline-flex items-center gap-1">
                               <LinkIcon className="w-3 h-3" />
                               {mat.link_url}
                             </a>
                           )}
                           {mat.file_url && (
-                            <a href={mat.file_url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent hover:underline mt-0.5 inline-flex items-center gap-1">
+                            <a href={mat.file_url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent hover:underline mt-1 inline-flex items-center gap-1">
                               <File className="w-3 h-3" />
                               View file
                             </a>
                           )}
-                          {mat.notes && <p className="text-xs text-foreground/30 mt-1">{mat.notes}</p>}
+                          {mat.notes && (
+                            <div className="mt-1.5">
+                              <span className="text-[10px] uppercase tracking-wide text-foreground/35">Context / Notes — not analyzed, only a hint</span>
+                              <p className="text-xs text-foreground/40 mt-0.5 italic">{mat.notes}</p>
+                            </div>
+                          )}
                           {!expanded && expandable && <SignalLine signals={signals} />}
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
@@ -614,23 +633,26 @@ export default function Materials() {
             </div>
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <Label className="block text-xs font-medium text-foreground/50">Content / Text</Label>
+                <Label className="block text-xs font-medium text-foreground/50">Content / Text — THIS is what AI analyzes</Label>
                 <span className="text-[11px] text-foreground/30">{(form.content || '').trim().split(/\s+/).filter(Boolean).length} words</span>
               </div>
               <Textarea
                 value={form.content}
                 onChange={(e) => setForm({ ...form, content: e.target.value })}
-                placeholder="Paste the full text here. This is what the AI reads word by word — a link alone cannot be analyzed."
-                rows={8}
+                placeholder="Paste the FULL document text here. This is what the AI reads word by word. A link alone cannot be analyzed — paste the page text. For a resume, paste the whole resume. For an essay, paste the full essay."
+                rows={10}
               />
+              <p className="text-[11px] text-foreground/35 mt-1">This field is the document itself. It will be analyzed, quoted, and used to personalize your essays.</p>
             </div>
             <div>
-              <Label className="block text-xs font-medium text-foreground/50 mb-1.5">Notes</Label>
-              <Input
+              <Label className="block text-xs font-medium text-foreground/50 mb-1.5">Context / Notes — NOT analyzed, only a hint</Label>
+              <Textarea
                 value={form.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                placeholder="Any notes about this material..."
+                placeholder="e.g. 'My personal reflection on robotics club, junior year — focus on leadership' or 'UK sample — Oxford PPE successful essay 2024, study its opening and academic reflection' or 'Tips from admissions blog about Why Us essays'"
+                rows={3}
               />
+              <p className="text-[11px] text-foreground/35 mt-1">Tell the AI what this file IS, not what it says. This helps it know what kind of info to expect. It is never scored for authenticity.</p>
             </div>
           </div>
           <DialogFooter>

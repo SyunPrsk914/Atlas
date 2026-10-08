@@ -19,6 +19,7 @@ import { formatMaterialsForAI, presentMaterial, isSampleMaterial } from '@/lib/m
 import { runAI } from '@/lib/ai';
 import { APPLICATION_REVIEW_SCHEMA, APPLICATION_REVIEW_DIMENSIONS } from '@/lib/essayPrompts';
 import ReviewResults from '@/components/review/ReviewResults';
+import { getCachedReview, setCachedReview, clearCachedReview } from '@/lib/persist';
 
 function formatEssays(essays) {
   if (!essays || essays.length === 0) return 'NO ESSAYS EXIST FOR THIS UNIVERSITY. Treat this as a material weakness and say so.';
@@ -74,6 +75,7 @@ export default function ApplicationReview() {
   const [loading, setLoading] = useState(true);
   const [reviewing, setReviewing] = useState(false);
   const [reviewResult, setReviewResult] = useState(null);
+  const [cachedAt, setCachedAt] = useState(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -96,6 +98,13 @@ export default function ApplicationReview() {
         findKnowledgeRecord(knw, uni.name),
       );
       setTasks(tks);
+
+      // Restore cached review if any — this keeps the result on screen even after navigating away
+      const cached = getCachedReview(id);
+      if (cached?.result) {
+        setReviewResult(cached.result);
+        setCachedAt(cached.savedAt || null);
+      }
     } catch (e) {
       console.error(e);
       toast.error('Could not load this application', { description: e.message });
@@ -148,14 +157,19 @@ ${ibLines.length ? `\nIB subject workload (${ibLines.length} subjects):\n${ibLin
 --- ESSAYS ---
 ${formatEssays(essays)}
 
---- SUPPORTING MATERIALS ---
-${formatMaterialsForAI(materials)}
+--- SUPPORTING MATERIALS (own = facts about student, use heavily; samples = craft only, never borrow life; distinguish US vs UK) ---
+${formatMaterialsForAI(materials, { platform })}
 
 --- READINESS ---
 - Roadmap tasks completed: ${completedTasks}/${tasks.length}
 - Application status: ${university.status}
 ${university.deadline ? `- Deadline: ${university.deadline}` : '- No deadline set'}
 - Research available: ${knowledge ? 'yes' : 'NO — you are judging without institutional data, and must flag that'}
+
+MATERIALS USAGE RULES:
+- Personal materials (resume, own essays, notes) are evidence — use their concrete details as much as possible when assessing authenticity and specificity.
+- Sample essays (successful essays from others) must be treated as craft examples only. Never treat a sample's biography as this applicant's life. Distinguish US Common App/UC samples from UK UCAS samples — do not apply UK structure to US evaluation or vice versa. If a UK sample is present, do not penalize the US application for not following UK conventions, and vice versa.
+- If materials have been analyzed word-by-word, use those analyses to inform your assessment of voice, specificity, and authenticity.
 
 SCORE EACH OF THESE DIMENSIONS 1-10, WITH A SPECIFIC ASSESSMENT (use exactly these names, in this order):
 ${dimensionList}
@@ -174,8 +188,10 @@ Return JSON only.`;
       );
       if (!ok) return;
       setReviewResult(result);
+      setCachedReview(id, result);
+      setCachedAt(new Date().toISOString());
       toast.success('Review complete', {
-        description: `${result.verdict} · ${Math.round(result.acceptance_probability || 0)}% estimated acceptance.`,
+        description: `${result.verdict} · ${Math.round(result.acceptance_probability || 0)}% estimated acceptance. Saved so it stays when you navigate away.`,
       });
     } finally {
       setReviewing(false);
@@ -438,11 +454,36 @@ Return JSON only.`;
       <div className="flex flex-col items-center gap-3 py-4">
         <Button onClick={runReview} disabled={reviewing} size="lg" className="min-w-64">
           {reviewing ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <ClipboardCheck className="w-5 h-5 mr-2" />}
-          {reviewing ? 'Running holistic review…' : 'Run full application review'}
+          {reviewing ? 'Running holistic review…' : reviewResult ? 'Re-run full application review' : 'Run full application review'}
         </Button>
-        <p className="text-xs text-foreground/30">
-          Compiles your entire application and evaluates it against {university.name}&apos;s holistic rubric
-        </p>
+        <div className="flex flex-col items-center gap-1">
+          <p className="text-xs text-foreground/30">
+            Compiles your entire application and evaluates it against {university.name}&apos;s holistic rubric
+          </p>
+          {cachedAt && reviewResult && (
+            <p className="text-[11px] text-foreground/40">
+              Last reviewed {new Date(cachedAt).toLocaleString()} — result is cached so it stays when you navigate away.
+            </p>
+          )}
+          {reviewResult && !cachedAt && (
+            <p className="text-[11px] text-foreground/40">Result cached in this browser so it survives navigation.</p>
+          )}
+        </div>
+        {reviewResult && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs text-foreground/40"
+            onClick={() => {
+              clearCachedReview(id);
+              setReviewResult(null);
+              setCachedAt(null);
+              toast.success('Cached review cleared');
+            }}
+          >
+            Clear cached review
+          </Button>
+        )}
       </div>
 
       {reviewResult && (
@@ -459,7 +500,7 @@ Return JSON only.`;
               </ul>
             </div>
           )}
-          <ReviewResults result={reviewResult} />
+          <ReviewResults result={reviewResult} cachedAt={cachedAt} />
         </div>
       )}
     </div>
