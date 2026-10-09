@@ -20,6 +20,7 @@ const TABLES = {
   Profile: 'profiles',
   RoadmapTask: 'roadmap_tasks',
   CollegeKnowledge: 'college_knowledge',
+  ApplicantKnowledge: 'applicant_knowledge',
 };
 
 const now = () => new Date().toISOString();

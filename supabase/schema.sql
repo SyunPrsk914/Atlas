@@ -7,6 +7,7 @@
 -- What this replaces: the six Base44 entities (University, Essay, Material,
 -- Profile, RoadmapTask, CollegeKnowledge) with Postgres tables, plus the
 -- Base44 "UploadPublicFile" integration with a public Storage bucket.
+-- applicant_knowledge (the AI Knowledge Base) has no Base44 original; it is new.
 -- Row-level security mirrors the old Base44 RLS: every row is visible and
 -- editable only by the user who created it (created_by_id = auth.uid()).
 -- ============================================================================
@@ -158,13 +159,41 @@ create table if not exists public.college_knowledge (
 );
 
 -- ---------------------------------------------------------------------------
--- RLS + updated_at triggers for all six tables
+-- 7. applicant_knowledge  (entity: ApplicantKnowledge — the AI Knowledge Base)
+--    kind:   brief    = about you (personality, actions, mindset, goals)
+--            evidence = personal points you can draw on in an essay
+--            pattern  = what successful applications share (from sample essays)
+--    origin: ai       = written by Atlas; a rebuild replaces these rows, but only
+--                       for the kinds it rebuilds
+--            manual   = written or edited by you; a rebuild never removes these
+-- ---------------------------------------------------------------------------
+create table if not exists public.applicant_knowledge (
+  id uuid primary key default gen_random_uuid(),
+  created_by_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  kind text not null check (kind in ('brief', 'evidence', 'pattern')),
+  category text not null default 'other',
+  text text not null,
+  origin text not null default 'manual' check (origin in ('ai', 'manual')),
+  source_label text,
+  source_id text,
+  platform text not null default 'General',
+  sort_order integer not null default 0,
+  data jsonb
+);
+
+create index if not exists applicant_knowledge_owner_idx
+  on public.applicant_knowledge (created_by_id, kind, sort_order);
+
+-- ---------------------------------------------------------------------------
+-- RLS + updated_at triggers for all seven tables
 -- (Policies mirror the old Base44 entity RLS: own rows only.)
 -- ---------------------------------------------------------------------------
 do $$
 declare t text;
 begin
-  foreach t in array array['universities','essays','materials','profiles','roadmap_tasks','college_knowledge'] loop
+  foreach t in array array['universities','essays','materials','profiles','roadmap_tasks','college_knowledge','applicant_knowledge'] loop
     execute format('alter table public.%I enable row level security', t);
 
     execute format('drop policy if exists own_select on public.%I', t);
@@ -199,7 +228,8 @@ $$;
 --                                          UCAS is character-counted; without
 --                                          the column Atlas still counts UCAS
 --                                          essays in characters.
---   materials.analysis                -> the saved AI word-level analysis.
+--   materials.analysis                -> the saved AI analysis of the document
+--                                          (read from the uploaded file or link).
 --   profiles.*                        -> the extra applicant context that makes
 --                                          a review accurate for international
 --                                          applicants (citizenship status,

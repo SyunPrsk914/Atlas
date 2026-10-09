@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine,
   Trash2, ChevronDown, ChevronUp, Library, CheckCircle2, CircleDashed,
-  Info, ArrowRight, AlertTriangle,
+  Info, ArrowRight, AlertTriangle, Undo2,
 } from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
 import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
@@ -28,6 +28,8 @@ import {
   isCommonAppPersonalStatement, chosenCommonAppPrompt, isAmbiguousCommonAppPrompt,
 } from '@/lib/essayScope';
 import { formatMaterialsForAI } from '@/lib/materialRole';
+import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
+import { loadApplicantKnowledgeText } from '@/lib/applicantKnowledgeService';
 import { missingSchoolPrompts, promptsForUniversity, toEssayDraft } from '@/lib/supplementPrompts';
 import {
   getLastUniversityId, setLastUniversityId,
@@ -53,6 +55,8 @@ export default function EssayBuilder() {
   const [genAnalysis, setGenAnalysis] = useState(null);
   const [genGaps, setGenGaps] = useState([]);
   const [genCachedAt, setGenCachedAt] = useState(null);
+  // The last AI change to the selected essay, so it can be undone this visit.
+  const [undoStep, setUndoStep] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [metaExpanded, setMetaExpanded] = useState(true);
@@ -316,13 +320,68 @@ export default function EssayBuilder() {
     const knowledgeRows = await base44.entities.CollegeKnowledge.list();
     const knowledge = findKnowledgeRecord(knowledgeRows, selectedUni?.name || '');
     const knowledgeText = knowledge?.knowledge
-      || 'No research cached for this university yet. Research it in the Knowledge Base for a far more specific essay — this draft will rely on general knowledge only.';
-    return { profileText, materialsText, knowledgeText };
+      || 'No university research is cached for this university yet. Research it in University Research for a far more specific essay — this draft will rely on general knowledge only.';
+    const applicantText = await loadApplicantKnowledgeText({ platform });
+    return { profileText, materialsText, knowledgeText, applicantText };
+  };
+
+  // --- guards and undo ----------------------------------------------------
+  /** Demo output is placeholder text: nothing is written, reviewed, or edited with it. */
+  const guardLive = (action) => {
+    if (hasLiveModel()) return true;
+    toast.error(`${action} needs a connected AI model`, {
+      description: 'Demo mode shows placeholder text, so Atlas will not write, review, or edit an essay with it. Nothing was changed. Connect a local model in AI setup (AI status in the sidebar).',
+      duration: 9000,
+    });
+    return false;
+  };
+
+  /** Asks before text the applicant wrote is replaced by an AI result. */
+  const confirmReplace = (essay, action) => {
+    if (!essay?.content?.trim()) return true;
+    return window.confirm(`The current text of “${essay.title}” will be replaced when ${action} finishes. You can undo that until you leave this page. Continue?`);
+  };
+
+  /** Keeps the fields an AI action is about to change, so they can be restored. */
+  const rememberForUndo = (essay, fields, label) => {
+    setUndoStep({ essayId: essay.id, fields, label });
+  };
+
+  const undoLastChange = async () => {
+    if (!undoStep) return;
+    const { essayId, fields, label } = undoStep;
+    try {
+      await base44.entities.Essay.update(essayId, fields);
+      setEssays((prev) => prev.map((e) => (e.id === essayId ? { ...e, ...fields } : e)));
+      if (selectedEssay?.id === essayId) {
+        setSelectedEssay((prev) => (prev ? { ...prev, ...fields } : prev));
+        if ('review_notes' in fields) {
+          let previous = null;
+          try {
+            previous = fields.review_notes ? JSON.parse(fields.review_notes) : null;
+          } catch { /* not a saved review */ }
+          setReviewResult(previous);
+        }
+      }
+      setUndoStep(null);
+      toast.success('Restored', { description: `Undid: ${label}.` });
+    } catch (e) {
+      toast.error('Could not undo this change', { description: e.message });
+    }
+  };
+
+  /** Why the drafting actions are unavailable right now, in one sentence. */
+  const actionHintFor = (essay) => {
+    if (!hasLiveModel()) return 'Demo mode: connect a local model in AI setup to generate, review, or edit.';
+    if (!essay?.content?.trim()) return 'Review and Apply edits read the essay text. Write or generate the essay first.';
+    return '';
   };
 
   // --- actions ------------------------------------------------------------
   const handleGenerate = async () => {
     if (!selectedEssay) return;
+    if (!guardLive('Generate a draft')) return;
+    if (!confirmReplace(selectedEssay, 'the draft is written')) return;
     if (isCommonAppPersonalStatement(selectedEssay) && !chosenCommonAppPrompt(selectedEssay)) {
       toast.error('Choose one Common App prompt first', {
         description: 'The personal statement answers one of the seven prompts. Leaving all of them in the box makes the draft try to answer every prompt.',
@@ -339,16 +398,17 @@ export default function EssayBuilder() {
     setReviewResult(null);
     setGenAnalysis(null);
     try {
-      const { profileText, materialsText, knowledgeText } = await gatherContext();
-      const { ok, result } = await runAI({
+      const { profileText, materialsText, knowledgeText, applicantText } = await gatherContext();
+      const outcome = await runAI({
         prompt: buildGeneratePrompt({
           essay: selectedEssay, university: selectedUni, platform,
-          profileText, knowledgeText, materialsText, allEssays: essays,
+          profileText, knowledgeText, materialsText, applicantText, allEssays: essays,
         }),
         response_json_schema: GENERATE_SCHEMA,
       }, { fallbackTitle: 'Could not generate a draft' });
 
-      if (!ok) return;
+      if (!isLiveOutcome(outcome)) return;
+      const result = outcome.result;
       const text = typeof result === 'string' ? result : result.essay;
       if (!text || !String(text).trim()) {
         toast.error('The AI returned an empty draft', { description: 'Try again, or lower the length you asked for.' });
@@ -362,6 +422,7 @@ export default function EssayBuilder() {
       setGenCachedAt(now);
       // Persist generation analysis so it survives navigation
       setCachedEssayGen(selectedEssay.id, { analysis, gaps });
+      rememberForUndo(selectedEssay, { content: selectedEssay.content || '', status: selectedEssay.status }, 'draft written');
       await persist({ content: String(text).trim(), status: 'drafting' });
       toast.success('Draft written', {
         description: gaps.length
@@ -377,23 +438,26 @@ export default function EssayBuilder() {
 
   const handleReview = async () => {
     if (!selectedEssay?.content) return;
+    if (!guardLive('The admissions review')) return;
     setBusy('review');
     setReviewResult(null);
     try {
-      const { profileText, materialsText, knowledgeText } = await gatherContext();
-      const { ok, result } = await runAI({
+      const { profileText, materialsText, knowledgeText, applicantText } = await gatherContext();
+      const outcome = await runAI({
         prompt: buildReviewPrompt({
           essay: selectedEssay, university: selectedUni, platform,
           knowledgeText, reviewNotes: selectedEssay.review_notes, allEssays: essays,
-          materialsText, profileText,
+          materialsText, profileText, applicantText,
         }),
         response_json_schema: REVIEW_SCHEMA,
       }, { fallbackTitle: 'The review could not be completed' });
 
-      if (!ok) return;
+      if (!isLiveOutcome(outcome)) return;
+      const result = outcome.result;
       setReviewResult(result);
       setReviewCachedAt(new Date().toISOString());
       setCachedEssayReview(selectedEssay.id, result);
+      rememberForUndo(selectedEssay, { status: selectedEssay.status, review_notes: selectedEssay.review_notes || '' }, 'review saved');
       await persist({ status: 'in_review', review_notes: JSON.stringify(result, null, 2) });
       toast.success(`Reviewed: ${result.overall_score}/10`, {
         description: `${(result.weaknesses || []).length} weakness(es) and ${(result.priority_improvements || []).length} priority fix(es) found.`,
@@ -407,23 +471,27 @@ export default function EssayBuilder() {
 
   const handlePolish = async () => {
     if (!selectedEssay?.content) return;
+    if (!guardLive('Apply edits')) return;
+    if (!confirmReplace(selectedEssay, 'the edits are applied')) return;
     setBusy('polish');
     try {
-      const { profileText, materialsText, knowledgeText } = await gatherContext();
-      const { ok, result } = await runAI({
+      const { profileText, materialsText, knowledgeText, applicantText } = await gatherContext();
+      const outcome = await runAI({
         prompt: buildPolishPrompt({
           essay: selectedEssay, university: selectedUni, platform,
           reviewResult, knowledgeText, allEssays: essays,
-          materialsText, profileText,
+          materialsText, profileText, applicantText,
         }),
       }, { fallbackTitle: 'Could not polish this essay' });
 
-      if (!ok) return;
+      if (!isLiveOutcome(outcome)) return;
+      const result = outcome.result;
       const text = typeof result === 'string' ? result : result.essay;
       if (!text || !String(text).trim()) {
         toast.error('The AI returned an empty revision', { description: 'Your draft was left untouched.' });
         return;
       }
+      rememberForUndo(selectedEssay, { content: selectedEssay.content || '', status: selectedEssay.status }, 'edits applied');
       await persist({ content: String(text).trim(), status: 'polishing' });
       toast.success('Revision applied', { description: 'Read the diff carefully — the editor will have cut aggressively.' });
     } catch (e) {
@@ -848,6 +916,19 @@ export default function EssayBuilder() {
                   </Button>
                 </div>
               </div>
+              {(undoStep?.essayId === selectedEssay.id || actionHintFor(selectedEssay)) && (
+                <div className="flex items-center gap-3 flex-wrap text-xs">
+                  {undoStep?.essayId === selectedEssay.id && (
+                    <button onClick={undoLastChange} className="inline-flex items-center gap-1.5 text-accent hover:underline">
+                      <Undo2 className="w-3.5 h-3.5" />
+                      Undo: {undoStep.label}
+                    </button>
+                  )}
+                  {actionHintFor(selectedEssay) && (
+                    <span className="text-foreground/40">{actionHintFor(selectedEssay)}</span>
+                  )}
+                </div>
+              )}
 
               {genAnalysis && (
                 <div className="bg-accent/5 border border-accent/20 rounded-xl p-4">
@@ -1194,7 +1275,7 @@ function PromptLibraryDialog({ open, onOpenChange, platform, universityName, onA
       out.push({
         key: 'direct',
         title: 'School-specific writing',
-        note: 'Nothing is shared on this platform, so every prompt comes from the university itself. Research the school in the Knowledge Base and paste the exact prompts.',
+        note: 'Nothing is shared on this platform, so every prompt comes from the university itself. Research the school in University Research and paste the exact prompts.',
         items: [{
           key: 'direct-why',
           label: 'Typical “Why this school?” shape',

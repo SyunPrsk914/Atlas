@@ -8,10 +8,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogT
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Plus, Trash2, ArrowRight, GraduationCap, Calendar, Globe, Search, Info } from 'lucide-react';
 import { roadmapTemplates } from '@/lib/roadmapTemplate';
-import { daysUntil } from '@/lib/dates';
+import { daysUntil, startOfLocalDay } from '@/lib/dates';
 import {
   PLATFORMS, PLATFORM_VALUES, US_ROUNDS, UK_ROUNDS,
-  getUniversityPlatform, findUKUniversityNote,
+  getUniversityPlatform, findUKUniversityNote, universityNamesMatch,
 } from '@/lib/essayScope';
 
 const statusColors = {
@@ -101,6 +101,15 @@ export default function Universities() {
       });
       return;
     }
+    // "Stanford" and "Stanford University" are one school; a second entry would
+    // split its tasks, essays and research between two rows.
+    const existing = universities.find((u) => universityNamesMatch(u.name, form.name));
+    if (existing) {
+      toast.error(`${existing.name} is already on your list`, {
+        description: 'Open it from the list instead of adding it twice.',
+      });
+      return;
+    }
     setAdding(true);
     try {
       const uni = await base44.entities.University.create({
@@ -133,7 +142,7 @@ export default function Universities() {
       });
       setDialogOpen(false);
       toast.success(`${uni.name} added`, {
-        description: `${template.length} roadmap tasks created. Research it in the Knowledge Base next.`,
+        description: `${template.length} roadmap tasks created. Research it in University Research next.`,
       });
     } catch (e) {
       console.error(e);
@@ -402,7 +411,7 @@ export default function Universities() {
                   {uni.deadline && (
                     <div className="flex items-center gap-1.5 text-xs text-foreground/40 mb-3">
                       <Calendar className="w-3 h-3" />
-                      {new Date(uni.deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      {startOfLocalDay(uni.deadline)?.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                       {daysLeft !== null && daysLeft >= 0 && (
                         <span className={daysLeft < 30 ? 'text-destructive' : 'text-foreground/30'}>· {daysLeft}d left</span>
                       )}

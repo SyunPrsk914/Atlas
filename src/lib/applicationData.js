@@ -533,16 +533,16 @@ export function normalizeUniversityName(name) {
   return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+/** Key that drops the word "university", so the two spellings share one key. */
+export function universityMatchKey(name) {
+  return normalizeUniversityName(name).replace(/\buniversity\b/g, '').replace(/\s+/g, ' ').trim();
+}
+
 /**
  * "Stanford" and "Stanford University" are the same school. Stripping the word
  * university is enough; we do not fuzzy-match shorter fragments, which would
  * collapse York and New York.
  */
-/** Key used to treat "Stanford" and "Stanford University" as one school. */
-export function universityMatchKey(name) {
-  return normalizeUniversityName(name).replace(/\buniversity\b/g, '').replace(/\s+/g, ' ').trim();
-}
-
 export function universityNamesMatch(a, b) {
   const left = normalizeUniversityName(a);
   const right = normalizeUniversityName(b);
@@ -724,7 +724,7 @@ export const PLATFORM_REQUIREMENTS = {
       'One 650-word personal statement shared by every Common App school, plus 3-5 school-specific supplements.',
     steps: [
       'Write the shared personal statement once (250-650 words)',
-      'Research each school individually in the Knowledge Base',
+      'Research each school individually in University Research',
       'Write school-specific supplements — these must NOT overlap the personal statement',
     ],
     reviewFocus:
@@ -763,7 +763,7 @@ export const PLATFORM_REQUIREMENTS = {
   direct: {
     summary: 'This university runs its own portal. Everything is written for it alone.',
     steps: [
-      'Research the school in the Knowledge Base first',
+      'Research the school in University Research first',
       'Work through its own questionnaire — short answers are common',
       'Nothing is shared with any other university',
     ],

@@ -176,6 +176,10 @@ export function emptySubject(slotId) {
   };
 }
 
+export function emptyEeCourse() {
+  return { courseId: '', language: '', customName: '' };
+}
+
 export function emptyIbRecord() {
   return {
     v: 1,
@@ -183,9 +187,15 @@ export function emptyIbRecord() {
     subjects: IB_SLOTS.map((s) => emptySubject(s.id)),
     tok: '',
     ee: '',
+    eeCourse: emptyEeCourse(),
     eeSubject: '',
     unplaced: [],
   };
+}
+
+/** Display name of the Extended Essay subject, from the same catalogue as the six subjects. */
+export function eeSubjectName(record) {
+  return subjectDisplayName(record?.eeCourse || emptyEeCourse());
 }
 
 export function subjectDisplayName(subject) {
@@ -247,23 +257,53 @@ function normalizeSubject(raw, slotId) {
   return {
     slot: slotId,
     courseId: course ? courseId : (courseId === 'custom' ? 'custom' : ''),
-    language: String(raw?.language || '').trim(),
-    customName: String(raw?.customName || '').trim(),
+    // Stored exactly as typed. Trimming here dropped the space on every
+    // keystroke, so "Business Management" could never be entered. Display
+    // names are trimmed where they are shown.
+    language: course?.needsLanguage ? String(raw?.language ?? '') : '',
+    customName: courseId === 'custom' ? String(raw?.customName ?? '') : '',
     level,
     grade,
   };
 }
 
+function normalizeEeCourse(raw) {
+  const courseId = String(raw?.courseId || '');
+  const course = courseById(courseId);
+  const isCustom = courseId === 'custom';
+  return {
+    courseId: course || isCustom ? courseId : '',
+    language: course?.needsLanguage ? String(raw?.language ?? '') : '',
+    customName: isCustom ? String(raw?.customName ?? '') : '',
+  };
+}
+
+/** Older records stored the Extended Essay subject as one free-text string. */
+function legacyEeCourse(text) {
+  const name = String(text || '').trim();
+  if (!name) return emptyEeCourse();
+  const inferred = inferCourse(name);
+  return normalizeEeCourse({
+    courseId: inferred.courseId,
+    language: inferred.language || '',
+    customName: inferred.courseId === 'custom' ? name : (inferred.customName || ''),
+  });
+}
+
 function normalizeRecord(raw) {
-  const base = emptyIbRecord();
   const bySlot = new Map((raw?.subjects || []).map((s) => [String(s.slot), s]));
+  const eeCourse = raw?.eeCourse && typeof raw.eeCourse === 'object'
+    ? normalizeEeCourse(raw.eeCourse)
+    : legacyEeCourse(raw?.eeSubject);
   return {
     v: 1,
     diploma: raw?.diploma !== false,
     subjects: IB_SLOTS.map((slot) => normalizeSubject(bySlot.get(slot.id) || {}, slot.id)),
     tok: CORE_GRADES.includes(raw?.tok) ? raw.tok : '',
     ee: CORE_GRADES.includes(raw?.ee) ? raw.ee : '',
-    eeSubject: String(raw?.eeSubject || '').trim(),
+    eeCourse,
+    // Derived from eeCourse. Kept so older readers of this field still work.
+    eeSubject: eeSubjectName({ eeCourse }),
     unplaced: Array.isArray(raw?.unplaced) ? raw.unplaced.map((s) => String(s)).filter(Boolean) : [],
   };
 }
@@ -317,7 +357,7 @@ function placeLegacy(text) {
   if (tok) record.tok = tok[1].toUpperCase();
   if (ee) {
     record.ee = ee[1].toUpperCase();
-    record.eeSubject = ee[2] ? ee[2].trim() : '';
+    record.eeCourse = legacyEeCourse(ee[2] || '');
   }
   const used = new Set();
   for (const item of legacyParts(text)) {
@@ -413,6 +453,10 @@ export function ibWarnings(record) {
   const names = filled.map(subjectDisplayName);
   const dupes = names.filter((n, i) => names.indexOf(n) !== i);
   if (dupes.length) warnings.push(`The same subject is selected twice: ${[...new Set(dupes)].join(', ')}.`);
+  const eeCourse = courseById(parsed.eeCourse?.courseId);
+  if (eeCourse?.needsLanguage && !parsed.eeCourse.language) {
+    warnings.push(`The Extended Essay subject ${eeCourse.label} needs a language. Pick one, or type it if it is not in the list.`);
+  }
   const essCount = filled.filter((s) => s.courseId === 'ess').length;
   if (essCount > 1) warnings.push('Environmental systems and societies is one subject. It can meet Group 3 or Group 4, not both slots.');
   for (const subject of filled) {

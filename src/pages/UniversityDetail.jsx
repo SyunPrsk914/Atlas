@@ -15,7 +15,7 @@ import {
   buildSharedEssayPlan, isSharedEssay, limitUnitFor, measureEssay,
   findKnowledgeRecord, resolvedEssayLimit, ucasCharacterBudget, isUcasQuestion,
 } from '@/lib/essayScope';
-import { daysUntil } from '@/lib/dates';
+import { daysUntil, startOfLocalDay } from '@/lib/dates';
 import ApplicationTimeline from '@/components/ApplicationTimeline';
 
 const categoryLabels = {
@@ -218,7 +218,7 @@ export default function UniversityDetail() {
               {university.deadline && (
                 <span className="flex items-center gap-1.5">
                   <Calendar className="w-3.5 h-3.5" />
-                  {new Date(university.deadline).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
+                  {startOfLocalDay(university.deadline)?.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
                   {daysLeft !== null && daysLeft >= 0 && (
                     <span className={daysLeft < 30 ? 'text-destructive' : 'text-foreground/30'}>· {daysLeft} days left</span>
                   )}
@@ -265,7 +265,7 @@ export default function UniversityDetail() {
             </p>
             <Link to="/knowledge-base">
               <Button size="sm" variant="outline" className="mt-2.5 border-amber-300">
-                <Library className="w-3.5 h-3.5 mr-1.5" /> Research in Knowledge Base
+                <Library className="w-3.5 h-3.5 mr-1.5" /> Research in University Research
               </Button>
             </Link>
           </div>

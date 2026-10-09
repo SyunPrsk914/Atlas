@@ -1,10 +1,9 @@
-import { Calendar, Clock, CheckCircle2, AlertTriangle, Info } from 'lucide-react';
-import { PLATFORMS } from '@/lib/essayScope';
+import { Calendar, Info } from 'lucide-react';
 
 const US_TIMELINE = [
   { date: 'Aug 1', label: 'Common App & Coalition open', detail: 'Create accounts, start profile. UC application also opens.' },
-  { date: 'Aug - Oct', label: 'Research & draft', detail: 'Research each university in Knowledge Base, draft shared essays (Common App personal statement 650w, UC PIQs 350w x4). Request recommendations.' },
-  { date: 'Oct 15', label: 'Early deadlines (some)', detail: 'Some EA/ED deadlines. UCAS Oxbridge/medicine also closes today.' },
+  { date: 'Aug - Oct', label: 'Research & draft', detail: 'Research each university in University Research, draft shared essays (Common App personal statement 650w, UC PIQs 350w x4). Request recommendations.' },
+  { date: 'Oct 15', label: 'Early deadlines (some)', detail: 'Some EA/ED deadlines. UK applicants: UCAS Oxbridge and medicine also close today.' },
   { date: 'Nov 1', label: 'EA / ED / REA deadline', detail: 'Most Early Action / Early Decision / Restrictive Early Action close. Harvard, Stanford, MIT, etc.' },
   { date: 'Nov 30', label: 'UC deadline', detail: 'UC application closes 11:59pm PST. 4 PIQs, no recommendations, no interview for most.' },
   { date: 'Jan 1-5', label: 'Regular Decision', detail: 'Common App RD closes. Supplements must be done. FAFSA/CSS Profile for aid.' },

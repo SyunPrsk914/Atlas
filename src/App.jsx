@@ -21,6 +21,7 @@ const ApplicationReview = lazy(() => import('@/pages/ApplicationReview'));
 const EssayBuilder = lazy(() => import('@/pages/EssayBuilder'));
 const Materials = lazy(() => import('@/pages/Materials'));
 const KnowledgeBase = lazy(() => import('@/pages/KnowledgeBase'));
+const AiKnowledge = lazy(() => import('@/pages/AiKnowledge'));
 const Login = lazy(() => import('@/pages/Login'));
 const Register = lazy(() => import('@/pages/Register'));
 const ForgotPassword = lazy(() => import('@/pages/ForgotPassword'));
@@ -71,6 +72,7 @@ const AuthenticatedApp = () => {
               <Route path="/universities/:id/review" element={<ApplicationReview />} />
               <Route path="/essay-builder" element={<EssayBuilder />} />
               <Route path="/materials" element={<Materials />} />
+              <Route path="/ai-knowledge" element={<AiKnowledge />} />
               <Route path="/knowledge-base" element={<KnowledgeBase />} />
             </Route>
           </Route>

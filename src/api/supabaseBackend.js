@@ -10,6 +10,7 @@
 //   Profile           -> profiles
 //   RoadmapTask       -> roadmap_tasks
 //   CollegeKnowledge  -> college_knowledge
+//   ApplicantKnowledge -> applicant_knowledge   (AI Knowledge Base; new)
 
 import { createClient } from '@supabase/supabase-js';
 import { makeError } from '@/lib/aiError';
@@ -27,6 +28,7 @@ const TABLES = {
   Profile: 'profiles',
   RoadmapTask: 'roadmap_tasks',
   CollegeKnowledge: 'college_knowledge',
+  ApplicantKnowledge: 'applicant_knowledge',
 };
 
 // Columns per table, with types used for safe coercion (Base44 accepted empty
@@ -87,6 +89,10 @@ const COLUMNS = {
     university_name: 'text', knowledge: 'text', last_updated: 'date',
     source_url: 'text', source_text: 'text', research_provider: 'text',
     research_model: 'text', grounded: 'boolean',
+  },
+  applicant_knowledge: {
+    kind: 'text', category: 'text', text: 'text', origin: 'text', source_label: 'text',
+    source_id: 'text', platform: 'text', sort_order: 'number', data: 'json',
   },
 };
 

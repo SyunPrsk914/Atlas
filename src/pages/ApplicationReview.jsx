@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   ArrowLeft, Loader2, ClipboardCheck, AlertTriangle, Globe,
-  GraduationCap, Briefcase, Award, DollarSign, BookOpen, ScrollText,
+  GraduationCap, Briefcase, Award, FileText, BookOpen, ScrollText,
   Library, CheckCircle2, Circle,
 } from 'lucide-react';
 import {
@@ -17,9 +17,19 @@ import {
 import { buildProfileContext, ibSubjectLines } from '@/lib/profileContext';
 import { formatMaterialsForAI, presentMaterial, isSampleMaterial } from '@/lib/materialRole';
 import { runAI } from '@/lib/ai';
+import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
+import { loadApplicantKnowledgeText } from '@/lib/applicantKnowledgeService';
+import { startOfLocalDay } from '@/lib/dates';
 import { APPLICATION_REVIEW_SCHEMA, APPLICATION_REVIEW_DIMENSIONS } from '@/lib/essayPrompts';
 import ReviewResults from '@/components/review/ReviewResults';
 import { getCachedReview, setCachedReview, clearCachedReview } from '@/lib/persist';
+
+/** Short state of one material, as the review will see it. */
+function materialReadState(m) {
+  if (m.document_state === 'none') return 'context only';
+  if (m.document_state !== 'ready') return 'not read yet';
+  return m.analysis?.status === 'ready' ? 'analyzed' : 'read, not analyzed';
+}
 
 function formatEssays(essays) {
   if (!essays || essays.length === 0) return 'NO ESSAYS EXIST FOR THIS UNIVERSITY. Treat this as a material weakness and say so.';
@@ -70,6 +80,7 @@ export default function ApplicationReview() {
   const [profile, setProfile] = useState(null);
   const [essays, setEssays] = useState([]);
   const [materials, setMaterials] = useState([]);
+  const [applicantRows, setApplicantRows] = useState([]);
   const [knowledge, setKnowledge] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -91,9 +102,13 @@ export default function ApplicationReview() {
         base44.entities.RoadmapTask.filter({ university_id: id }),
       ]);
 
+      // The AI knowledge base is optional: a missing table just means "not built yet".
+      const applicantRows = await base44.entities.ApplicantKnowledge.list().catch(() => []);
       setProfile(profiles[0] || null);
       setEssays(essaysApplicableToUniversity(allEssays, uni));
-      setMaterials(mats.map(presentMaterial));
+      // Raw rows: the review formats them itself, so they are not presented twice.
+      setMaterials(mats);
+      setApplicantRows(applicantRows);
       setKnowledge(
         findKnowledgeRecord(knw, uni.name),
       );
@@ -116,13 +131,21 @@ export default function ApplicationReview() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const runReview = async () => {
+    if (!hasLiveModel()) {
+      toast.error('The full review needs a connected AI model', {
+        description: 'Demo mode shows placeholder text, so nothing was reviewed or saved. Connect a local model in AI setup (AI status in the sidebar).',
+        duration: 9000,
+      });
+      return;
+    }
     setReviewing(true);
     setReviewResult(null);
     try {
       const p = profile || {};
       const platform = getUniversityPlatform(university);
       const knowledgeText = knowledge?.knowledge
-        || 'No research cached for this university. Use your own knowledge, and say explicitly where you are estimating.';
+        || 'No university research is cached for this university. Use your own knowledge, and say explicitly where you are estimating.';
+      const applicantText = await loadApplicantKnowledgeText({ platform });
       const completedTasks = tasks.filter((t) => t.completed).length;
       const profileText = buildProfileContext(p, { includeLeadershipBrief: true }) || 'No profile data saved.';
       const ibLines = ibSubjectLines(p);
@@ -141,9 +164,12 @@ HOW TO JUDGE:
 - Read the applicant's context properly. This student is applying internationally through ${PLATFORMS[platform]?.label}. Where their education system, curriculum, or nationality differs from the US/UK norm, that is context to be read intelligently — not a weakness — but an unexplained difference is still a weakness.
 - Do not inflate anything. If the evidence is not in the file, it is not in the file.
 
-RESEARCH AND IDEAL STUDENT PROFILE (from the Knowledge Base):
+RESEARCH AND IDEAL STUDENT PROFILE (from University Research):
 ${knowledgeText}
-
+${applicantText ? `
+WHAT ATLAS KNOWS ABOUT THIS APPLICANT (AI knowledge base; AI-built and applicant-edited. Judge the file against it. It never adds to the file):
+${applicantText}
+` : ''}
 HOW THIS UNIVERSITY'S WRITING WORKS:
 ${PLATFORM_REQUIREMENTS[platform]?.summary || ''}
 ${PLATFORMS[platform]?.sharedNote || ''}
@@ -182,11 +208,12 @@ RETURN FORMAT — use exactly these field names:
 - "summary": three or four sentences of overall assessment, in the voice of a reader who has just finished the file.
 
 Return JSON only.`;
-      const { ok, result } = await runAI(
+      const outcome = await runAI(
         { prompt, response_json_schema: APPLICATION_REVIEW_SCHEMA },
         { fallbackTitle: 'The review could not be completed' },
       );
-      if (!ok) return;
+      if (!isLiveOutcome(outcome)) return;
+      const result = outcome.result;
       setReviewResult(result);
       setCachedReview(id, result);
       setCachedAt(new Date().toISOString());
@@ -218,6 +245,11 @@ Return JSON only.`;
   const p = profile || {};
   const platform = getUniversityPlatform(university);
   const completedTasks = tasks.filter((t) => t.completed).length;
+  const shownMaterials = materials.map(presentMaterial);
+  const unreadMaterials = shownMaterials.filter((m) => m.document_state !== 'none'
+    && (m.document_state !== 'ready' || m.analysis?.status !== 'ready')).length;
+  const applicantKnown = applicantRows.some((r) => String(r.text || '').trim());
+  const modelReady = hasLiveModel();
   const sharedCount = essays.filter(isSharedEssay).length;
   const unwritten = essays.filter((e) => !e.content || !e.content.trim()).length;
   const sharedMissing = !essays.some(isSharedEssay) && PLATFORMS[platform]?.sharedEssays;
@@ -251,7 +283,7 @@ Return JSON only.`;
       </div>
 
       {/* Blocking gaps the user can fix right now */}
-      {(sharedMissing || unwritten > 0 || !knowledge || !profile) && (
+      {(sharedMissing || unwritten > 0 || !knowledge || !profile || unreadMaterials > 0 || !applicantKnown || !modelReady) && (
         <div className="bg-card border border-border rounded-xl p-5 space-y-2.5">
           <h3 className="text-sm font-medium">Before you trust this review</h3>
           <ul className="space-y-1.5">
@@ -276,7 +308,25 @@ Return JSON only.`;
             {!knowledge && (
               <li className="text-sm text-foreground/60 flex gap-2">
                 <Circle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-                No research for this university — the review is running without institutional data. <Link to="/knowledge-base" className="text-accent hover:underline">Research it</Link>
+                No university research for this school — the review is running without institutional data. <Link to="/knowledge-base" className="text-accent hover:underline">Research it</Link>
+              </li>
+            )}
+            {unreadMaterials > 0 && (
+              <li className="text-sm text-foreground/60 flex gap-2">
+                <Circle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                {unreadMaterials} {unreadMaterials === 1 ? 'material is' : 'materials are'} not read or analyzed yet. The review only sees what Atlas has read. <Link to="/materials" className="text-accent hover:underline">Check materials</Link>
+              </li>
+            )}
+            {!applicantKnown && (
+              <li className="text-sm text-foreground/60 flex gap-2">
+                <Circle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                Atlas has not built its knowledge of you yet, so the review cannot use it. <Link to="/ai-knowledge" className="text-accent hover:underline">Build the AI knowledge base</Link>
+              </li>
+            )}
+            {!modelReady && (
+              <li className="text-sm text-foreground/60 flex gap-2">
+                <Circle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+                No AI model is connected (demo mode). Connect a local model in AI setup, from the AI status in the sidebar, to run the review.
               </li>
             )}
           </ul>
@@ -317,7 +367,9 @@ Return JSON only.`;
             {ibSubjectLines(p).length > 0 && (
               <div className="text-xs text-foreground/50 mt-3 pt-3 border-t border-border">
                 {ibSubjectLines(p).length} IB subjects
-                <span className="block text-[11px] text-foreground/35 mt-0.5">{p.ib_subjects}</span>
+                <span className="block text-[11px] text-foreground/35 mt-0.5">
+                  {ibSubjectLines(p).map((line, i) => <span key={i} className="block">{line}</span>)}
+                </span>
               </div>
             )}
           </div>
@@ -418,18 +470,23 @@ Return JSON only.`;
 
         <div className="grid md:grid-cols-2 gap-4">
           <div className="bg-card border border-border rounded-xl p-5">
-            <h3 className="flex items-center gap-2 text-sm font-medium mb-2"><DollarSign className="w-4 h-4 text-foreground/40" /> Materials ({materials.length})</h3>
-            {materials.length > 0 ? (
-              <p className="text-sm text-foreground/50">
-                {materials.map((m) => (isSampleMaterial(m) ? `${m.title} (sample, not your writing)` : m.title)).join(', ')}
-              </p>
-            ) : <p className="text-sm text-foreground/30">No materials uploaded.</p>}
+            <h3 className="flex items-center gap-2 text-sm font-medium mb-2"><FileText className="w-4 h-4 text-foreground/40" /> Materials ({shownMaterials.length})</h3>
+            {shownMaterials.length > 0 ? (
+              <ul className="space-y-1">
+                {shownMaterials.map((m) => (
+                  <li key={m.id} className="text-sm text-foreground/60 flex items-center justify-between gap-2">
+                    <span className="truncate">{m.title}{isSampleMaterial(m) ? ' (sample, not your writing)' : ''}</span>
+                    <span className="text-[11px] text-foreground/40 shrink-0">{materialReadState(m)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-sm text-foreground/30">No materials added yet. <Link to="/materials" className="text-accent hover:underline">Add your own writing or a sample</Link>.</p>}
           </div>
           <div className="bg-card border border-border rounded-xl p-5">
-            <h3 className="flex items-center gap-2 text-sm font-medium mb-2"><BookOpen className="w-4 h-4 text-foreground/40" /> Research</h3>
+            <h3 className="flex items-center gap-2 text-sm font-medium mb-2"><BookOpen className="w-4 h-4 text-foreground/40" /> University research</h3>
             {knowledge ? (
               <p className="text-sm text-foreground/50">
-                Updated {knowledge.last_updated ? new Date(knowledge.last_updated).toLocaleDateString() : 'unknown'}
+                Updated {startOfLocalDay(knowledge.last_updated)?.toLocaleDateString() || 'unknown'}
               </p>
             ) : (
               <p className="text-sm text-foreground/30">No research cached. The review will be less accurate without it.</p>
@@ -452,10 +509,13 @@ Return JSON only.`;
       </div>
 
       <div className="flex flex-col items-center gap-3 py-4">
-        <Button onClick={runReview} disabled={reviewing} size="lg" className="min-w-64">
+        <Button onClick={runReview} disabled={reviewing || !modelReady} size="lg" className="min-w-64">
           {reviewing ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <ClipboardCheck className="w-5 h-5 mr-2" />}
           {reviewing ? 'Running holistic review…' : reviewResult ? 'Re-run full application review' : 'Run full application review'}
         </Button>
+        {!modelReady && (
+          <p className="text-[11px] text-foreground/40">Demo mode: connect a local model in AI setup to run this review. Nothing is reviewed with placeholder text.</p>
+        )}
         <div className="flex flex-col items-center gap-1">
           <p className="text-xs text-foreground/30">
             Compiles your entire application and evaluates it against {university.name}&apos;s holistic rubric

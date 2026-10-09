@@ -566,7 +566,7 @@ export default function Profile() {
         />
       </SectionCard>
 
-      <SectionCard icon={Landmark} title="University research so far" description="What the Knowledge Base has already established">
+      <SectionCard icon={Landmark} title="University research so far" description="What University Research has already established">
         <div className="flex flex-wrap gap-2">
           {formData.background_summary && <Badge variant="outline">Background written</Badge>}
           {!!formData.ib_predicted_score && <Badge variant="outline">IB {formData.ib_predicted_score}/45</Badge>}

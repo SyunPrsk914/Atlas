@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { runAI, refreshAIStatus } from '@/lib/ai';
 import { getAIMode } from '@/api/ollamaClient';
+import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
 import { fetchPublicAdmissionsPage, normalizePublicPageUrl } from '@/lib/researchSource';
 import { buildProfileContext } from '@/lib/profileContext';
 import { getUniversityPlatform, PLATFORMS, universityNamesMatch, universityMatchKey } from '@/lib/essayScope';
@@ -213,7 +214,7 @@ export default function KnowledgeBase() {
         }
       } catch (e) {
         console.error(e);
-        toast.error('Could not load the Knowledge Base', {
+        toast.error('Could not load university research', {
           description: e.message || 'Unexpected error while reading your saved research.',
         });
       } finally {
@@ -291,6 +292,13 @@ export default function KnowledgeBase() {
     if (!uniName) return;
 
     const mode = getAIMode();
+    if (!hasLiveModel()) {
+      toast.error('University research needs a connected AI model', {
+        description: 'Demo mode produces placeholder text, which Atlas does not save as research. Nothing was changed. Connect a local model in AI setup (AI status in the sidebar), then research again.',
+        duration: 9000,
+      });
+      return;
+    }
     let normalizedSourceUrl = '';
     if (mode !== 'demo' && !sourceText.trim()) {
       toast.error('Add the official admissions page text first', {
@@ -329,7 +337,7 @@ export default function KnowledgeBase() {
         ? researchPrompt
         : addOfficialSource(researchPrompt, normalizedSourceUrl, sourceText.trim());
 
-      const { ok, result, meta } = await runAI(
+      const outcome = await runAI(
         {
           prompt,
           // Local Ollama ignores this and uses the source text above. Only a
@@ -338,7 +346,8 @@ export default function KnowledgeBase() {
         },
         { fallbackTitle: `Research failed for ${uniName}` },
       );
-      if (!ok) return;
+      if (!isLiveOutcome(outcome)) return;
+      const { result, meta } = outcome;
 
       const knowledgeText = typeof result === 'string' ? result.trim() : JSON.stringify(result, null, 2);
       if (!knowledgeText) {
@@ -373,7 +382,7 @@ export default function KnowledgeBase() {
       setCustomName('');
       if (normalizedSourceUrl) setSourceUrl(normalizedSourceUrl);
       toast.success(`Research saved for ${uniName}`, {
-        description: existing ? 'Existing report refreshed.' : 'Added to your Knowledge Base.',
+        description: existing ? 'Existing report refreshed.' : 'Added to university research.',
       });
       if (saved?.knowledge === undefined) {
         toast.warning('The report was generated but could not be saved', {
@@ -424,9 +433,12 @@ export default function KnowledgeBase() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl font-semibold tracking-tight">Knowledge Base</h1>
+          <h1 className="font-display text-3xl font-semibold tracking-tight">University Research</h1>
           <p className="text-foreground/50 mt-1.5">
             Admissions research grounded in the official public page you provide — deadlines, requirements, ideal student, and essay roles. Every report feeds the Essay Builder and application review.
+          </p>
+          <p className="text-xs text-foreground/40 mt-1">
+            This is research about universities. What Atlas knows about you lives in the <Link to="/ai-knowledge" className="text-accent hover:underline">AI Knowledge Base</Link>.
           </p>
         </div>
         {aiStatus && (

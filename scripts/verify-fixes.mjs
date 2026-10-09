@@ -109,6 +109,15 @@ assert.equal(record.ee, 'B');
 const round = parseIbRecord(serializeIbRecord(record));
 assert.equal(round.tok, 'A');
 assert.equal(round.eeSubject, 'Physics');
+// The Extended Essay subject is a catalogue choice, like the six subjects.
+assert.equal(round.eeCourse.courseId, 'physics');
+const typedEe = parseIbRecord(serializeIbRecord({
+  ...record,
+  eeCourse: { courseId: 'custom', language: '', customName: 'Business Management & Arts' },
+}));
+assert.equal(typedEe.eeCourse.customName, 'Business Management & Arts');
+assert.equal(typedEe.eeSubject, 'Business Management & Arts');
+assert.equal(parseIbRecord('Extended Essay predicted C (Business management)').eeCourse.courseId, 'business');
 assert.equal(suggestedDiplomaTotal({
   ...record,
   subjects: record.subjects.map((s, i) => (i < 6 ? { ...s, grade: s.grade || '6' } : s)),
