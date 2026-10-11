@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogT
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Plus, Trash2, ArrowRight, GraduationCap, Calendar, Globe, Search, Info } from 'lucide-react';
 import { roadmapTemplates } from '@/lib/roadmapTemplate';
+import { clearEssayArtifacts } from '@/lib/persist';
 import { daysUntil, startOfLocalDay } from '@/lib/dates';
 import {
   PLATFORMS, PLATFORM_VALUES, US_ROUNDS, UK_ROUNDS,
@@ -153,11 +154,21 @@ export default function Universities() {
   };
 
   const handleRemove = async (uni) => {
-    if (!window.confirm(`Remove ${uni.name}? This also deletes its roadmap tasks and school-specific essays. Saved research and shared essays are kept.`)) return;
+    // Exactly the rows `Essay.deleteMany({ university_id })` is about to remove.
+    const doomed = essays.filter((e) => e.university_id === uni.id);
+    const written = doomed.filter((e) => (e.content || '').trim()).length;
+    if (!window.confirm(
+      `Remove ${uni.name}?\n\nThis also deletes its roadmap tasks and ${doomed.length} school-specific essay${doomed.length === 1 ? '' : 's'}`
+      + (written ? ` — ${written} of them ${written === 1 ? 'has' : 'have'} writing in them, and that text goes with them.` : '.')
+      + '\n\nSaved research and essays shared across the whole platform are kept.',
+    )) return;
     try {
       await base44.entities.RoadmapTask.deleteMany({ university_id: uni.id });
       await base44.entities.Essay.deleteMany({ university_id: uni.id });
       await base44.entities.University.delete(uni.id);
+      // Cached reviews, snapshots, and history for the deleted essays would
+      // otherwise outlive them in this browser.
+      clearEssayArtifacts(doomed.map((e) => e.id));
       await loadData();
       toast.success(`${uni.name} removed`);
     } catch (e) {

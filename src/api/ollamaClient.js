@@ -14,6 +14,82 @@ export const DEFAULT_OLLAMA_MODEL = 'llama3.2:latest';
  */
 export const OLLAMA_NUM_CTX = 16384;
 
+/**
+ * Ceiling for the automatic context sizing below. Raising `num_ctx` costs VRAM,
+ * so Atlas only goes as far as a normal local model can handle and then says
+ * that the prompt had to be clipped.
+ */
+export const OLLAMA_MAX_NUM_CTX = 32768;
+
+/**
+ * Output tokens requested for every local call.
+ *
+ * `-1` means "generate until the model stops". This used to be left unset, and
+ * Ollama's documented default for `num_predict` is 128 tokens — roughly 90
+ * words. That single missing option is why a 650-word essay could come back as
+ * a fragment and still be saved as the finished draft. Request options override
+ * anything a Modelfile sets, so this is now explicit on every call.
+ */
+export const OLLAMA_NUM_PREDICT = -1;
+
+/**
+ * Output tokens reserved when sizing `num_ctx` for a call whose caller did not
+ * say how much it expects back. Enough for a long essay plus a JSON analysis.
+ */
+const RESERVED_OUTPUT_TOKENS = 2560;
+
+/** Rough tokenizer: English prose averages about four characters per token. */
+const CHARS_PER_TOKEN = 4;
+
+export function estimateTokens(text) {
+  return Math.ceil(String(text || '').length / CHARS_PER_TOKEN);
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+/**
+ * Generation options for one call.
+ *
+ * `num_ctx` is sized from the actual prompt instead of being a fixed guess: if
+ * the prompt plus the expected answer would not fit in 16k, the window is
+ * raised (up to {@link OLLAMA_MAX_NUM_CTX}) rather than letting Ollama silently
+ * drop the beginning of the prompt — which is how a draft could come back
+ * ignoring the profile and the materials that were sent to it.
+ */
+export function buildOllamaOptions(prompt, params = {}) {
+  const requestedOutput = Number(params.max_output_tokens);
+  const outputTokens = Number.isFinite(requestedOutput) && requestedOutput > 0
+    ? requestedOutput
+    : RESERVED_OUTPUT_TOKENS;
+  const promptTokens = estimateTokens(prompt) + 64;
+  const needed = promptTokens + outputTokens;
+  const numCtx = clampNumber(needed, OLLAMA_NUM_CTX, OLLAMA_MAX_NUM_CTX);
+
+  const options = { num_ctx: numCtx, num_predict: OLLAMA_NUM_PREDICT };
+  const temperature = Number(params.temperature);
+  if (Number.isFinite(temperature)) options.temperature = clampNumber(temperature, 0, 2);
+  const topP = Number(params.top_p);
+  if (Number.isFinite(topP)) options.top_p = clampNumber(topP, 0.05, 1);
+
+  return {
+    options,
+    numCtx,
+    promptTokens,
+    outputTokens,
+    contextRaised: numCtx > OLLAMA_NUM_CTX,
+    // Even at the ceiling the prompt may not fit; the caller must know, because
+    // Ollama drops text without reporting an error.
+    promptMayBeClipped: needed > OLLAMA_MAX_NUM_CTX,
+  };
+}
+
+/** `done_reason === 'length'` means the model was cut off mid-answer. */
+export function isTruncatedFinish(finishReason) {
+  return ['length', 'max_tokens', 'MAX_TOKENS'].includes(String(finishReason || ''));
+}
+
 let ollamaQueue = Promise.resolve();
 
 function isCloudModel(name) {
@@ -188,7 +264,7 @@ function promptWithSchema(prompt, schema, strictRetry = false) {
   return `${prompt}\n\n${lead}\n${JSON.stringify(schema)}`;
 }
 
-async function requestOllama(config, prompt, schema) {
+async function requestOllama(config, prompt, schema, options) {
   const response = await fetch(`${config.baseUrl}/api/chat`, {
     method: 'POST',
     mode: 'cors',
@@ -198,7 +274,7 @@ async function requestOllama(config, prompt, schema) {
       model: config.model,
       messages: [{ role: 'user', content: prompt }],
       stream: false,
-      options: { num_ctx: OLLAMA_NUM_CTX },
+      options,
       ...(schema ? { format: schema } : {}),
     }),
   }).catch((error) => {
@@ -219,8 +295,10 @@ async function requestOllama(config, prompt, schema) {
   const text = payload?.message?.content ?? payload?.response ?? '';
   if (!String(text).trim()) {
     throw makeError(
-      payload?.error || 'Ollama returned an empty response.',
-      { status: 502, code: 'ollama_empty_response', provider: 'ollama' },
+      isTruncatedFinish(payload?.done_reason)
+        ? `Ollama returned nothing it could use: the model hit its output limit before writing an answer (done_reason "${payload.done_reason}").`
+        : payload?.error || 'Ollama returned an empty response.',
+      { status: 502, code: 'ollama_empty_response', provider: 'ollama', finish_reason: payload?.done_reason || '' },
     );
   }
 
@@ -228,65 +306,71 @@ async function requestOllama(config, prompt, schema) {
     text: String(text),
     model: payload.model || config.model,
     finishReason: payload.done_reason || '',
+    truncated: isTruncatedFinish(payload.done_reason),
+    evalCount: Number(payload.eval_count) || 0,
+  };
+}
+
+/** Every local answer carries the same provenance, including whether it was cut short. */
+function ollamaMeta(response, extra = {}) {
+  const warnings = ['Not web-grounded: this Ollama answer used the local model and the text supplied to Atlas; no web search was used.'];
+  if (response.truncated) {
+    warnings.unshift('This answer was cut off by the model before it finished (done_reason "length"), so it may end mid-sentence. Atlas will not treat a truncated answer as a finished draft.');
+  }
+  if (extra.contextRaised) {
+    warnings.push(`The context window was raised to ${extra.numCtx.toLocaleString()} tokens for this call so the whole prompt and answer would fit.`);
+  }
+  if (extra.promptMayBeClipped) {
+    warnings.push(`This prompt is about ${extra.promptTokens.toLocaleString()} tokens — longer than the ${OLLAMA_MAX_NUM_CTX.toLocaleString()}-token window Atlas will request, so Ollama may have dropped part of it. Remove a material or two from the prompt and try again.`);
+  }
+  return {
+    provider: 'ollama',
+    model: response.model,
+    grounded: false,
+    demo: false,
+    finish_reason: response.finishReason,
+    truncated: !!response.truncated,
+    num_ctx: extra.numCtx || null,
+    prompt_tokens: extra.promptTokens || null,
+    warning: warnings.join(' '),
   };
 }
 
 async function runOllamaRequest(params, config) {
   const schema = params.response_json_schema || null;
   const prompt = String(params.prompt || '');
-  const first = await requestOllama(config, promptWithSchema(prompt, schema), schema);
+  const sizing = buildOllamaOptions(promptWithSchema(prompt, schema), params);
+  const first = await requestOllama(config, promptWithSchema(prompt, schema), schema, sizing.options);
 
   if (!schema) {
-    return {
-      result: first.text,
-      meta: {
-        provider: 'ollama',
-        model: first.model,
-        grounded: false,
-        demo: false,
-        finish_reason: first.finishReason,
-        warning: 'Not web-grounded: this Ollama answer used the local model and the text supplied to Atlas; no web search was used.',
-      },
-    };
+    return { result: first.text, meta: ollamaMeta(first, sizing) };
   }
 
   const parsedFirst = parseJSON(first.text);
   if (parsedFirst !== null) {
-    return {
-      result: parsedFirst,
-      meta: {
-        provider: 'ollama',
-        model: first.model,
-        grounded: false,
-        demo: false,
-        finish_reason: first.finishReason,
-        warning: 'Not web-grounded: this Ollama answer used the local model and the text supplied to Atlas; no web search was used.',
-      },
-    };
+    return { result: parsedFirst, meta: ollamaMeta(first, sizing) };
   }
 
   // Keep the retry inside this queued task, so another request cannot jump in
   // between the first attempt and its stricter JSON retry.
-  const retry = await requestOllama(config, promptWithSchema(prompt, schema, true), schema);
+  const retry = await requestOllama(config, promptWithSchema(prompt, schema, true), schema, sizing.options);
   const parsedRetry = parseJSON(retry.text);
   if (parsedRetry === null) {
     throw makeError(
-      `Ollama model "${retry.model}" returned invalid JSON after one stricter retry. The last response could not be parsed.`,
-      { status: 502, code: 'ollama_invalid_json', raw_preview: retry.text.slice(0, 400), provider: 'ollama' },
+      retry.truncated
+        ? `Ollama model "${retry.model}" was cut off before it finished the JSON answer (done_reason "length"), so the response could not be parsed. The prompt is probably too long for the model's output budget — send fewer materials, or ask for a shorter answer.`
+        : `Ollama model "${retry.model}" returned invalid JSON after one stricter retry. The last response could not be parsed.`,
+      {
+        status: 502,
+        code: retry.truncated ? 'ollama_truncated_json' : 'ollama_invalid_json',
+        raw_preview: retry.text.slice(0, 400),
+        provider: 'ollama',
+        finish_reason: retry.finishReason,
+      },
     );
   }
 
-  return {
-    result: parsedRetry,
-    meta: {
-      provider: 'ollama',
-      model: retry.model,
-      grounded: false,
-      demo: false,
-      finish_reason: retry.finishReason,
-      warning: 'Not web-grounded: this Ollama answer used the local model and the text supplied to Atlas; no web search was used.',
-    },
-  };
+  return { result: parsedRetry, meta: ollamaMeta(retry, sizing) };
 }
 
 /** Run local inference in click order; queued requests never fail just because another call is active. */

@@ -13,6 +13,7 @@
  *   pgCode?: string,
  *   provider?: string,
  *   models?: string[],
+ *   finish_reason?: string,
  *   cause?: unknown,
  * }} ErrorDetails
  */

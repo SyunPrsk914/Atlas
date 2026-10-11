@@ -12,7 +12,7 @@ import {
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_LABELS,
   PLATFORM_REQUIREMENTS, isSharedEssay, limitUnitFor, measureEssay,
-  findKnowledgeRecord, isUcasQuestion, ucasCharacterBudget,
+  findKnowledgeRecord, isUcasQuestion, ucasCharacterBudget, formatLimit,
 } from '@/lib/essayScope';
 import { buildProfileContext, ibSubjectLines } from '@/lib/profileContext';
 import { formatMaterialsForAI, presentMaterial, isSampleMaterial } from '@/lib/materialRole';
@@ -21,6 +21,8 @@ import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
 import { loadApplicantKnowledgeText } from '@/lib/applicantKnowledgeService';
 import { startOfLocalDay } from '@/lib/dates';
 import { APPLICATION_REVIEW_SCHEMA, APPLICATION_REVIEW_DIMENSIONS } from '@/lib/essayPrompts';
+import { assessLength } from '@/lib/essayLength';
+import { SCORE_ANCHORS } from '@/lib/essayCraft';
 import ReviewResults from '@/components/review/ReviewResults';
 import { getCachedReview, setCachedReview, clearCachedReview } from '@/lib/persist';
 
@@ -45,12 +47,22 @@ function formatEssays(essays) {
         ? `SHARED across the whole ${PLATFORM_LABELS[e.application_platform] || e.application_platform} — sent identically to every school on that platform`
         : 'Written only for this university';
       const u = limitUnitFor(e);
-      const n = measureEssay(e.content || '', u);
       const lim = Number(e.word_limit) || 0;
       const body = e.content || '[NOT WRITTEN — this is a gap in the application]';
+      // Atlas measures length itself, against the same target band the Essay
+      // Builder enforces, so the file-level review cannot contradict it.
+      const length = assessLength(e.content || '', e, essays);
+      const lengthLine = length.count === 0
+        ? 'Length: nothing written yet'
+        : `Length: ${length.count.toLocaleString()} of ${lim ? lim.toLocaleString() : 'no'} ${u} (target band ${length.targetLow.toLocaleString()}–${length.targetHigh.toLocaleString()})${
+          length.ok ? ' — inside the band'
+            : length.state === 'over' ? ` — ${length.overage.toLocaleString()} ${formatLimit(u)} OVER the limit; a portal will not accept it`
+              : ` — ${length.shortfall.toLocaleString()} ${formatLimit(u)} UNDER the target band; a draft this far under its limit reads as unfinished, whatever the prose is like`
+        }`;
       return `--- ${e.title} ---
 Scope: ${scope}
-Type: ${e.type} | Status: ${(e.status || 'not_started').replace(/_/g, ' ')} | Length: ${n}/${lim} ${u}
+Type: ${e.type} | Status: ${(e.status || 'not_started').replace(/_/g, ' ')}
+${lengthLine}
 Prompt: ${e.prompt || '(none supplied)'}
 ${body}`;
     })
@@ -158,7 +170,8 @@ export default function ApplicationReview() {
 
 HOW TO JUDGE:
 - Most applicants to ${university.name} are qualified and still rejected. "Good" is not the same as admitted.
-- 5/10 means average for this pool. 7/10 is genuinely competitive. 9/10 is exceptional and rare.
+${Object.entries(SCORE_ANCHORS.overall).sort((a, b) => Number(b[0]) - Number(a[0])).map(([score, meaning]) => `- ${score}/10 means: ${meaning}`).join('\n')}
+  Use the whole scale. A 10 is awarded when nothing in the file would cost this applicant anything; do not cap a strong file at 7 out of habit, and do not award a 9 to a file that is merely competent.
 - Judge against the published admitted-student profile, not against a generic idea of a good student.
 - A missing or unwritten essay is a material weakness, not a neutral gap. Score it as one.
 - Read the applicant's context properly. This student is applying internationally through ${PLATFORMS[platform]?.label}. Where their education system, curriculum, or nationality differs from the US/UK norm, that is context to be read intelligently — not a weakness — but an unexplained difference is still a weakness.

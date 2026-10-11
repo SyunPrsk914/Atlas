@@ -36,3 +36,7 @@ dist-ssr
 .env
 .vite
 base44/.app.jsonc
+
+# scratch output of scripts/render-check.mjs (deleted on exit, ignored if it fails mid-run)
+.render-check/
+.tmpcheck/

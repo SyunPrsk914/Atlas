@@ -1,15 +1,57 @@
-// Prompt construction for the three AI actions in the Essay Builder.
-// Kept out of the component so the generate / review / polish instructions can
-// be reviewed (and fixed) in one place.
+// Prompt construction for the AI actions in the Essay Builder.
+// Kept out of the component so the generate / review / edit / repair
+// instructions can be reviewed (and fixed) in one place.
+//
+// Three contracts live here and must not drift apart:
+//   * GENERATE_SCHEMA  — a new draft, its rationale, and the gaps it left.
+//   * REVIEW_SCHEMA    — one essay scored on seven named dimensions.
+//   * POLISH_SCHEMA    — a surgical revision plus an itemised change log, which
+//                        is what makes the highlighted comparison possible.
+// The craft knowledge (how each kind of essay is written, and who reads it) is
+// in ./essayCraft; the length rules are in ./essayLength.
 
 import { buildProfileContext } from './profileContext';
 import {
-  measureEssay, limitUnitFor, formatLimit, isUcasQuestion, ucasQuestionFor,
-  ucasCharacterBudget, isAmbiguousCommonAppPrompt,
+  limitUnitFor, formatLimit, isUcasQuestion, isAmbiguousCommonAppPrompt,
+  isSharedEssay, doesPlatformShareEssays,
 } from './applicationData';
+import {
+  LENGTH_CRAFT_RULES, assessLength, buildLengthContractText, lengthContract,
+} from './essayLength';
+import {
+  AMBITION_RULES, ESSAY_REVIEW_DIMENSIONS, SCORE_ANCHORS, craftBrief, schoolVoiceFor,
+} from './essayCraft';
 
-/** Shared writing = one answer that is identical at every school on a platform. */
-function platformBrief(university, platform) {
+/**
+ * Sampling temperature per action.
+ *
+ * A review is a measurement: run twice over the same text it should give the
+ * same numbers, so it runs cold. Drafting needs some range. Editing must stay
+ * close to the original, so it runs cool but not frozen. Length repair has to
+ * write new prose inside a fixed shape.
+ */
+export const AI_TEMPERATURES = {
+  generate: 0.75,
+  polish: 0.35,
+  repair: 0.6,
+  review: 0.15,
+};
+
+/**
+ * What the platform's sharing rules mean for THIS essay.
+ *
+ * A Common App school-specific supplement sits on a platform whose personal
+ * statement is shared, and telling it "no school-specific content" makes the
+ * model write a "Why us" essay that refuses to mention the school. Only an
+ * essay that is actually sent identically to every school on the platform has
+ * to stay name-free.
+ */
+function platformBrief(essay, university, platform) {
+  const sentToEverySchool = isSharedEssay(essay)
+    || (!essay?.university_id && essay?.type === 'personal_statement' && doesPlatformShareEssays(platform));
+  if (!sentToEverySchool && (essay?.university_id || essay?.scope)) {
+    return `This essay is written only for ${university?.name || 'this university'}, even though that school's other essays may be shared. Specificity is the whole point: name the school where it earns its place, and use researched programmes, people, and traditions rather than generic praise. It must not repeat what the shared personal statement already says.`;
+  }
   if (platform === 'common_app') {
     return `This essay is the SHARED Common Application personal statement. It is sent word-for-word identical to every Common App school on your list. Therefore it must contain NO school-specific content at all: no university names, no "your campus", no programme references, no callbacks to a supplement. If it names a school, it is wrong.`;
   }
@@ -25,7 +67,8 @@ function platformBrief(university, platform) {
   return `This essay is written only for ${university?.name || 'this university'}. Specificity is the whole point — researched programmes, people, and traditions, not generic praise.`;
 }
 
-function essayRoleBrief(essay) {
+/** The one-line job of this essay type. The full craft is in ./essayCraft. */
+export function essayRoleBrief(essay) {
   const type = essay?.type;
   const table = {
     personal_statement: 'Reveal who the applicant is: values, identity, context, and what changed in them. This is not a resume written in prose.',
@@ -40,12 +83,12 @@ function essayRoleBrief(essay) {
 
 const HUMAN_VOICE_RULES = `VOICE RULES — this is the single most important section:
 - Write like a thoughtful 17-18 year old who is genuinely good at thinking, not like an adult writing about a teenager, and certainly not like a language model.
-- BANNED constructions (do not use these, in any form): "In conclusion", "This experience taught me", "Through this journey", "I realized that", "It was then that I understood", "Looking back", "furthermore", "moreover", "in today's world", "it is important to note", "delve", "tapestry", "a testament to", "embark", "underscore", "navigate the complexities".
+- BANNED constructions (do not use these, in any form): "In conclusion", "This experience taught me", "Through this journey", "I realized that", "It was then that I understood", "Looking back", "furthermore", "moreover", "in today's world", "it is important to note", "delve", "tapestry", "a testament to", "embark", "underscore", "navigate the complexities", "a journey of self-discovery", "sparked a passion".
 - No rhetorical questions to the reader. No summarizing your own lesson at the end. No "only time I…" construction.
 - Avoid three-part lists everywhere — real thinking is lumpy. Vary sentence length hard: let some sentences run long and then hit the reader with a short one.
 - Use plain, precise words. "Used" beats "utilized". "Showed" beats "showcased". "Wanted to" beats "aspired to".
 - Concrete over abstract, always: a name, a number, a time, a place, a specific object, a specific thing someone said.
-- Do NOT invent experiences. If the profile does not contain a detail you need, write around it and let the applicant fill it in afterwards.`;
+- Do NOT invent experiences. If the profile does not contain a detail you need, write around it and let the applicant fill it in afterwards. A named gap is honest; an invented detail is a lie that can be caught in an interview.`;
 
 /** The applicant's own knowledge base (About you, personal points, patterns), when there is one. */
 function applicantSection(applicantText) {
@@ -54,7 +97,7 @@ function applicantSection(applicantText) {
   return `APPLICANT KNOWLEDGE BASE (AI-built and applicant-edited. Keep the writing consistent with who this applicant is. Do not add facts beyond it and the materials):\n${text}\n\n`;
 }
 
-function rootBrief(essay) {
+export function rootBrief(essay) {
   const root = String(essay?.draft_anchor || '').trim();
   if (!root) {
     return `APPLICANT'S REQUIRED ROOT / DIRECTION:\nNo root has been entered yet. Do not silently select a random activity just because it appears in the materials. Use only details that clearly serve this prompt, and put any missing personal decision or detail in gaps_for_applicant.`;
@@ -65,23 +108,32 @@ ${root}
 Start from this direction. Do not swap in a different activity, hobby, or achievement merely because it is more convenient in the materials. Use the profile, deep material readings, guidance, and craft patterns to expand, verify, complicate, and structure this root. If a necessary concrete detail is not available, leave a clear gap for the applicant rather than inventing one.`;
 }
 
-function lengthBrief(essay, allEssays) {
-  if (isUcasQuestion(essay)) {
-    const budget = ucasCharacterBudget(allEssays?.length ? allEssays : [essay]);
-    const mine = String(essay.content || '').length;
-    const others = Math.max(0, budget.total - mine);
-    const room = Math.max(0, budget.limit - others);
-    const question = ucasQuestionFor(essay);
-    return `LENGTH: this is UCAS question ${question?.number || ''} of 3 only. Minimum ${question?.minChars || 350} characters in this box. The three answers SHARE ${budget.limit.toLocaleString()} characters including spaces. The other answers currently use ${others.toLocaleString()}, so this answer must stay within ${room.toLocaleString()} characters. Do not write ${budget.limit.toLocaleString()} characters in this box.`;
-  }
-  const unit = limitUnitFor(essay);
-  const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
-  const current = measureEssay(essay.content || '', unit);
-  const remaining = limit - current;
-  const sign = remaining >= 0 ? '' : '-';
-  return `LENGTH: the limit is ${limit.toLocaleString()} ${formatLimit(unit)}. The current draft is ${current.toLocaleString()} ${formatLimit(unit)} — ${sign}${Math.abs(remaining).toLocaleString()} ${formatLimit(unit)} ${remaining >= 0 ? 'remaining' : 'over'}. Respect the limit.`;
+/**
+ * The length facts, measured by Atlas rather than guessed at by the model.
+ * Used in the review prompt so `length_score` is scored against reality, and
+ * in the UI so a model's own word count can never disagree with the editor.
+ */
+export function lengthFacts(essay, allEssays, draftText) {
+  const assessment = assessLength(draftText === undefined ? essay?.content : draftText, essay, allEssays);
+  const words = formatLimit(assessment.unit);
+  return {
+    assessment,
+    text: `MEASURED LENGTH (counted by Atlas, not estimated): ${assessment.message}\nTarget band for a finished draft: ${assessment.targetLow.toLocaleString()}–${assessment.targetHigh.toLocaleString()} ${words}. Ceiling: ${assessment.limit.toLocaleString()} ${words}.`,
+  };
 }
 
+/** Kept for the UCAS box, where the shared budget is the story. */
+export function lengthBrief(essay, allEssays) {
+  const contract = lengthContract(essay, allEssays);
+  if (isUcasQuestion(essay) && contract.shared) {
+    return `LENGTH: this is UCAS question ${contract.questionNumber || ''} of 3 only. Minimum ${contract.platformMin} characters in this box. The three answers SHARE ${contract.shared.limit.toLocaleString()} characters including spaces. The other answers currently use ${contract.shared.usedByOthers.toLocaleString()}, so this answer must stay within ${contract.shared.room.toLocaleString()} characters. Do not write ${contract.shared.limit.toLocaleString()} characters in this box.`;
+  }
+  const unit = contract.unit;
+  return `LENGTH: the limit is ${contract.limit.toLocaleString()} ${formatLimit(unit)}. The current draft is ${contract.count.toLocaleString()} ${formatLimit(unit)}. Aim for ${contract.targetLow.toLocaleString()}–${contract.targetHigh.toLocaleString()} ${formatLimit(unit)}. Respect the ceiling.`;
+}
+
+// ---------------------------------------------------------------------------
+// Generate
 // ---------------------------------------------------------------------------
 export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, applicantText = '', allEssays }) {
   const unit = limitUnitFor(essay);
@@ -90,13 +142,15 @@ export function buildGeneratePrompt({ essay, university, platform, profileText, 
     ? 'The prompt field currently contains more than one official prompt. Do not write a draft. Say in essay_analysis that the applicant must choose exactly one prompt first, and leave essay empty.'
     : '';
 
-  return `You are an elite college admissions essay consultant who has read thousands of admitted students' essays. You understand holistic admissions and, above all, THE SPECIFIC ROLE each essay plays.
+  return `You are an elite college admissions essay consultant who has read thousands of admitted students' essays. You understand holistic admissions and, above all, THE SPECIFIC ROLE each essay plays. You are writing the version of this essay the applicant will submit.
 ${promptWarning}
 
 THE ROLE OF THIS PARTICULAR ESSAY:
 ${essayRoleBrief(essay)}
 
-${platformBrief(university, platform)}
+${platformBrief(essay, university, platform)}
+
+${craftBrief({ essay, university, platform, limit, unit })}
 
 STUDENT PROFILE (use every relevant detail; do not ignore any of it. This is the foundation — every essay must sound like THIS person):
 ${profileText || 'No profile has been saved yet. Write something structurally excellent and leave clear gaps for the applicant to fill with their own details — never invent a life for them.'}
@@ -120,20 +174,27 @@ THE ESSAY TO WRITE:
 - Programme / major: ${university?.major || 'Not specified'}
 - Essay type: ${essay?.type}
 - Prompt: ${essay?.prompt || 'No prompt supplied — write a personal statement that reveals who the applicant is.'}
-- ${isUcasQuestion(essay) ? lengthBrief(essay, allEssays) : `Limit: ${limit.toLocaleString()} ${formatLimit(unit)}${unit === 'characters' ? ' (counted in characters INCLUDING spaces)' : ''}`}
 
 ${rootBrief(essay)}
 
+${buildLengthContractText(essay, allEssays)}
+
+${LENGTH_CRAFT_RULES}
+
 ${HUMAN_VOICE_RULES}
+
+${AMBITION_RULES}
 
 HOW TO WORK:
 1. Decide what this prompt is really asking before writing a word, and make a specific choice about how the required root serves it.
 2. Treat the required root as the starting point, not an optional suggestion. Find two or three concrete details in the profile and materials that deepen that root; do not replace it with a different activity. If a needed detail is missing, leave a clearly named gap.
 3. Apply guidance and craft patterns as methods, not as content. Never turn a tips document or sample biography into the applicant's life.
-4. Write the draft. Then read it back as an admissions officer and cut anything that is doing decorative rather than evidential work.
-5. Do not open with a general statement about yourself. Do not close with a moral.
+4. Plan the shape before the sentences: the opening image, the turn, and the closing image. For a personal statement that is ONE story moving forward in time — no side quests, no second hobby, no montage.
+5. Write the full draft at the top of the length band. Then read it back as an admissions officer and replace anything decorative with something evidential — do not simply cut it shorter.
+6. Count the ${formatLimit(unit)} in your own answer. If you are below the target band, you are not finished: go back into the scenes and deepen them until you are.
+7. Do not open with a general statement about yourself. Do not close with a moral.
 
-Return the essay text only in "essay", and a short explanation in "essay_analysis" of the role this essay plays in the holistic application and how this draft serves that role.`;
+Return the COMPLETE essay text in "essay" — every paragraph, from the first word to the last — and an explanation in "essay_analysis" of the role this essay plays in the holistic application, how this draft serves that role, and how it reaches the length band without padding. List in "gaps_for_applicant" every place you needed a fact you did not have.`;
 }
 
 export const GENERATE_SCHEMA = {
@@ -146,15 +207,82 @@ export const GENERATE_SCHEMA = {
   },
 };
 
-export function buildReviewPrompt({ essay, university, platform, knowledgeText, reviewNotes, allEssays, materialsText = '', profileText = '', applicantText = '' }) {
-  return `You are a senior admissions officer at ${university?.name || 'this university'} reading a stack of real files. Be strict. Most applicants here are qualified and still rejected.
+// ---------------------------------------------------------------------------
+// Review — one essay, seven dimensions, on a fixed scale
+// ---------------------------------------------------------------------------
 
-${lengthBrief(essay, allEssays)}
+/** The dimension list as the model is asked for it, in panel order. */
+function dimensionInstructions() {
+  return ESSAY_REVIEW_DIMENSIONS
+    .map((d, i) => `${i + 1}. ${d.key} — ${d.question}`)
+    .join('\n');
+}
+
+function scaleInstructions() {
+  const overall = Object.entries(SCORE_ANCHORS.overall).map(([score, text]) => `   ${score}/10: ${text}`).join('\n');
+  const dimension = Object.entries(SCORE_ANCHORS.dimension).map(([score, text]) => `   ${score}/10: ${text}`).join('\n');
+  return `THE SCALE — use it identically every time, because the applicant compares reviews of the same essay:
+overall_score anchors:
+${overall}
+Each dimension anchors:
+${dimension}
+
+SCORING DISCIPLINE:
+- Score every dimension separately against its own question. Beautiful prose does not raise prompt_alignment, and a strong story does not raise length.
+- Be strict about evidence, not strict about style. A 5 means "average for this pile"; it is not the ceiling you must retreat to.
+- Do not cap your scores out of habit. If a dimension genuinely performs at a 9 or 10 level, award it — under-scoring a strong draft misleads the applicant exactly as much as inflating a weak one.
+- A 10 must be defensible in one sentence of quoted evidence. If you cannot quote the evidence, it is a 9 at most.
+- Every score you give must come with the concrete thing that would raise it. If nothing would raise it, say "nothing material" and award 10.`;
+}
+
+/**
+ * @param {object} args
+ * @param {object} args.essay the essay row being reviewed
+ * @param {object} [args.university] the university row, for the reader's voice
+ * @param {string} [args.platform] application platform key
+ * @param {string} [args.knowledgeText] cached university research
+ * @param {string} [args.reviewNotes] notes already stored on the essay
+ * @param {object[]} [args.allEssays] every essay, for scope and the UCAS budget
+ * @param {string} [args.materialsText] formatted materials
+ * @param {string} [args.profileText] formatted profile
+ * @param {string} [args.applicantText] AI Knowledge Base text
+ * @param {object} [args.previousReview] the last saved review of this essay, so a
+ *   re-review is a comparison on a fixed scale instead of a fresh coin toss.
+ */
+export function buildReviewPrompt({
+  essay, university, platform, knowledgeText, reviewNotes, allEssays,
+  materialsText = '', profileText = '', applicantText = '', previousReview = null,
+}) {
+  const unit = limitUnitFor(essay);
+  const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
+  const facts = lengthFacts(essay, allEssays);
+  const voice = schoolVoiceFor(university, platform);
+
+  const previousScores = previousReview
+    ? [
+      `PREVIOUS REVIEW OF THIS ESSAY (same rubric, same scale — you are comparing, not starting over):`,
+      `- overall ${previousReview.overall_score ?? '?'}/10, and per dimension: ${ESSAY_REVIEW_DIMENSIONS.map((d) => `${d.key} ${previousReview[d.field] ?? '?'}`).join(', ')}`,
+      previousReview.weaknesses?.length ? `- weaknesses reported: ${previousReview.weaknesses.join(' | ')}` : '',
+      previousReview.priority_improvements?.length ? `- priority fixes asked for: ${previousReview.priority_improvements.join(' | ')}` : '',
+      `Judge the draft in front of you now. Where a reported weakness is genuinely fixed in the text, raise that dimension and quote the fix. Where it is not fixed, hold the score and say it is still open. Do not move a score you cannot justify from the text: an unexplained rise is noise, and noise is useless to the applicant.`,
+    ].filter(Boolean).join('\n')
+    : '';
+
+  return `You are a senior admissions officer at ${university?.name || 'this university'} reading a stack of real files. Be strict about evidence and generous where the evidence is actually there.
+
+WHO IS READING THIS (${voice.label}):
+${voice.brief}
+
+${scaleInstructions()}
+
+${facts.text}
 
 JUDGE ONLY AGAINST WHAT THIS PROMPT ACTUALLY ASKS:
 ${essayRoleBrief(essay)}
 
-${platformBrief(university, platform)}
+${platformBrief(essay, university, platform)}
+
+${craftBrief({ essay, university, platform, limit, unit })}
 
 ${rootBrief(essay)}
 
@@ -169,20 +297,17 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH AND IDEAL STUDENT:
 ${knowledgeText || 'No research cached. Judge on the quality of the writing itself.'}
 
-${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
-Evaluate on exactly these dimensions, each scored 1-10 where 5 is average for this admissions pool:
-1. prompt_alignment — does it answer THIS prompt, serving ITS role, without stealing another essay's material?
-2. authenticity — could a specific person have written this, or is it generically well-written? Check against profile and own materials — does it sound like THIS applicant?
-3. specificity — names, numbers, concrete actions, or abstraction? Does it use the concrete details from their own materials?
-4. structure — does the reader get to a point, or wander?
-5. voice — natural, precise, age-appropriate, free of AI tells?
-6. risk — what would an adversarial reader object to? Overclaiming, humblebragging, a lesson that is not earned, a detail that seems borrowed from a sample.
-7. length — does it respect its limit, and does it earn every word it spends?
+${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${previousScores ? `${previousScores}\n` : ''}${reviewNotes ? `EARLIER FINDINGS SAVED WITH THIS ESSAY (re-check whether this draft fixed them):\n${reviewNotes}\n` : ''}
+Score these dimensions 1-10 and answer each one's question:
+${dimensionInstructions()}
 
-Be concrete: quote the exact phrases you are objecting to. "Feels AI-generated" is not a finding; "\"In the end, this experience taught me that…" appears in the third paragraph" is.
+For EVERY dimension, also say in one sentence exactly what would raise it to a 10, quoting the text where you can. "Make it better" is not an answer; "replace \\"we worked hard together\\" in paragraph 3 with what the two of you actually did on the night the rig failed" is.
+
+Be concrete everywhere: quote the exact phrases you are objecting to. "Feels AI-generated" is not a finding; "\\"In the end, this experience taught me that…\\" appears in the third paragraph" is.
 
 If the essay fails to honor the applicant's required root, call that out as a weakness even if the prose is polished. If no root was supplied, say that the drafting direction is underspecified rather than penalizing the essay for not guessing it.
 If the essay fails to use available personal context from materials, call that out as a weakness.
+Judge length from the MEASURED LENGTH above, not from your own count.
 
 Return JSON only.`;
 }
@@ -196,57 +321,272 @@ export const REVIEW_SCHEMA = {
     specificity_score: { type: 'number' },
     structure_score: { type: 'number' },
     voice_score: { type: 'number' },
+    risk_score: { type: 'number' },
+    length_score: { type: 'number' },
     sounds_like_ai: { type: 'boolean' },
-    word_count: { type: 'number' },
-    limit: { type: 'number' },
-    over_limit: { type: 'boolean' },
     ai_patterns_detected: { type: 'array', items: { type: 'string' } },
     quoted_evidence: { type: 'array', items: { type: 'string' } },
     strengths: { type: 'array', items: { type: 'string' } },
     weaknesses: { type: 'array', items: { type: 'string' } },
     priority_improvements: { type: 'array', items: { type: 'string' } },
+    per_dimension: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          dimension: { type: 'string' },
+          score: { type: 'number' },
+          evidence: { type: 'string' },
+          how_to_reach_ten: { type: 'string' },
+        },
+      },
+    },
     summary: { type: 'string' },
   },
 };
 
-export function buildPolishPrompt({ essay, university, platform, reviewResult, knowledgeText, allEssays, materialsText = '', profileText = '', applicantText = '' }) {
-  return `You are a master essay editor. Your job is to make this essay more human, more specific, and better aligned to its prompt — without inventing anything.
+/** The dimension keys a review must carry for Atlas to treat it as complete. */
+export const REVIEW_SCORE_FIELDS = ESSAY_REVIEW_DIMENSIONS.map((d) => d.field);
 
+/**
+ * Reviews used to carry the model's own word count, which was sometimes wrong.
+ * Atlas measures the draft itself and stamps the real numbers onto the result,
+ * so the panel can never contradict the editor.
+ */
+export function withMeasuredLength(review, essay, allEssays) {
+  if (!review || typeof review !== 'object') return review;
+  const assessment = assessLength(essay?.content || '', essay, allEssays);
+  return {
+    ...review,
+    word_count: assessment.count,
+    limit: assessment.limit,
+    unit: assessment.unit,
+    over_limit: assessment.state === 'over',
+    under_target: ['short', 'severe', 'empty'].includes(assessment.state),
+    length_message: assessment.message,
+  };
+}
+
+/** One number for "how good is this essay", averaged over the dimensions present. */
+export function reviewAverage(review) {
+  if (!review) return null;
+  const scores = REVIEW_SCORE_FIELDS.map((field) => Number(review[field])).filter((n) => Number.isFinite(n) && n > 0);
+  if (!scores.length) return Number.isFinite(Number(review.overall_score)) ? Number(review.overall_score) : null;
+  return scores.reduce((a, b) => a + b, 0) / scores.length;
+}
+
+// ---------------------------------------------------------------------------
+// Edit — surgical, conserved, itemised
+// ---------------------------------------------------------------------------
+
+const PRESERVATION_RULES = `THE PRIME DIRECTIVE — CONSERVE THE APPLICANT'S DRAFT:
+- You are an editor, not an author. The story, the scenes, their order, the timeline, the people in it, and what the essay means must all survive your edit unchanged.
+- Keep at least 80% of the original words recognisably intact. The applicant reads this draft as theirs; a rewrite is a rejection of their work and is not what was asked for.
+- Change wording, rhythm, precision, and the specific problems the review named. Change a point only where leaving it would cost the essay a score.
+- NEVER do any of these: replace the required root with another activity; restructure or reorder the narrative; delete a scene, a person, or a piece of evidence; add a new scene, achievement, name, or number; change what the ending means; switch person or tense; rewrite a paragraph that is already working; shorten the essay to make your job easier.
+- Where you believe a substantial change is essential to reach 10/10, make it — and name it in "changes" with the reason. An unnamed substantial change is a failure of this task.
+- Every change you report is shown to the applicant highlighted inside the text, so report the real wording you replaced, not a paraphrase of it.`;
+
+export function buildPolishPrompt({
+  essay, university, platform, reviewResult, knowledgeText, allEssays,
+  materialsText = '', profileText = '', applicantText = '',
+}) {
+  const unit = limitUnitFor(essay);
+  const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
+  const facts = lengthFacts(essay, allEssays);
+
+  return `You are a master essay editor working line by line on a draft that belongs to the applicant. Your job is to lift it to the level of an essay read aloud in committee — more human, more specific, better aligned to its prompt — without inventing anything and without taking the essay over.
+
+${PRESERVATION_RULES}
+
+THE ROLE OF THIS PARTICULAR ESSAY:
 ${essayRoleBrief(essay)}
 
-${platformBrief(university, platform)}
+${platformBrief(essay, university, platform)}
+
+${craftBrief({ essay, university, platform, limit, unit })}
 
 ${rootBrief(essay)}
 
 ${HUMAN_VOICE_RULES}
 
-${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check):
+${facts.text}
+An edit that makes the draft SHORTER than the target band is a failed edit, whatever else it improves. ${buildLengthContractText(essay, allEssays)}
+
+${LENGTH_CRAFT_RULES}
+
+${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check each one against your change log):
+- Overall score last review: ${reviewResult.overall_score ?? '?'}/10
 - Weaknesses: ${(reviewResult.weaknesses || []).join(' | ') || 'none reported'}
 - Priority improvements: ${(reviewResult.priority_improvements || []).join(' | ') || 'none reported'}
 - AI tells flagged: ${(reviewResult.ai_patterns_detected || []).join(' | ') || 'none reported'}
 - Exact phrases flagged: ${(reviewResult.quoted_evidence || []).join(' | ') || 'none reported'}
-` : ''}
-
-${lengthBrief(essay, allEssays)}
+- What would raise each dimension to 10: ${(reviewResult.per_dimension || []).map((d) => `${d.dimension}: ${d.how_to_reach_ten}`).join(' | ') || 'not reported'}
+Fix every one of these that can be fixed by editing. If one genuinely cannot be fixed without new facts, say so in "gaps_for_applicant" instead of quietly leaving it.
+` : 'No review has been run yet. Edit against the craft rules above and the length contract.'}
 
 UNIVERSITY RESEARCH:
 ${knowledgeText || 'None cached.'}
 
-${profileText ? `APPLICANT PROFILE (use concrete details from here when possible):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use applicant-owned evidence according to its lens; academic work informs thinking, guidance supplies rules, samples supply craft only and never borrowed life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT:
+${profileText ? `APPLICANT PROFILE (use concrete details from here when the draft needs one):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use applicant-owned evidence according to its lens; academic work informs thinking, guidance supplies rules, samples supply craft only and never borrowed life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT (this is the applicant's own writing — the thing you are conserving):
 <<<ESSAY
 ${essay?.content || ''}
 ESSAY>>>
 
-Rules:
-- Do not invent experiences, names, numbers, or outcomes. If a change needs a fact you do not have, leave the sentence out rather than guessing.
+Rules for the revision itself:
+- Do not invent experiences, names, numbers, or outcomes. If a change needs a fact you do not have, leave the sentence out rather than guessing, and list the fact you needed in "gaps_for_applicant".
 - Preserve and strengthen the applicant's required root. Never replace it with a more convenient activity or a sample writer's story.
 - Use concrete evidence from the appropriate applicant-owned sources — names, numbers, roles, outcomes, or intellectual questions — when the draft needs it. Do not turn an academic assessment, guidance source, or cautious interpretation into a claimed personal experience.
 - For craft, you may borrow technique from samples that match this platform (US samples for US essays, UK samples for UCAS), but never borrow a life event.
-- Cut, do not pad. If the draft is at its limit, every addition must be paid for by a deletion.
-${limitUnitFor(essay) === 'characters' ? '- This limit is in CHARACTERS including spaces. Check your output length before returning it.' : '- Stay inside the word limit.'}
+- Deepen before you cut. Where a sentence is weak, first try to make it more concrete; only delete it if nothing in it is doing evidential work.
+${limitUnitFor(essay) === 'characters' ? '- This limit is in CHARACTERS including spaces. Check your output length before returning it.' : '- Stay inside the word limit and inside the target band.'}
 
-Return only the revised essay text. No headers, no commentary, no explanation, no markdown fences.`;
+${AMBITION_RULES}
+
+Return JSON only, with:
+- "revised_essay": the COMPLETE edited essay, from its first word to its last. Never a fragment, never only the changed paragraphs, never commentary, never markdown fences.
+- "changes": one entry per edit you made, each { "original" (the exact words you replaced, quoted from the draft), "revised" (the exact words you put there), "reason" (which finding or craft rule this fixes) }. Include deletions with "revised" left empty, and additions with "original" left empty.
+- "preserved_estimate": your honest estimate, 0-100, of how much of the original wording survives.
+- "protected": what you deliberately left alone and why (this is how the applicant knows you read the whole draft).
+- "why_it_scores_higher": two or three sentences naming which dimensions improved and what earned the increase.
+- "gaps_for_applicant": facts you needed but did not have.
+- "summary_of_edit": one sentence for the applicant.`;
 }
+
+export const POLISH_SCHEMA = {
+  type: 'object',
+  properties: {
+    revised_essay: { type: 'string' },
+    changes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          original: { type: 'string' },
+          revised: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+    },
+    preserved_estimate: { type: 'number' },
+    protected: { type: 'array', items: { type: 'string' } },
+    why_it_scores_higher: { type: 'string' },
+    gaps_for_applicant: { type: 'array', items: { type: 'string' } },
+    summary_of_edit: { type: 'string' },
+  },
+};
+
+/**
+ * Models answer an editing request in whatever field they like. Take the essay
+ * out of whichever of them actually holds it, and never accept a wrapper that
+ * has no prose in it.
+ */
+export function extractRevisedEssay(result) {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object') return '';
+  const candidates = [result.revised_essay, result.essay, result.revision, result.text, result.content];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+  }
+  return '';
+}
+
+/** Strips the markdown fences and headings a model sometimes wraps prose in. */
+export function cleanEssayText(text) {
+  let value = String(text || '');
+  const fence = value.match(/^\s*```[a-z]*\s*\n([\s\S]*?)\n```\s*$/i);
+  if (fence) value = fence[1];
+  value = value.replace(/^\s*(revised essay|final essay|essay|draft)\s*[:\-]\s*/i, '');
+  return value.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Length repair — the automatic second pass when an answer misses the band
+// ---------------------------------------------------------------------------
+/**
+ * @param {object} args
+ * @param {object} args.essay the essay row being repaired
+ * @param {object} [args.university] the university row, for the reader's voice
+ * @param {string} [args.platform] application platform key
+ * @param {'generate' | 'edit' | 'fix'} [args.mode] what produced the short draft:
+ *   'generate' a first draft that stopped short, 'edit' an edit that cut too
+ *   much, 'fix' the applicant's own text being brought to length by hand.
+ * @param {string} args.text the draft that came back
+ * @param {object} args.assessment from assessLength()
+ * @param {string} [args.originalText] the pre-edit draft, for modes 'edit' and 'fix'
+ * @param {number} [args.preservedRatio] how much of the original survived
+ * @param {string} [args.knowledgeText] cached university research
+ * @param {string} [args.materialsText] formatted materials
+ * @param {string} [args.profileText] formatted profile
+ * @param {string} [args.applicantText] AI Knowledge Base text
+ * @param {object[]} [args.allEssays] every essay, for the shared UCAS budget
+ */
+export function buildLengthRepairPrompt({
+  essay, university, platform, mode = 'generate', text, assessment,
+  originalText = '', preservedRatio = null, knowledgeText = '', materialsText = '',
+  profileText = '', applicantText = '', allEssays,
+}) {
+  const unit = limitUnitFor(essay);
+  const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
+  const words = formatLimit(unit);
+  const over = assessment.state === 'over';
+
+  const editSpecific = mode === 'fix'
+    ? 'This draft is the APPLICANT\'S OWN WRITING. Bring it to the length contract without changing what it says: deepen the scenes that are already there, or trim what is not doing work. Do not introduce a new story, a new argument, or a different voice.'
+    : mode === 'edit'
+    ? `This draft is an EDIT of an earlier version, and the edit went too far${
+      Number.isFinite(preservedRatio) && preservedRatio !== null
+        ? `: only ${Math.round(preservedRatio * 100)}% of the applicant's own words survived`
+        : ''
+    }.
+${originalText ? `THE APPLICANT'S ORIGINAL DRAFT (restore the material in it that was doing real work):\n<<<ORIGINAL\n${originalText}\nORIGINAL>>>\n` : ''}
+Put the essay back together: keep the improvements that are genuinely better, and restore the scenes, details, and sentences from the original that carried evidence. The result must read as the applicant's own essay, edited — not as a new essay.`
+    : 'This is the draft you wrote. It stopped short.';
+
+  return `You are the same elite admissions essay consultant. Your last answer did not meet the length contract, so it is being sent back to you to finish properly.
+
+${editSpecific}
+
+WHAT CAME BACK: ${assessment.count.toLocaleString()} ${words} — ${assessment.message}
+${over ? `It is over the ceiling by ${assessment.overage.toLocaleString()} ${words}.` : `It is under the target band by ${assessment.shortfall.toLocaleString()} ${words}.`}
+
+${buildLengthContractText(essay, allEssays)}
+
+${LENGTH_CRAFT_RULES}
+
+${platformBrief(essay, university, platform)}
+
+${craftBrief({ essay, university, platform, limit, unit })}
+
+${rootBrief(essay)}
+
+${HUMAN_VOICE_RULES}
+
+${profileText ? `APPLICANT PROFILE:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (evidence for the applicant's own life only; samples are craft only):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${knowledgeText && knowledgeText !== 'None cached.' ? `UNIVERSITY RESEARCH:\n${knowledgeText}\n` : ''}
+THE DRAFT TO FIX:
+<<<ESSAY
+${text}
+ESSAY>>>
+
+Do this:
+1. ${over
+    ? `Cut ${assessment.overage.toLocaleString()}+ ${words} by removing sentences that only announce meaning, and spend the space you free on the most concrete detail already in the draft.`
+    : `Add ${assessment.shortfall.toLocaleString()}+ ${words} of substance. Go back INTO the existing scenes: the exact room, the exact words someone said, the specific object, the number, what you were thinking at the time, what you did next. Do not add a new story, a new achievement, or a summary paragraph.`}
+2. Never invent a fact. If you need one to reach the band, write the sentence around the gap and list the gap in your notes.
+3. Keep the applicant's root, their voice, and the shape of the essay.
+4. Count your own ${words} before you answer. If you are still outside the band, keep going.
+
+Return the COMPLETE ${over ? 'trimmed' : 'expanded'} essay text in "essay" — every paragraph, first word to last — and in "notes" say what you deepened (or cut) and list any fact you still need from the applicant.`;
+}
+
+export const LENGTH_REPAIR_SCHEMA = {
+  type: 'object',
+  properties: {
+    essay: { type: 'string' },
+    notes: { type: 'string' },
+    gaps_for_applicant: { type: 'array', items: { type: 'string' } },
+  },
+};
 
 export { buildProfileContext };
 

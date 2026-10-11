@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,7 @@ import {
   Info, Briefcase, Database, User, Landmark, Loader2,
 } from 'lucide-react';
 import ActivitiesEditor from '@/components/profile/ActivitiesEditor';
+import ActivityAiPanel from '@/components/profile/ActivityAiPanel';
 import HonorsEditor from '@/components/profile/HonorsEditor';
 import IbSubjectPicker from '@/components/profile/IbSubjectPicker';
 import {
@@ -22,6 +23,9 @@ import {
   CURRICULUM_TYPES, FIRST_GENERATION_OPTIONS, TEST_POLICIES, FUNDING_SOURCES,
 } from '@/lib/profileOptions';
 import { parseIbRecord, filledSubjects, hlCount } from '@/lib/ibDiploma';
+import { buildProfileContext } from '@/lib/profileContext';
+import { formatMaterialsForAI } from '@/lib/materialRole';
+import { loadApplicantKnowledgeText } from '@/lib/applicantKnowledgeService';
 
 /** @param {{ icon: React.ElementType, title: React.ReactNode, description?: string, children: React.ReactNode }} props */
 function SectionCard({ icon: Icon, title, description, children }) {
@@ -152,6 +156,10 @@ export default function Profile() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [missingColumns, setMissingColumns] = useState([]);
+  /** Which activity entry the applicant asked the AI to sharpen. */
+  const [sharpenIndex, setSharpenIndex] = useState(null);
+  /** Materials/knowledge are fetched the first time the activities AI is used. */
+  const activityContextRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -196,6 +204,39 @@ export default function Profile() {
 
   const ibRecord = useMemo(() => parseIbRecord(formData.ib_subjects), [formData.ib_subjects]);
   const ibFilled = useMemo(() => filledSubjects(ibRecord), [ibRecord]);
+
+  /**
+   * Everything the activities AI is allowed to read, assembled on first use.
+   *
+   * Fetched lazily so the profile page still opens instantly, and cached because
+   * the same documents back all three actions.
+   */
+  const getActivityContext = useCallback(async () => {
+    if (!activityContextRef.current) {
+      let materials = [];
+      let applicantText = '';
+      try {
+        materials = await base44.entities.Material.list();
+      } catch (e) {
+        console.warn('[atlas] materials are unavailable for activity suggestions:', e?.message || e);
+      }
+      try {
+        applicantText = await loadApplicantKnowledgeText({ platform: 'common_app' });
+      } catch (e) {
+        console.warn('[atlas] applicant knowledge is unavailable:', e?.message || e);
+      }
+      activityContextRef.current = {
+        materialsText: formatMaterialsForAI(materials, { platform: 'common_app' }),
+        applicantText,
+      };
+    }
+    return {
+      // Built from the form as it stands, not the saved row, so a suggestion can
+      // see the entry the applicant is typing right now.
+      profileText: buildProfileContext(formData),
+      ...activityContextRef.current,
+    };
+  }, [formData]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -511,7 +552,21 @@ export default function Profile() {
       </SectionCard>
 
       <SectionCard icon={Briefcase} title="Activities" description="Common App format — up to 10">
-        <ActivitiesEditor value={formData.activities || []} onChange={(val) => set('activities', val)} />
+        <ActivityAiPanel
+          activities={formData.activities || []}
+          onChange={(val) => set('activities', val)}
+          getContext={getActivityContext}
+          sharpenIndex={sharpenIndex}
+          onSharpenDone={() => setSharpenIndex(null)}
+        />
+        <div className="mt-4">
+          <ActivitiesEditor
+            value={formData.activities || []}
+            onChange={(val) => set('activities', val)}
+            onSharpen={(index) => setSharpenIndex(index)}
+            sharpeningIndex={sharpenIndex}
+          />
+        </div>
       </SectionCard>
 
       <SectionCard icon={Award} title="Honors" description="Common App format — up to 5">

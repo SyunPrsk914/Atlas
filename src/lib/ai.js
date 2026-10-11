@@ -212,14 +212,32 @@ export async function runAI(params, opts = {}) {
       output = await invokeOllamaDetailed(params, getOllamaConfig());
     } else if (mode === 'hosted') {
       const detailed = base44.integrations.Core.InvokeLLMDetailed;
+      // The hosted endpoint speaks `max_tokens`; callers speak
+      // `max_output_tokens`. Translate so one call site can serve both paths,
+      // and never lower a provider's own generous default when the caller did
+      // not ask for a specific cap.
+      const hostedParams = { ...params };
+      if (!hostedParams.max_tokens && hostedParams.max_output_tokens) {
+        hostedParams.max_tokens = hostedParams.max_output_tokens;
+      }
+      delete hostedParams.max_output_tokens;
       output = detailed
-        ? await detailed(params)
-        : { result: await base44.integrations.Core.InvokeLLM(params), meta: {} };
+        ? await detailed(hostedParams)
+        : { result: await base44.integrations.Core.InvokeLLM(hostedParams), meta: {} };
     } else {
       output = demoResponse(params);
     }
 
     const { result, meta = {} } = output;
+    if (meta.truncated && !quiet) {
+      // A cut-off answer is not a slightly worse answer, it is an incomplete
+      // one. Say so loudly: this is how a 650-word essay used to become 90
+      // words with nothing on screen to explain it.
+      toast.error('The model stopped before finishing', {
+        description: 'The answer hit the model\'s output limit, so it may be cut off mid-sentence. Atlas flags it rather than passing it off as a finished draft — try again, or send fewer materials.',
+        duration: 12000,
+      });
+    }
     if (meta.demo && !quiet) {
       toast.warning('Demo output', {
         description: meta.warning || 'This is placeholder text, not a model-generated answer.',

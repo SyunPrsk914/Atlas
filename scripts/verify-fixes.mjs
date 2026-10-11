@@ -153,7 +153,14 @@ const generated = buildGeneratePrompt({
     { title: 'UCAS Q3 — Beyond education', prompt: ucas[2].prompt, content: 'y'.repeat(1000), application_platform: 'ucas' },
   ],
 });
-assert.match(generated, /must stay within 1,000 characters/);
+// The length contract replaced the old free-form length sentence: it states the
+// band, the ceiling, and what is left in the shared UCAS budget.
+assert.match(generated, /LENGTH CONTRACT/);
+assert.match(generated, /Hard ceiling: 1,000 characters/);
+assert.match(generated, /this box has 1,000 characters of room/);
+assert.match(generated, /HOW TO WRITE THIS KIND OF ESSAY/);
+assert.match(generated, /Oxford \/ Cambridge/);
+assert.match(generated, /STANDARD YOU ARE WORKING TO/);
 assert.match(generated, /A required intellectual question and the personal habit behind it/);
 assert.match(generated, /hard constraint/);
 assert.match(generated, /NOT written by the applicant/);
