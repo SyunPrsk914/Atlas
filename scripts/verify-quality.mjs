@@ -609,6 +609,20 @@ const HARVARD = { name: 'Harvard University' };
     assert.match(entry.content, /Non-official, labelled:/, `${where} labels anything not from an official page`);
     assert.ok(entry.content.length > 6000, `${where} is a real report, not a stub`);
 
+    // Headings are read by the parser and shown to the applicant, so a mangled
+    // word in one of them is a real defect. Every substantial heading word must
+    // also appear in the pack's prose — a typo appears nowhere else.
+    const prose = pack.map((e) => e.content).join('\n').split(/\r?\n/)
+      .filter((line) => !/^##\s/.test(line)).join(' ').toUpperCase().replace(/[^A-Z0-9& ]+/g, ' ');
+    for (const line of entry.content.split(/\r?\n/)) {
+      if (!/^##\s*\d+\./.test(line)) continue;
+      for (const word of line.replace(/^##\s*\d+\.\s*/, '').split(/[^A-Z0-9&]+/)) {
+        if (word.length < 4) continue;
+        assert.ok(new RegExp(`\\b${word}\\b`).test(prose),
+          `${where} has a heading word that appears nowhere else: "${word}" in "${line.trim()}"`);
+      }
+    }
+
     const record = packIndex.packRecordFields(entry, entry.university);
     assert.equal(record.research_provider, packIndex.PACK_PROVIDER, `${where} identifies itself as hand research`);
     assert.equal(record.grounded, false, `${where} does not claim to be web-grounded`);

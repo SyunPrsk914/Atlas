@@ -44,7 +44,7 @@ Princeton's published self-description and review approach:
 - Role in review: Princeton's supplements are unusually focused on the person outside achievement — the "how do you spend your time" and "what matters to you" questions are there because Princeton is a residential community that reads for fit with a small campus. The engineering-specific answer is where a MAE applicant states the technical direction and connects it to independent work.
 - Limits and exact wording change annually; enter the current prompts into Atlas as separate essays so the length meter measures them correctly.
 
-## 5. PROGRAMS AND MAJORS — MECHANICAL AND AEROSPACER ENGINEERING
+## 5. PROGRAMS AND MAJORS — MECHANICAL AND AEROSPACE ENGINEERING
 - The B.S.E. in Mechanical and Aerospace Engineering is one department with two tracks — a Mechanical Engineering programme and an Aerospace Engineering programme — sharing a core. Students who want both can complete the requirements of each, which needs three taught design courses (MAE 321 Engineering Design, a Mechanical Design course, and an Aerospace Design course) plus senior independent work.
 - "The Princeton Distinction", in the School of Engineering's own words: the programme "emphasizes engineering's scientific principles. With a solid command of fundamental principles, practice and application become natural extensions of engineering thought, enabling graduates to adapt to a wide variety of professional situations."
 - Sophomore core (normally completed by the end of the second year): MAE 206 Introduction to Engineering Dynamics; MAE 221 Thermodynamics; MAE 222 Mechanics of Fluids; MAE 223 Modern Solid Mechanics; MAE 224 Integrated Laboratory.
