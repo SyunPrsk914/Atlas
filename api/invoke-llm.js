@@ -1,7 +1,9 @@
-// /api/invoke-llm — optional hosted-provider endpoint for explicit Hosted mode.
+// /api/invoke-llm — the AI endpoint. NaraRouter is the provider Atlas ships
+// with; the key stays server-side and never reaches the browser bundle.
 //
-// The default local Ollama path does not call this function. Hosted keys are
-// configured server-side and their provider quotas/prices remain in force.
+// This is the only path to a real model: every AI feature in the app calls it.
+// The key is configured server-side and the provider's own quotas and prices
+// remain in force — Atlas adds none of its own.
 //
 // Request body (POST):
 //   {
@@ -9,7 +11,8 @@
 //     response_json_schema?: object,      // JSON Schema -> returns parsed object
 //     add_context_from_internet?: bool,   // web grounding (Gemini only)
 //     model?: string,                     // provider model or alias
-//     max_tokens?: number
+//     max_tokens?: number,
+//     temperature?: number                // clamped to 0-2
 //   }
 // Response: { ok: true, result: <string|object>, meta: {...} }
 //
@@ -17,6 +20,8 @@
 // keep working. It tells the UI what actually happened, which is what the
 // Knowledge Base / Essay Builder screens need in order to stop guessing:
 //   { provider, model, grounded, demo, warning, finish_reason }
+// `finish_reason` of "length"/"max_tokens" means the answer was cut off; the
+// client turns that into `meta.truncated` so essay actions can send it back.
 //
 // This module is used BOTH as a Vercel function (export default) and by the
 // Vite dev server middleware (export handleInvokeLLM), so it must not assume
@@ -55,8 +60,10 @@ const PROVIDER_DEFAULTS = {
 function detectProvider() {
   const explicit = (process.env.LLM_PROVIDER || '').toLowerCase();
   if (explicit) return explicit;
-  if (process.env.GEMINI_API_KEY) return 'gemini';
+  // NaraRouter is Atlas's provider. The other adapters remain for a deployment
+  // that already has a key, but they are never preferred over it.
   if (process.env.NARAROUTER_API_KEY) return 'nararouter';
+  if (process.env.GEMINI_API_KEY) return 'gemini';
   if (process.env.GROQ_API_KEY) return 'groq';
   if (process.env.OPENROUTER_API_KEY) return 'openrouter';
   if (process.env.OPENAI_API_KEY) return 'openai';
@@ -170,7 +177,7 @@ function explainProviderError(provider, message, status) {
 // ---------------------------------------------------------------------------
 // Provider adapters -> { text, finishReason } or throw Error
 // ---------------------------------------------------------------------------
-async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTokens }) {
+async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTokens, temperature }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY is not set on the server.');
 
@@ -190,6 +197,9 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
     // Output cap: older 2.0 models cap at 8192; newer families allow much more.
     generationConfig.maxOutputTokens = maxTokens
       || (modelName.startsWith('gemini-2.0') ? 8192 : 32768);
+    // A scoring or editing call asks for a low temperature so two runs over the
+    // same essay produce comparable numbers instead of a random walk.
+    if (Number.isFinite(temperature)) generationConfig.temperature = temperature;
 
     const body = { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig };
     if (addContext) body.tools = [{ google_search: {} }];
@@ -241,7 +251,7 @@ async function callGemini({ prompt, responseJsonSchema, addContext, model, maxTo
   }
 }
 
-async function callOpenAICompatible({ provider = 'openai', prompt, responseJsonSchema, model, maxTokens }) {
+async function callOpenAICompatible({ provider = 'openai', prompt, responseJsonSchema, model, maxTokens, temperature }) {
   const key = apiKeyFor(provider);
   if (!key) throw new Error(`${provider.toUpperCase()}_API_KEY is not set on the server.`);
   const base = (provider === 'openai'
@@ -259,6 +269,7 @@ async function callOpenAICompatible({ provider = 'openai', prompt, responseJsonS
   };
   if (responseJsonSchema) body.response_format = { type: 'json_object' };
   if (maxTokens) body.max_tokens = maxTokens;
+  if (Number.isFinite(temperature)) body.temperature = temperature;
 
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` };
   if (provider === 'openrouter') {
@@ -289,7 +300,7 @@ async function callOpenAICompatible({ provider = 'openai', prompt, responseJsonS
   return { text: data?.choices?.[0]?.message?.content || '', model: data?.model || body.model, finishReason: data?.choices?.[0]?.finish_reason || '' };
 }
 
-async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens }) {
+async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens, temperature }) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error('ANTHROPIC_API_KEY is not set on the server.');
 
@@ -297,6 +308,7 @@ async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens }) {
     model: model && model.startsWith('claude') ? model : PROVIDER_DEFAULTS.anthropic,
     max_tokens: maxTokens || 8192,
     messages: [{ role: 'user', content: prompt }],
+    ...(Number.isFinite(temperature) ? { temperature } : {}),
   };
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -366,7 +378,14 @@ export async function handleInvokeLLM(req, res) {
     add_context_from_internet: addContext,
     model,
     max_tokens: maxTokens,
+    temperature: rawTemperature,
   } = body || {};
+
+  // Optional and clamped: an unknown or out-of-range value must not break a
+  // call, and a caller cannot push a provider into an unsupported range.
+  const temperature = Number.isFinite(Number(rawTemperature))
+    ? Math.min(Math.max(Number(rawTemperature), 0), 2)
+    : undefined;
 
   if (!prompt || typeof prompt !== 'string') {
     send(res, 400, { error: '`prompt` is required.' });
@@ -408,16 +427,16 @@ export async function handleInvokeLLM(req, res) {
     }
   }
 
-  // Hosted inference is only reached after the user explicitly selects it in
-  // AI setup. Ollama requests never touch this endpoint. Gemini is the only
-  // hosted provider allowed to request Google Search grounding.
+  // This is the only real-model path Atlas has. Gemini remains the only
+  // provider that can request Google Search grounding; NaraRouter cannot, and
+  // the client says so instead of implying otherwise.
   const provider = detectProvider();
   const groundingRequested = !!addContext;
   const groundingPossible = groundingRequested && provider === 'gemini' && !!process.env.GEMINI_API_KEY;
 
   if (!provider || !apiKeyFor(provider)) {
     send(res, 503, {
-      error: 'No hosted AI provider is configured for this deployment. Select a local Ollama model in AI setup, or configure an optional hosted provider key.',
+      error: 'No AI provider is configured for this deployment. Set NARAROUTER_API_KEY (see DEPLOYMENT.md) and redeploy, or use demo mode until then.',
     });
     return;
   }
@@ -433,6 +452,7 @@ export async function handleInvokeLLM(req, res) {
         addContext: groundingPossible,
         model,
         maxTokens,
+        temperature,
       });
     } else if (['openai', 'groq', 'openrouter', 'nararouter'].includes(provider)) {
       const call = (requestedModel) => callOpenAICompatible({
@@ -441,11 +461,19 @@ export async function handleInvokeLLM(req, res) {
         responseJsonSchema,
         model: requestedModel,
         maxTokens,
+        temperature,
       });
-      // NaraRouter aliases are plan-specific and the gateway reports its real
-      // 4xx/429 errors. Do not retry a failed request with a different model.
+      // NaraRouter aliases are plan-specific: `/v1/models` returns only what a
+      // key is entitled to, and anything else is a 404. Retry once with the
+      // deployment default so a stale alias degrades to a different model
+      // instead of failing every AI action in the app. Real 429s and auth
+      // errors are still reported verbatim, never retried into another model.
       out = provider === 'nararouter'
-        ? await call(model || PROVIDER_DEFAULTS.nararouter)
+        ? await callWithModelFallback(
+          call,
+          model || PROVIDER_DEFAULTS.nararouter,
+          PROVIDER_DEFAULTS.nararouter,
+        )
         : await callWithModelFallback(
           call,
           model || PROVIDER_DEFAULTS[provider],
@@ -453,7 +481,7 @@ export async function handleInvokeLLM(req, res) {
         );
     } else if (provider === 'anthropic') {
       out = await callWithModelFallback(
-        (m) => callAnthropic({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens }),
+        (m) => callAnthropic({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens, temperature }),
         model && model.startsWith('claude') ? model : PROVIDER_DEFAULTS.anthropic,
         PROVIDER_DEFAULTS.anthropic,
       );

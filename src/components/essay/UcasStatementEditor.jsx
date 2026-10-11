@@ -1,6 +1,8 @@
 import { AlertTriangle } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
 import { ucasQuestionsFrom, ucasCharacterBudget, UCAS_RULES } from '@/lib/applicationData';
+import { assessLength } from '@/lib/essayLength';
+import LengthMeter from '@/components/essay/LengthMeter';
 
 /**
  * The real UCAS form: three fixed questions, three answer boxes, one shared
@@ -41,6 +43,9 @@ export default function UcasStatementEditor({ essays, focusId, onChange, onFocus
         const text = essay?.content || '';
         const focused = essay?.id && essay.id === focusId;
         const short = text.length > 0 && text.length < question.minChars;
+        // The room left for this answer depends on what the other two already
+        // use, so the band is measured here rather than quoted from a fixed rule.
+        const assessment = essay ? assessLength(text, essay, essays) : null;
         return (
           <div
             key={question.key}
@@ -62,6 +67,11 @@ export default function UcasStatementEditor({ essays, focusId, onChange, onFocus
                 {short ? ` · under the ${question.minChars} minimum` : ` · min ${question.minChars}`}
               </p>
             </div>
+            {assessment && (
+              <div className="max-w-md">
+                <LengthMeter assessment={assessment} compact />
+              </div>
+            )}
             {essay ? (
               <Textarea
                 value={text}

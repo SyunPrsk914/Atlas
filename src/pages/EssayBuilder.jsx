@@ -7,20 +7,28 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import {
   Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine,
   Trash2, ChevronDown, ChevronUp, Library, CheckCircle2, CircleDashed,
-  Info, ArrowRight, AlertTriangle, Undo2,
+  Info, ArrowRight, AlertTriangle, Undo2, FileDiff, RotateCcw, Ruler,
 } from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
+import EssayDiffView from '@/components/essay/EssayDiffView';
+import LengthMeter from '@/components/essay/LengthMeter';
+import RevisionProgress from '@/components/essay/RevisionProgress';
 import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
 import PromptChooser from '@/components/essay/PromptChooser';
 import { runAI } from '@/lib/ai';
 import { buildProfileContext } from '@/lib/profileContext';
 import {
   buildGeneratePrompt, GENERATE_SCHEMA, buildReviewPrompt, REVIEW_SCHEMA, buildPolishPrompt,
+  POLISH_SCHEMA, LENGTH_REPAIR_SCHEMA, buildLengthRepairPrompt, AI_TEMPERATURES,
+  extractRevisedEssay, cleanEssayText, withMeasuredLength,
 } from '@/lib/essayPrompts';
+import { assessLength, isBetterLength } from '@/lib/essayLength';
+import { diffText, diffStats, isAggressiveRewrite } from '@/lib/textDiff';
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
   buildSharedEssayPlan, isSharedEssay, limitUnitFor, measureEssay, formatLimit, resolvedEssayLimit,
@@ -35,8 +43,11 @@ import { missingSchoolPrompts, promptsForUniversity, toEssayDraft } from '@/lib/
 import {
   getLastUniversityId, setLastUniversityId,
   getLastEssayId, setLastEssayId,
-  getCachedEssayReview, setCachedEssayReview,
-  getCachedEssayGen, setCachedEssayGen,
+  getCachedEssayReview, setCachedEssayReview, clearCachedEssayReview,
+  getCachedEssayGen, setCachedEssayGen, clearCachedEssayGen,
+  getEssaySnapshot, setEssaySnapshot, clearEssaySnapshot,
+  getEssayProgress, pushEssayProgress, clearEssayProgress,
+  getAutoReviewAfterEdit, setAutoReviewAfterEdit,
 } from '@/lib/persist';
 
 const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label: s }).label;
@@ -75,17 +86,28 @@ export default function EssayBuilder() {
   const [dirty, setDirty] = useState(false);
   const [reviewResult, setReviewResult] = useState(null);
   const [reviewCachedAt, setReviewCachedAt] = useState(null);
+  const [previousScore, setPreviousScore] = useState(null);
   const [genAnalysis, setGenAnalysis] = useState(null);
   const [genGaps, setGenGaps] = useState([]);
   const [genCachedAt, setGenCachedAt] = useState(null);
   // The last AI change to the selected essay, so it can be undone this visit.
   const [undoStep, setUndoStep] = useState(null);
+  // The last AI edit, kept so the applicant can see exactly which words changed
+  // and put their own version back.
+  const [revision, setRevision] = useState(null);
+  const [snapshot, setSnapshot] = useState(null);
+  const [progress, setProgress] = useState([]);
+  // An AI answer that missed the length contract and could not be repaired.
+  const [lengthIssue, setLengthIssue] = useState(null);
+  const [autoReview, setAutoReview] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [metaExpanded, setMetaExpanded] = useState(true);
   const [missingEssayColumns, setMissingEssayColumns] = useState([]);
   const [newEssay, setNewEssay] = useState({ title: '', type: 'supplemental', prompt: '', draft_anchor: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
   const autosaveRef = useRef(null);
+
+  useEffect(() => { setAutoReview(getAutoReviewAfterEdit()); }, []);
 
   const platform = useMemo(() => getUniversityPlatform(selectedUni), [selectedUni]);
   const platformInfo = PLATFORMS[platform];
@@ -95,6 +117,23 @@ export default function EssayBuilder() {
     setEssays(ess);
     return ess;
   }, []);
+
+  /**
+   * Per-essay state that lives in this browser: the version before the last AI
+   * edit, and the record of what each AI action did to the length and the score.
+   */
+  const loadEssayLocalState = (essay) => {
+    setRevision(null);
+    setLengthIssue(null);
+    setPreviousScore(null);
+    if (!essay) {
+      setSnapshot(null);
+      setProgress([]);
+      return;
+    }
+    setSnapshot(getEssaySnapshot(essay.id));
+    setProgress(getEssayProgress(essay.id));
+  };
 
   useEffect(() => {
     let active = true;
@@ -173,6 +212,7 @@ export default function EssayBuilder() {
             setGenGaps([]);
             setGenCachedAt(null);
           }
+          loadEssayLocalState(essayToSelect);
         }
       } catch (e) {
         console.error(e);
@@ -222,6 +262,7 @@ export default function EssayBuilder() {
       setGenGaps([]);
       setGenCachedAt(null);
     }
+    loadEssayLocalState(essay);
     if (!stayingInUcas) setDirty(false);
   };
 
@@ -236,6 +277,7 @@ export default function EssayBuilder() {
     setGenAnalysis(null);
     setGenGaps([]);
     setGenCachedAt(null);
+    loadEssayLocalState(null);
     setDirty(false);
   };
 
@@ -270,6 +312,7 @@ export default function EssayBuilder() {
     setReviewResult(null);
     setGenAnalysis(null);
     setGenGaps([]);
+    loadEssayLocalState(essay);
   };
 
   const handleSave = async () => {
@@ -423,6 +466,46 @@ export default function EssayBuilder() {
   };
 
   // --- actions ------------------------------------------------------------
+  /**
+   * One targeted second pass when an AI answer misses the length contract.
+   *
+   * A model that returns 480 words for a 650-word prompt has not finished the
+   * job, and a model whose answer was cut off by its own output limit has not
+   * even started one. Atlas asks it to finish, and keeps the second answer only
+   * if it is actually closer to the band — a worse repair is thrown away.
+   */
+  const repairLength = async ({ essay, context, text, assessment, mode, originalText = '', preservedRatio = null }) => {
+    const outcome = await runAI({
+      prompt: buildLengthRepairPrompt({
+        essay, university: selectedUni, platform, mode, text, assessment,
+        originalText, preservedRatio, allEssays: essays,
+        knowledgeText: context.knowledgeText, materialsText: context.materialsText,
+        profileText: context.profileText, applicantText: context.applicantText,
+      }),
+      response_json_schema: LENGTH_REPAIR_SCHEMA,
+      temperature: AI_TEMPERATURES.repair,
+    }, { fallbackTitle: 'The length fix could not be completed', quiet: true });
+
+    if (!isLiveOutcome(outcome)) return null;
+    const candidate = cleanEssayText(extractRevisedEssay(outcome.result));
+    if (!candidate) return null;
+    const candidateAssessment = assessLength(candidate, essay, essays);
+    if (!isBetterLength(candidateAssessment, assessment)) return null;
+    return {
+      text: candidate,
+      assessment: candidateAssessment,
+      notes: typeof outcome.result?.notes === 'string' ? outcome.result.notes : '',
+      gaps: Array.isArray(outcome.result?.gaps_for_applicant) ? outcome.result.gaps_for_applicant : [],
+    };
+  };
+
+  /** Records one AI action against this essay and refreshes the visible history. */
+  const recordProgress = (essayId, entry) => {
+    const next = pushEssayProgress(essayId, entry);
+    setProgress(next);
+    return next;
+  };
+
   const handleGenerate = async () => {
     if (!selectedEssay) return;
     if (!guardLive('Generate a draft')) return;
@@ -439,41 +522,87 @@ export default function EssayBuilder() {
       });
       return;
     }
+    const before = selectedEssay.content || '';
     setBusy('generate');
     setReviewResult(null);
     setGenAnalysis(null);
+    setRevision(null);
+    setLengthIssue(null);
     try {
-      const { profileText, materialsText, knowledgeText, applicantText } = await gatherContext();
+      const context = await gatherContext();
       const outcome = await runAI({
         prompt: buildGeneratePrompt({
           essay: selectedEssay, university: selectedUni, platform,
-          profileText, knowledgeText, materialsText, applicantText, allEssays: essays,
+          profileText: context.profileText, knowledgeText: context.knowledgeText,
+          materialsText: context.materialsText, applicantText: context.applicantText,
+          allEssays: essays,
         }),
         response_json_schema: GENERATE_SCHEMA,
+        temperature: AI_TEMPERATURES.generate,
       }, { fallbackTitle: 'Could not generate a draft' });
 
       if (!isLiveOutcome(outcome)) return;
-      const result = outcome.result;
-      const text = typeof result === 'string' ? result : result.essay;
-      if (!text || !String(text).trim()) {
+      const result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
+      let text = cleanEssayText(extractRevisedEssay(outcome.result));
+      if (!text) {
         toast.error('The AI returned an empty draft', { description: 'Try again, or lower the length you asked for.' });
         return;
       }
-      const analysis = result.essay_analysis || '';
+      let assessment = assessLength(text, selectedEssay, essays);
+      let repaired = false;
+      let repairNotes = '';
+      if (assessment.needsWork || outcome.meta?.truncated) {
+        setBusy('repair');
+        const fix = await repairLength({ essay: selectedEssay, context, text, assessment, mode: 'generate' });
+        if (fix) {
+          repairNotes = `The first answer came back at ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}${outcome.meta?.truncated ? ' and was cut off by the model' : ''}; Atlas sent it back and the model returned ${fix.assessment.count.toLocaleString()}.`;
+          text = fix.text;
+          assessment = fix.assessment;
+          repaired = true;
+          if (fix.gaps.length) {
+            result.gaps_for_applicant = [...(Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : []), ...fix.gaps];
+          }
+        }
+      }
+
+      const analysis = [result.essay_analysis || '', repairNotes].filter(Boolean).join('\n\n');
       const gaps = Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : [];
       setGenAnalysis(analysis);
       setGenGaps(gaps);
-      const now = new Date().toISOString();
-      setGenCachedAt(now);
+      setGenCachedAt(new Date().toISOString());
       // Persist generation analysis so it survives navigation
       setCachedEssayGen(selectedEssay.id, { analysis, gaps });
-      rememberForUndo(selectedEssay, { content: selectedEssay.content || '', status: selectedEssay.status }, 'draft written');
-      await persist({ content: String(text).trim(), status: 'drafting' });
-      toast.success('Draft written', {
-        description: gaps.length
-          ? 'Check the "fill these in" list — the AI deliberately left gaps rather than inventing your life.'
-          : 'Read it, then edit it in your own voice.',
+
+      if (before.trim()) {
+        setEssaySnapshot(selectedEssay.id, { content: before, label: 'the text before this draft', review: reviewResult });
+        setSnapshot(getEssaySnapshot(selectedEssay.id));
+      }
+      rememberForUndo(selectedEssay, { content: before, status: selectedEssay.status }, 'draft written');
+      await persist({ content: text, status: 'drafting' });
+
+      recordProgress(selectedEssay.id, {
+        action: 'generate',
+        unit: assessment.unit,
+        wordsBefore: assessLength(before, selectedEssay, essays).count,
+        wordsAfter: assessment.count,
+        scoreBefore: reviewResult?.overall_score ?? null,
+        scoreAfter: null,
+        note: repaired ? 'length repaired automatically' : assessment.ok ? 'inside the target band' : 'still outside the target band',
       });
+      setLengthIssue(assessment.ok ? null : assessment);
+
+      if (!assessment.ok) {
+        toast.warning(`Draft written, but it is ${assessment.shortfall ? `${assessment.shortfall.toLocaleString()} ${formatLimit(assessment.unit)} short` : `${assessment.overage.toLocaleString()} ${formatLimit(assessment.unit)} over`}`, {
+          description: `${assessment.message} Use “Fix length” below — Atlas will ask the model to finish the job properly.`,
+          duration: 12000,
+        });
+      } else {
+        toast.success(`Draft written — ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}`, {
+          description: gaps.length
+            ? 'Check the "fill these in" list — the AI deliberately left gaps rather than inventing your life.'
+            : 'Inside the target band. Read it, then edit it in your own voice.',
+        });
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -481,69 +610,325 @@ export default function EssayBuilder() {
     }
   };
 
+  /**
+   * Runs the admissions review and stores it. Takes the essay explicitly so the
+   * automatic re-review after an edit can score the text that was just saved
+   * rather than the copy still held in this render's state.
+   */
+  const runReview = async (essayRow, previousReview = null) => {
+    const target = essayRow || selectedEssay;
+    if (!target?.content?.trim()) return null;
+    const context = await gatherContext();
+    const rows = essays.map((row) => (row.id === target.id ? { ...row, content: target.content } : row));
+    const outcome = await runAI({
+      prompt: buildReviewPrompt({
+        essay: target, university: selectedUni, platform,
+        knowledgeText: context.knowledgeText, reviewNotes: target.review_notes,
+        allEssays: rows, materialsText: context.materialsText,
+        profileText: context.profileText, applicantText: context.applicantText,
+        previousReview,
+      }),
+      response_json_schema: REVIEW_SCHEMA,
+      temperature: AI_TEMPERATURES.review,
+    }, { fallbackTitle: 'The review could not be completed' });
+
+    if (!isLiveOutcome(outcome)) return null;
+    // Atlas measures the length itself: a model's own word count disagrees with
+    // the editor often enough that it cannot be shown to the applicant.
+    const measured = withMeasuredLength(outcome.result, target, rows);
+    setReviewResult(measured);
+    setReviewCachedAt(new Date().toISOString());
+    setCachedEssayReview(target.id, measured);
+    return measured;
+  };
+
   const handleReview = async () => {
     if (!selectedEssay?.content) return;
     if (!guardLive('The admissions review')) return;
+    const prior = reviewResult;
     setBusy('review');
     setReviewResult(null);
     try {
-      const { profileText, materialsText, knowledgeText, applicantText } = await gatherContext();
-      const outcome = await runAI({
-        prompt: buildReviewPrompt({
-          essay: selectedEssay, university: selectedUni, platform,
-          knowledgeText, reviewNotes: selectedEssay.review_notes, allEssays: essays,
-          materialsText, profileText, applicantText,
-        }),
-        response_json_schema: REVIEW_SCHEMA,
-      }, { fallbackTitle: 'The review could not be completed' });
-
-      if (!isLiveOutcome(outcome)) return;
-      const result = outcome.result;
-      setReviewResult(result);
-      setReviewCachedAt(new Date().toISOString());
-      setCachedEssayReview(selectedEssay.id, result);
+      const measured = await runReview(selectedEssay, prior);
+      if (!measured) {
+        // A review that produced nothing must not leave the panel empty.
+        if (prior) setReviewResult(prior);
+        return;
+      }
+      setPreviousScore(prior?.overall_score ?? null);
       rememberForUndo(selectedEssay, { status: selectedEssay.status, review_notes: selectedEssay.review_notes || '' }, 'review saved');
-      await persist({ status: 'in_review', review_notes: JSON.stringify(result, null, 2) });
-      toast.success(`Reviewed: ${result.overall_score}/10`, {
-        description: `${(result.weaknesses || []).length} weakness(es) and ${(result.priority_improvements || []).length} priority fix(es) found.`,
+      await persist({ status: 'in_review', review_notes: JSON.stringify(measured, null, 2) });
+      recordProgress(selectedEssay.id, {
+        action: 'review',
+        unit: measured.unit,
+        wordsBefore: measured.word_count,
+        wordsAfter: measured.word_count,
+        scoreBefore: prior?.overall_score ?? null,
+        scoreAfter: measured.overall_score,
+      });
+      const delta = prior?.overall_score > 0 ? Math.round((measured.overall_score - prior.overall_score) * 10) / 10 : null;
+      toast.success(`Reviewed: ${measured.overall_score}/10${delta === null ? '' : ` (${delta > 0 ? '+' : ''}${delta})`}`, {
+        description: `${(measured.weaknesses || []).length} weakness(es) and ${(measured.priority_improvements || []).length} priority fix(es) found.`,
       });
     } catch (e) {
       console.error(e);
+      // A failed re-review must not cost the applicant the review they had.
+      if (prior) setReviewResult(prior);
     } finally {
       setBusy(null);
     }
   };
 
   const handlePolish = async () => {
-    if (!selectedEssay?.content) return;
+    if (!selectedEssay?.content?.trim()) return;
     if (!guardLive('Apply edits')) return;
     if (!confirmReplace(selectedEssay, 'the edits are applied')) return;
+    const before = selectedEssay.content || '';
+    const priorReview = reviewResult;
     setBusy('polish');
+    setLengthIssue(null);
     try {
-      const { profileText, materialsText, knowledgeText, applicantText } = await gatherContext();
+      const context = await gatherContext();
       const outcome = await runAI({
         prompt: buildPolishPrompt({
           essay: selectedEssay, university: selectedUni, platform,
-          reviewResult, knowledgeText, allEssays: essays,
-          materialsText, profileText, applicantText,
+          reviewResult: priorReview, knowledgeText: context.knowledgeText, allEssays: essays,
+          materialsText: context.materialsText, profileText: context.profileText,
+          applicantText: context.applicantText,
         }),
-      }, { fallbackTitle: 'Could not polish this essay' });
+        response_json_schema: POLISH_SCHEMA,
+        temperature: AI_TEMPERATURES.polish,
+      }, { fallbackTitle: 'Could not edit this essay' });
 
       if (!isLiveOutcome(outcome)) return;
-      const result = outcome.result;
-      const text = typeof result === 'string' ? result : result.essay;
-      if (!text || !String(text).trim()) {
+      const result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
+      let text = cleanEssayText(extractRevisedEssay(outcome.result));
+      if (!text) {
         toast.error('The AI returned an empty revision', { description: 'Your draft was left untouched.' });
         return;
       }
-      rememberForUndo(selectedEssay, { content: selectedEssay.content || '', status: selectedEssay.status }, 'edits applied');
-      await persist({ content: String(text).trim(), status: 'polishing' });
-      toast.success('Revision applied', { description: 'Read the diff carefully — the editor will have cut aggressively.' });
+      let assessment = assessLength(text, selectedEssay, essays);
+      let repaired = false;
+      if (assessment.needsWork || outcome.meta?.truncated) {
+        // An edit that shrinks the essay below its target band is the exact
+        // failure this feature exists to prevent, so it is repaired before it
+        // is ever shown as finished.
+        setBusy('repair');
+        const firstStats = diffStats(diffText(before, text).ops);
+        const fix = await repairLength({
+          essay: selectedEssay, context, text, assessment, mode: 'edit',
+          originalText: before, preservedRatio: firstStats.preservedRatio,
+        });
+        if (fix) {
+          text = fix.text;
+          assessment = fix.assessment;
+          repaired = true;
+        }
+      }
+
+      const { ops } = diffText(before, text);
+      const stats = diffStats(ops);
+      const rewritten = isAggressiveRewrite(stats);
+
+      setEssaySnapshot(selectedEssay.id, { content: before, label: 'your version before this edit', review: priorReview });
+      setSnapshot(getEssaySnapshot(selectedEssay.id));
+      rememberForUndo(selectedEssay, { content: before, status: selectedEssay.status }, 'edits applied');
+      await persist({ content: text, status: 'polishing' });
+
+      setRevision({
+        before,
+        after: text,
+        ops,
+        stats,
+        unit: assessment.unit,
+        changes: Array.isArray(result.changes) ? result.changes : [],
+        why: result.why_it_scores_higher || '',
+        summary: result.summary_of_edit || '',
+        protectedItems: Array.isArray(result.protected) ? result.protected : [],
+        gaps: Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : [],
+        preservedEstimate: Number(result.preserved_estimate) > 0 ? Number(result.preserved_estimate) : null,
+        at: new Date().toISOString(),
+        repaired,
+      });
+      setLengthIssue(assessment.ok ? null : assessment);
+
+      if (rewritten) {
+        toast.warning('The editor rewrote most of your draft', {
+          description: `Only ${Math.round(stats.preservedRatio * 100)}% of your words survived, and Atlas asked it to keep at least 80%. The comparison below highlights everything it touched — restore your version if you prefer it.`,
+          duration: 14000,
+        });
+      } else {
+        toast.success('Revision applied', {
+          description: `${stats.kept} of your ${stats.oldTotal} ${formatLimit(assessment.unit)} kept, ${stats.added} added, ${stats.removed} cut. Every change is highlighted below.`,
+        });
+      }
+
+      // The whole point of an edit is a better essay, so measure it on the same
+      // rubric instead of leaving the applicant to guess.
+      const updatedEssay = { ...selectedEssay, content: text, status: 'polishing' };
+      let nextReview = null;
+      if (autoReview && hasLiveModel()) {
+        setBusy('re_review');
+        try {
+          nextReview = await runReview(updatedEssay, priorReview);
+          if (nextReview) {
+            setPreviousScore(priorReview?.overall_score ?? null);
+            await persist({ status: 'in_review', review_notes: JSON.stringify(nextReview, null, 2) });
+          } else if (priorReview) {
+            setReviewResult(priorReview);
+          }
+        } catch (e) {
+          // The edit itself succeeded and is already on screen; a failed
+          // re-review is reported, not allowed to hide the diff.
+          console.error(e);
+          if (priorReview) setReviewResult(priorReview);
+          toast.warning('The edit was applied, but the automatic re-score failed', {
+            description: 'Use "Admissions review" to score it again.',
+            duration: 10000,
+          });
+        }
+      }
+
+      recordProgress(selectedEssay.id, {
+        action: 'edit',
+        unit: assessment.unit,
+        wordsBefore: assessLength(before, selectedEssay, essays).count,
+        wordsAfter: assessment.count,
+        scoreBefore: priorReview?.overall_score ?? null,
+        scoreAfter: nextReview?.overall_score ?? null,
+        preservedRatio: stats.preservedRatio,
+        note: repaired ? 'length repaired automatically' : rewritten ? 'rewrote more than expected' : '',
+      });
+
+      if (nextReview) {
+        const beforeScore = Number(priorReview?.overall_score) || 0;
+        const afterScore = Number(nextReview.overall_score) || 0;
+        const delta = beforeScore > 0 ? Math.round((afterScore - beforeScore) * 10) / 10 : null;
+        if (delta !== null && delta < 0) {
+          toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
+            description: 'Restore your version below, or apply edits again — the new review says exactly what is wrong now.',
+            duration: 14000,
+          });
+        } else if (delta !== null) {
+          toast.success(`Re-scored after the edit: ${beforeScore} → ${afterScore}/10 (+${delta})`, {
+            description: 'Same rubric, same scale, measured on the text now in the editor.',
+          });
+        } else {
+          toast.success(`Re-scored after the edit: ${afterScore}/10`);
+        }
+      }
     } catch (e) {
       console.error(e);
     } finally {
       setBusy(null);
     }
+  };
+
+  /** Brings the current text to its length contract on demand. */
+  const handleFixLength = async () => {
+    if (!selectedEssay?.content?.trim()) return;
+    if (!guardLive('The length fix')) return;
+    const before = selectedEssay.content;
+    const assessment = assessLength(before, selectedEssay, essays);
+    if (assessment.ok) {
+      toast.success('This draft is already inside its target band', { description: assessment.message });
+      setLengthIssue(null);
+      return;
+    }
+    setBusy('repair');
+    try {
+      const context = await gatherContext();
+      const fix = await repairLength({ essay: selectedEssay, context, text: before, assessment, mode: 'fix' });
+      if (!fix) {
+        toast.error('The model could not bring this to length', {
+          description: 'Its second answer was not closer to the target band, so Atlas changed nothing. Try again, or add the missing detail yourself.',
+          duration: 10000,
+        });
+        return;
+      }
+      const { ops } = diffText(before, fix.text);
+      const stats = diffStats(ops);
+      setEssaySnapshot(selectedEssay.id, { content: before, label: 'before the length fix', review: reviewResult });
+      setSnapshot(getEssaySnapshot(selectedEssay.id));
+      rememberForUndo(selectedEssay, { content: before, status: selectedEssay.status }, 'length fixed');
+      await persist({ content: fix.text, status: selectedEssay.status === 'not_started' ? 'drafting' : selectedEssay.status });
+      setRevision({
+        before, after: fix.text, ops, stats, unit: fix.assessment.unit,
+        changes: [], why: fix.notes || '', gaps: fix.gaps || [], at: new Date().toISOString(),
+      });
+      setLengthIssue(fix.assessment.ok ? null : fix.assessment);
+      recordProgress(selectedEssay.id, {
+        action: 'repair',
+        unit: fix.assessment.unit,
+        wordsBefore: assessment.count,
+        wordsAfter: fix.assessment.count,
+        scoreBefore: reviewResult?.overall_score ?? null,
+        scoreAfter: null,
+        note: 'length fixed',
+      });
+      toast.success(`Now ${fix.assessment.count.toLocaleString()} ${formatLimit(fix.assessment.unit)}`, {
+        description: fix.assessment.message,
+      });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Puts the applicant's own pre-edit text back, and the review that went with it. */
+  const handleRestoreSnapshot = async () => {
+    if (!selectedEssay || !snapshot?.content) return;
+    if (!window.confirm('Put your own version back? The AI revision will be replaced in the editor.')) return;
+    const replaced = selectedEssay.content || '';
+    const restored = snapshot.content;
+    setBusy('restore');
+    try {
+      rememberForUndo(selectedEssay, { content: replaced, status: selectedEssay.status }, 'AI revision re-applied');
+      await persist({ content: restored, status: 'polishing' });
+      const assessment = assessLength(restored, selectedEssay, essays);
+      if (snapshot.review) {
+        const measured = withMeasuredLength(snapshot.review, { ...selectedEssay, content: restored }, essays);
+        setReviewResult(measured);
+        setCachedEssayReview(selectedEssay.id, measured);
+        setPreviousScore(null);
+      }
+      clearEssaySnapshot(selectedEssay.id);
+      setSnapshot(null);
+      setRevision(null);
+      setLengthIssue(assessment.ok ? null : assessment);
+      recordProgress(selectedEssay.id, {
+        action: 'restore',
+        unit: assessment.unit,
+        wordsBefore: assessLength(replaced, selectedEssay, essays).count,
+        wordsAfter: assessment.count,
+        scoreBefore: reviewResult?.overall_score ?? null,
+        scoreAfter: snapshot.review?.overall_score ?? null,
+        note: 'your own version put back',
+      });
+      toast.success('Your version is back in the editor');
+    } catch (e) {
+      toast.error('Could not restore that version', { description: e.message });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Rebuilds the comparison from the stored snapshot, e.g. after a reload. */
+  const showSnapshotDiff = () => {
+    if (!selectedEssay || !snapshot?.content) return;
+    const current = selectedEssay.content || '';
+    const { ops } = diffText(snapshot.content, current);
+    setRevision({
+      before: snapshot.content,
+      after: current,
+      ops,
+      stats: diffStats(ops),
+      unit: limitUnitFor(selectedEssay),
+      changes: [],
+      at: snapshot.savedAt || null,
+      fromSnapshot: true,
+    });
   };
 
   const handleDeleteEssay = async (essay) => {
@@ -551,10 +936,16 @@ export default function EssayBuilder() {
     try {
       await base44.entities.Essay.delete(essay.id);
       setEssays((prev) => prev.filter((e) => e.id !== essay.id));
+      // Nothing cached for a deleted essay should outlive it in this browser.
+      clearEssaySnapshot(essay.id);
+      clearEssayProgress(essay.id);
+      clearCachedEssayReview(essay.id);
+      clearCachedEssayGen(essay.id);
       if (selectedEssay?.id === essay.id) {
         setSelectedEssay(null);
         setReviewResult(null);
         setGenAnalysis(null);
+        loadEssayLocalState(null);
       }
       toast.success('Essay deleted');
     } catch (e) {
@@ -656,6 +1047,9 @@ export default function EssayBuilder() {
   const limit = selectedEssay ? Number(selectedEssay.word_limit) || 0 : 0;
   const overBy = currentCount - limit;
   const unitLabel = formatLimit(unit);
+  // The draft judged against its length contract, not just against its ceiling.
+  const lengthState = selectedEssay ? assessLength(selectedEssay.content || '', selectedEssay, essays) : null;
+  const editing = busy === 'polish' || busy === 'repair' || busy === 're_review';
 
   const renderEssayItem = (essay) => {
     const u = limitUnitFor(essay);
@@ -972,9 +1366,23 @@ export default function EssayBuilder() {
                   {busy === 'review' ? 'Reviewing…' : 'Admissions review'}
                 </Button>
                 <Button onClick={handlePolish} disabled={busy !== null || !selectedEssay.content} variant="outline">
-                  {busy === 'polish' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
-                  {busy === 'polish' ? 'Editing…' : 'Apply edits'}
+                  {editing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
+                  {busy === 'polish' ? 'Editing…'
+                    : busy === 'repair' ? 'Finishing the length…'
+                      : busy === 're_review' ? 'Re-scoring…'
+                        : 'Apply edits'}
                 </Button>
+                {lengthState?.needsWork && (
+                  <Button
+                    onClick={handleFixLength}
+                    disabled={busy !== null}
+                    variant="outline"
+                    className="border-amber-300 text-amber-800 hover:bg-amber-50 hover:text-amber-900"
+                  >
+                    {busy === 'repair' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Ruler className="w-4 h-4 mr-2" />}
+                    {lengthState.state === 'over' ? 'Trim to the limit' : 'Finish the length'}
+                  </Button>
+                )}
                 <div className="flex items-center gap-2 ml-auto">
                   {dirty && <span className="text-[11px] text-foreground/35">Unsaved — autosaving…</span>}
                   <Button onClick={handleSave} disabled={saving || !dirty} variant="ghost" size="sm">
@@ -985,6 +1393,32 @@ export default function EssayBuilder() {
                     <Trash2 className="w-4 h-4 mr-1.5" /> Delete
                   </Button>
                 </div>
+              </div>
+
+              <div className="flex items-center gap-4 flex-wrap text-xs">
+                <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                  <Switch
+                    checked={autoReview}
+                    onCheckedChange={(value) => { setAutoReview(value); setAutoReviewAfterEdit(value); }}
+                    disabled={busy !== null}
+                  />
+                  <span className="text-foreground/55">Re-score automatically after an edit</span>
+                </label>
+                <span className="text-foreground/30 hidden sm:inline">
+                  So you can see whether the edit actually raised the score.
+                </span>
+                {snapshot?.content && snapshot.content !== (selectedEssay.content || '') && !revision && (
+                  <div className="flex items-center gap-3 ml-auto">
+                    <button onClick={showSnapshotDiff} className="inline-flex items-center gap-1.5 text-accent hover:underline">
+                      <FileDiff className="w-3.5 h-3.5" />
+                      Compare with {snapshot.label || 'the previous version'}
+                    </button>
+                    <button onClick={handleRestoreSnapshot} disabled={busy !== null} className="inline-flex items-center gap-1.5 text-foreground/45 hover:text-foreground hover:underline">
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Restore it
+                    </button>
+                  </div>
+                )}
               </div>
               {(undoStep?.essayId === selectedEssay.id || actionHintFor(selectedEssay)) && (
                 <div className="flex items-center gap-3 flex-wrap text-xs">
@@ -1050,15 +1484,11 @@ export default function EssayBuilder() {
                 </div>
               ) : (
               <div className="bg-card border border-border rounded-xl p-5">
-                <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
-                  <span className="text-sm font-medium text-foreground/50">Draft</span>
-                  <span className={`text-xs font-medium ${overBy > 0 ? 'text-destructive' : 'text-foreground/40'}`}>
-                    {currentCount.toLocaleString()} / {limit ? limit.toLocaleString() : '—'} {unitLabel}
-                    {overBy > 0 && ` · ${overBy.toLocaleString()} over`}
-                    {unit === 'characters' && limit > 0 && (
-                      <span className="text-foreground/30"> · min {UCAS_RULES.perAnswerMinChars} per answer</span>
-                    )}
-                  </span>
+                <div className="flex items-start justify-between mb-3 gap-4 flex-wrap">
+                  <span className="text-sm font-medium text-foreground/50 shrink-0">Draft</span>
+                  <div className="flex-1 min-w-[240px]">
+                    <LengthMeter assessment={lengthState} />
+                  </div>
                 </div>
                 {overBy > 0 && (
                   <div className="flex items-start gap-2 mb-3 p-2.5 rounded-lg bg-red-50 border border-red-200">
@@ -1077,10 +1507,67 @@ export default function EssayBuilder() {
                   rows={26}
                   className="w-full rounded-lg border border-input bg-background px-4 py-3 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-ring transition placeholder:text-foreground/25 font-body"
                 />
+                {lengthState?.needsWork && lengthState.count > 0 && (
+                  <div className="flex items-start gap-2.5 mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200">
+                    <Ruler className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="text-xs text-amber-800 leading-relaxed">
+                        {lengthState.state === 'over'
+                          ? `${lengthState.message} Cut the sentences that only announce meaning.`
+                          : `${lengthState.message} A draft this far under its limit reads as unfinished, whatever the prose is like.`}
+                      </p>
+                      <button
+                        onClick={handleFixLength}
+                        disabled={busy !== null}
+                        className="mt-1.5 text-xs font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700 disabled:opacity-50"
+                      >
+                        {busy === 'repair' ? 'Working…' : lengthState.state === 'over' ? 'Trim it to the limit' : 'Ask the AI to finish the length'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
               )}
 
-              <EssayReviewPanel reviewResult={reviewResult} cachedAt={reviewCachedAt} onPolish={handlePolish} polishing={busy === 'polish'} />
+              {lengthIssue && !revision && (
+                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 border border-amber-200">
+                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-800 leading-relaxed">
+                    The AI answer did not meet the length contract: {lengthIssue.message}
+                    {lengthIssue.shared
+                      ? ' This box shares its budget with the other two UCAS answers.'
+                      : ''}
+                  </p>
+                </div>
+              )}
+
+              {revision && (
+                <EssayDiffView
+                  revision={revision}
+                  restoring={busy === 'restore'}
+                  onKeep={() => setRevision(null)}
+                  onRestore={revision.fromSnapshot ? null : (snapshot?.content ? handleRestoreSnapshot : null)}
+                />
+              )}
+
+              <EssayReviewPanel
+                reviewResult={reviewResult}
+                cachedAt={reviewCachedAt}
+                previousScore={previousScore}
+                onPolish={handlePolish}
+                polishing={editing}
+                onReReview={selectedEssay.content ? handleReview : null}
+                reReviewing={busy === 'review'}
+              />
+
+              <RevisionProgress
+                entries={progress}
+                onClear={() => {
+                  clearEssayProgress(selectedEssay.id);
+                  setProgress([]);
+                  toast.success('Progress history cleared for this essay');
+                }}
+              />
             </div>
           )}
         </div>

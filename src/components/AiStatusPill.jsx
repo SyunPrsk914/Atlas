@@ -4,7 +4,12 @@ import { badgeVariants } from '@/components/ui/badge';
 import { refreshAIStatus } from '@/lib/ai';
 import AiSetupDialog from '@/components/AiSetupDialog';
 
-/** Clickable status + setup entry point for local Ollama and optional hosted AI. */
+/**
+ * Clickable AI status + setup entry point.
+ *
+ * Two honest states: NaraRouter is connected, or it is not and Atlas is showing
+ * labeled demo output. It never says "connected" on a deployment with no key.
+ */
 export default function AiStatusPill() {
   const [status, setStatus] = useState(null);
   const [open, setOpen] = useState(false);
@@ -25,41 +30,34 @@ export default function AiStatusPill() {
   }, []);
 
   let label = 'Checking AI…';
-  let detail = 'Check your local Ollama model or optional hosted provider.';
+  let detail = 'Reading this deployment\'s AI configuration.';
   let tone = 'text-foreground/45';
   let Icon = Loader2;
 
   if (status) {
-    if (status.provider === 'ollama') {
-      if (!status.reachable || status.modelInstalled === false) {
-        label = 'Ollama offline';
-        detail = status.message || 'The selected local model cannot be reached.';
-        tone = 'text-amber-700 border-amber-300 bg-amber-50';
-        Icon = AlertTriangle;
-      } else {
-        label = `Ollama · ${status.model || 'local'}`;
-        detail = 'Local model selected. Calls go directly from this browser to your computer.';
-        tone = 'text-green-700 border-green-300 bg-green-50';
-        Icon = CheckCircle2;
-      }
-    } else if (status.mode === 'hosted' && status.configured) {
-      const providerName = status.provider === 'nararouter' ? 'NaraRouter' : status.provider || 'Hosted';
-      label = `${providerName} · capped by provider`;
+    const name = status.providerLabel || 'NaraRouter';
+    if (status.mode === 'hosted' && status.configured) {
+      label = status.model ? `${name} · ${status.model}` : name;
       detail = status.grounding
-        ? 'Gemini grounding is available when a Google Search-grounded request succeeds.'
-        : 'Hosted provider selected. Its own pricing, quotas, and errors apply.';
+        ? 'Connected. Google Search grounding is available when a grounded request succeeds.'
+        : 'Connected. Atlas sends AI calls one at a time, in the order you clicked them. The provider\'s own plan limits and errors apply.';
       tone = 'text-green-700 border-green-300 bg-green-50';
       Icon = status.grounding ? Globe : CheckCircle2;
     } else if (status.mode === 'hosted') {
-      label = 'Hosted AI unavailable';
-      detail = status.message || 'No hosted provider key is configured on this deployment.';
+      label = 'AI not connected';
+      detail = status.message || 'NaraRouter is selected but this deployment has no API key. Add NARAROUTER_API_KEY and redeploy.';
       tone = 'text-amber-700 border-amber-300 bg-amber-50';
       Icon = AlertTriangle;
     } else {
       label = 'AI setup · Demo';
-      detail = 'Demo output is clearly labeled. Connect local Ollama to generate real output.';
+      detail = status.configured
+        ? 'Demo output is active and clearly labeled. Select NaraRouter in AI setup for real generation.'
+        : 'Demo output is active: this deployment has no AI key yet. Add NARAROUTER_API_KEY (see AI setup), or keep using Atlas with labeled placeholder output.';
       tone = 'text-amber-700 border-amber-300 bg-amber-50';
       Icon = Sparkles;
+    }
+    if (status.lastCallError) {
+      detail = `Last AI call failed: ${status.lastCallError}. ${detail}`;
     }
   }
 

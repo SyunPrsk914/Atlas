@@ -352,7 +352,7 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
   const integrations = {
     Core: {
       // Optional hosted compatibility path -> POST /api/invoke-llm. Current
-      // pages route through runAI and use local Ollama by default.
+      // pages route through runAI, which calls NaraRouter.
       InvokeLLM: (params) => invokeLLM(params, getAuthToken),
 
       // Additive: same call, but also returns the server's `meta` block so the

@@ -135,3 +135,110 @@ export function setCachedEssayGen(essayId, payload) {
     savedAt: new Date().toISOString(),
   });
 }
+
+export function clearCachedEssayGen(essayId) {
+  if (!essayId) return;
+  removeStored(essayGenKey(essayId));
+}
+
+// --- Pre-AI snapshots (per essay) -------------------------------------------
+// Every time Atlas replaces text with a model answer it keeps the text it
+// replaced. That is what powers "restore the version before this edit" and the
+// highlighted original -> edited comparison, and it means an aggressive AI edit
+// can never be the end of a draft the applicant wrote themselves.
+
+function essaySnapshotKey(essayId) {
+  return `essaySnapshot:${essayId}`;
+}
+
+export function getEssaySnapshot(essayId) {
+  if (!essayId) return null;
+  const saved = getStored(essaySnapshotKey(essayId), null);
+  return saved && typeof saved.content === 'string' ? saved : null;
+}
+
+export function setEssaySnapshot(essayId, { content, label, review }) {
+  if (!essayId) return;
+  setStored(essaySnapshotKey(essayId), {
+    content: String(content || ''),
+    label: String(label || 'previous version'),
+    review: review || null,
+    savedAt: new Date().toISOString(),
+  });
+}
+
+export function clearEssaySnapshot(essayId) {
+  if (!essayId) return;
+  removeStored(essaySnapshotKey(essayId));
+}
+
+// --- Score progression (per essay) ------------------------------------------
+// One entry per AI action that changed the text, so the applicant can see
+// whether editing is actually improving the essay instead of guessing from two
+// reviews that may be days apart.
+
+const PROGRESS_LIMIT = 20;
+
+function essayProgressKey(essayId) {
+  return `essayProgress:${essayId}`;
+}
+
+export function getEssayProgress(essayId) {
+  if (!essayId) return [];
+  const saved = getStored(essayProgressKey(essayId), []);
+  return Array.isArray(saved) ? saved : [];
+}
+
+/**
+ * @param {object} entry { action, at, wordsBefore, wordsAfter, scoreBefore,
+ *   scoreAfter, preservedRatio, note }
+ */
+export function pushEssayProgress(essayId, entry) {
+  if (!essayId || !entry) return [];
+  const next = [...getEssayProgress(essayId), { at: new Date().toISOString(), ...entry }].slice(-PROGRESS_LIMIT);
+  setStored(essayProgressKey(essayId), next);
+  return next;
+}
+
+export function clearEssayProgress(essayId) {
+  if (!essayId) return;
+  removeStored(essayProgressKey(essayId));
+}
+
+// --- Editor preferences ------------------------------------------------------
+const AUTO_REVIEW_KEY = 'pref:autoReviewAfterEdit';
+
+/**
+ * Whether "Apply edits" re-runs the admissions review by itself. On by default:
+ * the whole point of an edit is a better score, and without an automatic
+ * re-review the applicant cannot tell an improvement from model noise.
+ */
+export function getAutoReviewAfterEdit() {
+  const saved = getStored(AUTO_REVIEW_KEY, null);
+  return saved === null ? true : saved === true || saved === 'true';
+}
+
+export function setAutoReviewAfterEdit(value) {
+  setStored(AUTO_REVIEW_KEY, !!value);
+}
+
+/**
+ * Removes everything this browser has cached for an essay that no longer exists.
+ *
+ * Deleting a university deletes its school-specific essays with it, and a
+ * university row can also be removed from the Universities page. Without this,
+ * reviews, snapshots, and history for deleted essays would sit in localStorage
+ * forever and could be restored onto a different essay that reuses the id.
+ *
+ * @param {string|string[]} essayIds
+ */
+export function clearEssayArtifacts(essayIds) {
+  const ids = Array.isArray(essayIds) ? essayIds : [essayIds];
+  for (const id of ids) {
+    if (!id) continue;
+    clearCachedEssayReview(id);
+    clearCachedEssayGen(id);
+    clearEssaySnapshot(id);
+    clearEssayProgress(id);
+  }
+}

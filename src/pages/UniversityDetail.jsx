@@ -16,6 +16,7 @@ import {
   findKnowledgeRecord, resolvedEssayLimit, ucasCharacterBudget, isUcasQuestion,
 } from '@/lib/essayScope';
 import { daysUntil, startOfLocalDay } from '@/lib/dates';
+import { clearEssayArtifacts } from '@/lib/persist';
 import ApplicationTimeline from '@/components/ApplicationTimeline';
 
 const categoryLabels = {
@@ -119,9 +120,12 @@ export default function UniversityDetail() {
   };
 
   const removeTask = async (taskId) => {
+    const task = tasks.find((t) => t.id === taskId);
+    if (!window.confirm(`Delete the task “${task?.title || 'this task'}”?`)) return;
     try {
       await base44.entities.RoadmapTask.delete(taskId);
       setTasks((prev) => prev.filter((t) => t.id !== taskId));
+      toast.success('Task deleted');
     } catch (e) {
       toast.error('Could not delete that task', { description: e.message });
     }
@@ -137,10 +141,19 @@ export default function UniversityDetail() {
   };
 
   const deleteEssay = async (essayId) => {
-    if (!window.confirm('Delete this essay?')) return;
+    const essay = allEssays.find((e) => e.id === essayId);
+    const written = (essay?.content || '').trim().length;
+    if (!window.confirm(
+      `Delete “${essay?.title || 'this essay'}”?`
+      + (written ? `\n\nIt has ${written.toLocaleString()} characters of writing in it, and they go with it.` : ''),
+    )) return;
     try {
       await base44.entities.Essay.delete(essayId);
       setAllEssays((prev) => prev.filter((e) => e.id !== essayId));
+      // Its cached review, draft analysis, snapshot, and history belong to a
+      // row that no longer exists.
+      clearEssayArtifacts(essayId);
+      toast.success('Essay deleted');
     } catch (e) {
       toast.error('Could not delete that essay', { description: e.message });
     }

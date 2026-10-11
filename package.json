@@ -9,7 +9,8 @@
     "lint": "eslint . --quiet",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -p ./jsconfig.json",
-    "verify": "node --import ./scripts/register-ext.mjs scripts/verify-fixes.mjs && node --import ./scripts/register-ext.mjs scripts/verify-documents.mjs",
+    "verify": "node --import ./scripts/register-ext.mjs scripts/verify-fixes.mjs && node --import ./scripts/register-ext.mjs scripts/verify-documents.mjs && node --import ./scripts/register-ext.mjs scripts/verify-quality.mjs && npm run verify:render",
+    "verify:render": "node scripts/render-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
