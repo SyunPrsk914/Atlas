@@ -408,7 +408,7 @@ await check('the part cap covers the whole reader limit', () => {
 
 await check('a document at the reader limit is analysed in full', async () => {
   const text = longParagraphs.repeat(10).slice(0, MAX_DOCUMENT_CHARS);
-  const merged = await analyzeDocument({ title: 'Full', text, runAI: async () => ({ ok: true, result: { overall_score: 6 }, meta: { provider: 'ollama' } }) });
+  const merged = await analyzeDocument({ title: 'Full', text, runAI: async () => ({ ok: true, result: { overall_score: 6 }, meta: { provider: 'nararouter' } }) });
   assert.equal(merged.coverage.complete, true);
   assert.equal(merged.coverage.parts_skipped, 0);
   assert.equal(merged.coverage.parts_attempted, merged.coverage.parts_total);
@@ -437,7 +437,7 @@ await check('model findings are placed in the whole document, and quotes match',
   const fakeRunAI = async ({ prompt }) => {
     const block = prompt.slice(prompt.indexOf('<<<TEXT') + 8, prompt.indexOf('TEXT>>>'));
     const quote = block.trim().slice(0, 12);
-    return { ok: true, result: { overall_score: 6, findings: [{ kind: 'issue', quote, offset: 0, note: 'n' }], facts: ['Ran a club'] }, meta: { provider: 'ollama', model: 'test' } };
+    return { ok: true, result: { overall_score: 6, findings: [{ kind: 'issue', quote, offset: 0, note: 'n' }], facts: ['Ran a club'] }, meta: { provider: 'nararouter', model: 'test' } };
   };
   const seen = [];
   const merged = await analyzeDocument({ title: 'T', kind: 'essay', text: paragraphs, runAI: fakeRunAI, onProgress: (p) => seen.push(p.part) });
@@ -463,7 +463,7 @@ await check('a part that fails twice is recorded, the rest still count', async (
   const flaky = async ({ prompt }) => {
     calls += 1;
     if (prompt.includes('PART 2 of')) return { ok: false, error: new Error('model timed out') };
-    return { ok: true, result: { overall_score: 7, findings: [] }, meta: { provider: 'ollama' } };
+    return { ok: true, result: { overall_score: 7, findings: [] }, meta: { provider: 'nararouter' } };
   };
   const merged = await analyzeDocument({ title: 'T', text: paragraphs, runAI: flaky });
   assert.equal(merged.coverage.complete, false);
@@ -475,7 +475,7 @@ await check('a part that fails twice is recorded, the rest still count', async (
 
 await check('a document longer than the cap says which part was skipped', async () => {
   const huge = Array.from({ length: 120 }, (_, i) => `Paragraph ${i}. ${'x'.repeat(900)}`).join('\n\n');
-  const merged = await analyzeDocument({ title: 'T', text: huge, maxParts: 10, runAI: async () => ({ ok: true, result: { overall_score: 5 }, meta: { provider: 'ollama' } }) });
+  const merged = await analyzeDocument({ title: 'T', text: huge, maxParts: 10, runAI: async () => ({ ok: true, result: { overall_score: 5 }, meta: { provider: 'nararouter' } }) });
   assert.equal(merged.coverage.complete, false);
   assert.equal(merged.coverage.parts_attempted, 10);
   assert.ok(merged.coverage.parts_skipped > 0);
@@ -484,8 +484,8 @@ await check('a document longer than the cap says which part was skipped', async 
 });
 
 await check('when every part fails, the analysis fails with the model message', async () => {
-  const failing = async () => ({ ok: false, error: new Error('Ollama is not running') });
-  await assert.rejects(analyzeDocument({ title: 'T', text: 'Short text for one part.', runAI: failing }), /Ollama is not running/);
+  const failing = async () => ({ ok: false, error: new Error('NaraRouter returned HTTP 429') });
+  await assert.rejects(analyzeDocument({ title: 'T', text: 'Short text for one part.', runAI: failing }), /NaraRouter returned HTTP 429/);
 });
 
 await check('merging ignores parts without a usable answer', () => {
@@ -530,7 +530,7 @@ function fakeModel(options = {}) {
     return {
       ok: true,
       result: { overall_score: 7, sounds_like_ai: false, findings: [{ kind: 'strength', quote: block.trim().slice(0, 10), offset: 0, note: 'works' }], facts: ['Led a robotics club'] },
-      meta: { provider: 'ollama', model: 'test' },
+      meta: { provider: 'nararouter', model: 'test' },
     };
   };
   return { runAI, prompts };
@@ -623,12 +623,12 @@ await check('a failed read for a new source records the reason and its code', as
 
 await check('analysis failure keeps the text and records the failure', async () => {
   const store = makeStore([{ id: 'j5', title: 'Statement', type: 'essay', file_url: FILE, content: null, analysis: null }]);
-  const model = fakeModel({ fail: 'Ollama is not running' });
+  const model = fakeModel({ fail: 'NaraRouter returned HTTP 429' });
   const jobs = makeJobs(store, { model, reader: { file: async () => ({ text: BODY, reader: 'pdf' }) } });
   await jobs.enqueue({ ...store.data.get('j5') }, { file: new File([new Uint8Array(4)], 'a.pdf'), force: true });
   assert.ok(decodeDocumentText(store.data.get('j5').content).text === BODY);
   assert.equal(store.data.get('j5').analysis.stage, 'analysis');
-  assert.match(store.data.get('j5').analysis.message, /Ollama is not running/);
+  assert.match(store.data.get('j5').analysis.message, /NaraRouter returned HTTP 429/);
   assert.equal(jobs.getStatus('j5').state, 'failed');
 });
 
@@ -722,10 +722,10 @@ await check('needsWork decides what opens with the page', () => {
 // 6. Demo guard
 // ---------------------------------------------------------------------------
 await check('demo mode is detected and demo output is never a live result', () => {
-  assert.equal(hasLiveModel(), false, 'no Ollama model is configured in this test process');
+  assert.equal(hasLiveModel(), false, 'no provider is configured in this test process');
   assert.equal(isLiveOutcome({ ok: true, result: { summary: 'DEMO OUTPUT' }, meta: { provider: 'demo', demo: true } }), false);
   assert.equal(isLiveOutcome({ ok: false, error: new Error('x'), meta: {} }), false);
-  assert.equal(isLiveOutcome({ ok: true, result: { summary: 'real' }, meta: { provider: 'ollama' } }), true);
+  assert.equal(isLiveOutcome({ ok: true, result: { summary: 'real' }, meta: { provider: 'nararouter' } }), true);
 });
 
 // ---------------------------------------------------------------------------

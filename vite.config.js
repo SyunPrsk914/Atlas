@@ -22,6 +22,7 @@ function vercelApiDevPlugin() {
   const routes = {
     '/api/invoke-llm': () => import('./api/invoke-llm.js').then((m) => m.handleInvokeLLM),
     '/api/status': () => import('./api/status.js').then((m) => m.handleStatus),
+    '/api/models': () => import('./api/models.js').then((m) => m.handleModels),
     '/api/health': () => Promise.resolve(async (_req, res) => {
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json');

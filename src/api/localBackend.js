@@ -210,7 +210,7 @@ export function createLocalBackend() {
     integrations: {
       Core: {
         // Optional hosted path retained for Base44 SDK compatibility. Current
-        // pages use runAI, which defaults to browser-local Ollama or labeled demo.
+        // pages use runAI, which calls NaraRouter or returns labeled demo output.
         InvokeLLM: (params) => invokeLLM(params, getAuthToken),
 
         // Additive: same call, plus the server's `meta` block (grounding, demo

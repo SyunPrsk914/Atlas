@@ -12,10 +12,12 @@ import {
 } from '@/components/ui/select';
 import {
   Search, Loader2, Library, RefreshCw, Clock, Trash2, Globe,
-  ExternalLink, CheckCircle2, AlertTriangle, FileText, ChevronDown,
+  ExternalLink, CheckCircle2, AlertTriangle, FileText, ChevronDown, BookOpen,
 } from 'lucide-react';
 import { runAI, refreshAIStatus } from '@/lib/ai';
-import { getAIMode } from '@/api/ollamaClient';
+import { researchSectionInstructions, fitSummary } from '@/lib/schoolFit';
+import { findPackEntry, packRecordFields, isPackRecord } from '@/data/schoolResearch';
+import { getAIMode } from '@/api/aiProvider';
 import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
 import { fetchPublicAdmissionsPage, normalizePublicPageUrl } from '@/lib/researchSource';
 import { buildProfileContext } from '@/lib/profileContext';
@@ -40,33 +42,11 @@ ${profileText || 'No profile saved yet — research for a strong international a
 
 ${isUK ? 'This is a UK university. Cover UCAS: the course choice structure, whether it uses the 15 October 2026 or 13 January 2027 deadline, any written admissions test, any additional questionnaire or portal beyond UCAS, and the current UCAS personal statement rules (three fixed questions, 4,000 characters total including spaces, 350 characters minimum per answer, ONE statement sent to every course choice).' : `This university applies via ${platformLabel}. Say exactly which platform it uses, and which essay writing is SHARED across that platform versus specific to this school.`}
 
-Write the report in markdown using EXACTLY these section headings, in this order. Keep each section tight and factual — no filler, no restating the question.
+Write the report in markdown using EXACTLY these section headings, in this order, numbered as shown. Keep each section tight and factual — no filler, no restating the question. These headings are not decoration: the app parses them and hands each one only to the AI jobs that should see it, so a section written under the wrong heading is a section the app cannot use.
 
-## 1. ADMISSIONS OVERVIEW
-Application platform, application fee, the 2026-27 deadlines (Early/Regular/REEA/ED where relevant, with exact dates), and the most recent available acceptance rate with the year it refers to.
+${researchSectionInstructions({ major })}
 
-## 2. ACADEMIC REQUIREMENTS
-Required and recommended subjects, the middle 50% GPA range, the middle 50% SAT/ACT range if published, English proficiency minimums (IELTS/TOEFL/Duolingo, including any per-component minimum), and any test-optional policy.
-
-## 3. IDEAL STUDENT PROFILE
-What the university says it looks for, the values behind that, and what admitted students actually have in common. Distinguish "officially stated" from "widely reported".
-
-## 4. ESSAY REQUIREMENTS
-For EVERY required essay: the exact prompt text, the word or character limit, and — most importantly — what ROLE that prompt plays in the holistic review (what the committee is trying to learn from that specific question). Flag clearly which writing is shared across the whole platform and which is this school alone.
-
-## 5. PROGRAMS AND MAJORS
-${major ? `Programmes related to ${major}. ` : ''}Notable programmes, research opportunities, combined or dual degrees, and any programme-specific admissions requirements.
-
-## 6. FINANCIAL AID
-Need-blind or need-aware, specifically for international students. Scholarships open to international applicants. Average award if published.
-
-## 7. INTERVIEW
-Required, optional or none. Format, length, and what it assesses.
-
-## 8. INTERNATIONAL APPLICANT NOTES
-Anything specific to international students, plus anything that constrains this student's application given the context above.
-
-Rules: state the year for every statistic. If something is genuinely unknown, write "Not published" rather than guessing — a confident wrong number is worse than an admitted gap.`;
+Rules: state the year for every statistic. If something is genuinely unknown, write "Not published" rather than guessing — a confident wrong number is worse than an admitted gap. Every claim about traditions, buildings, clubs, events or named programmes must come from an official university page, and its URL must appear in section 11 — an applicant will put those names into a sentence, and a name the university does not recognise is worse than no name.`;
 }
 
 function addOfficialSource(prompt, sourceUrl, sourceText) {
@@ -184,6 +164,7 @@ export default function KnowledgeBase() {
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourceText, setSourceText] = useState('');
   const [fetchingSource, setFetchingSource] = useState(false);
+  const [loadingPack, setLoadingPack] = useState(false);
   const [sourceFetchMessage, setSourceFetchMessage] = useState('');
   const [sourceFetchError, setSourceFetchError] = useState('');
 
@@ -256,9 +237,16 @@ export default function KnowledgeBase() {
   // Whether THIS target already has a report. Using "is anything selected"
   // instead would label the button "Refresh" for a school that has never been
   // researched, which reads as though a report already exists.
-  const targetResearched = !!library.find(
+  const targetReport = library.find(
     (k) => universityNamesMatch(k.university_name, targetName),
-  );
+  ) || null;
+  const targetResearched = !!targetReport;
+  // The hand-researched pack Atlas ships with. It exists so a student who already
+  // knows where they are applying does not have to wait for a live AI call — or
+  // for a key — to have institutional context. It never writes over a stored
+  // report without asking.
+  const packEntry = findPackEntry(targetName);
+  const packFit = packEntry ? fitSummary(packEntry.content) : null;
 
   const chooseTarget = (name) => {
     const report = library.find((item) => universityNamesMatch(item.university_name, name));
@@ -340,8 +328,8 @@ export default function KnowledgeBase() {
       const outcome = await runAI(
         {
           prompt,
-          // Local Ollama ignores this and uses the source text above. Only a
-          // selected Gemini hosted provider may perform Google Search grounding.
+          // NaraRouter cannot ground a call in Google Search, so it uses the
+          // source text above. Atlas says so instead of implying otherwise.
           add_context_from_internet: true,
         },
         { fallbackTitle: `Research failed for ${uniName}` },
@@ -395,6 +383,41 @@ export default function KnowledgeBase() {
       }
     } finally {
       setResearching(false);
+    }
+  };
+
+  const handleLoadPack = async () => {
+    if (!packEntry) return;
+    if (targetReport) {
+      const fromPack = isPackRecord(targetReport);
+      const ok = window.confirm(
+        fromPack
+          ? `Replace the stored pack report for ${targetName} with the current version in this build?`
+          : `${targetName} already has research stored. Replace it with the Atlas research pack? The existing report will be overwritten.`,
+      );
+      if (!ok) return;
+    }
+    setLoadingPack(true);
+    try {
+      const fields = packRecordFields(packEntry, targetName || packEntry.university);
+      if (targetReport) {
+        await base44.entities.CollegeKnowledge.update(targetReport.id, fields);
+      } else {
+        await base44.entities.CollegeKnowledge.create(fields);
+      }
+      await loadLibrary();
+      setSelectedKey(targetName || packEntry.university);
+      setOpenSection(null);
+      setLastMeta(null);
+      toast.success(`Atlas research loaded for ${targetName || packEntry.university}`, {
+        description: 'Researched by hand from this university\'s own published pages. Every AI action for this school now reads it.',
+      });
+    } catch (error) {
+      toast.error('The pack report could not be saved', {
+        description: error?.message || 'Check that writes to college_knowledge are allowed, then try again.',
+      });
+    } finally {
+      setLoadingPack(false);
     }
   };
 
@@ -452,7 +475,7 @@ export default function KnowledgeBase() {
           <div>
             <p className="text-sm font-medium text-amber-800">Demo AI is active</p>
             <p className="text-sm text-amber-700/80 mt-0.5">
-              Reports and other AI outputs are clearly labeled placeholders until you connect a local Ollama model in the AI setup panel. Atlas does not require a hosted key.
+              Reports and other AI outputs are clearly labeled placeholders until NaraRouter is connected in the AI setup panel. Nothing here is saved as if it were real research.
             </p>
           </div>
         </div>
@@ -462,7 +485,7 @@ export default function KnowledgeBase() {
           <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-medium text-amber-800">Selected AI provider is unavailable</p>
-            <p className="text-sm text-amber-700/80 mt-0.5">{aiStatus.message || 'Open AI setup to check Ollama and OLLAMA_ORIGINS.'}</p>
+            <p className="text-sm text-amber-700/80 mt-0.5">{aiStatus.message || 'Open AI setup to re-check the NaraRouter key on this deployment.'}</p>
           </div>
         </div>
       )}
@@ -524,6 +547,48 @@ export default function KnowledgeBase() {
               {researching ? 'Researching…' : targetResearched ? 'Refresh research' : 'Research university'}
             </Button>
 
+            {packEntry && (
+              <div className="border border-border rounded-lg p-3 bg-muted/20 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-xs font-medium flex items-center gap-1.5">
+                    <BookOpen className="w-3.5 h-3.5 text-foreground/45" />
+                    Atlas research pack
+                  </p>
+                  <span className="text-[10px] text-foreground/40 shrink-0">
+                    {packEntry.researchedAt}
+                  </span>
+                </div>
+                <p className="text-[11px] text-foreground/55 leading-relaxed">
+                  {packEntry.major} — {packFit?.sections || 0} of 11 sections,
+                  researched by hand from {packEntry.sources.length} official pages.
+                  No AI call and no key needed.
+                </p>
+                {packFit?.values && (
+                  <p className="text-[11px] text-foreground/45 leading-relaxed">
+                    <span className="font-medium text-foreground/60">What it says they value: </span>
+                    {packFit.values}
+                  </p>
+                )}
+                <Button
+                  type="button"
+                  variant={targetResearched ? 'outline' : 'secondary'}
+                  size="sm"
+                  className="w-full"
+                  onClick={handleLoadPack}
+                  disabled={loadingPack || researching}
+                >
+                  {loadingPack ? <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> : <BookOpen className="w-3.5 h-3.5 mr-2" />}
+                  {targetResearched
+                    ? (isPackRecord(targetReport) ? 'Reload the pack version' : 'Replace stored research with the pack')
+                    : 'Load this into University Research'}
+                </Button>
+                <p className="text-[10px] text-foreground/35 leading-relaxed">
+                  Deadlines and testing policies move every year — the report tells the
+                  reader which official page to confirm each figure on.
+                </p>
+              </div>
+            )}
+
             <div className="space-y-2.5 border-t border-border pt-3">
               <label className="block text-xs font-medium text-foreground/55" htmlFor="official-admissions-url">
                 Official admissions page URL
@@ -563,7 +628,7 @@ export default function KnowledgeBase() {
                 className="text-xs"
               />
               <p className="text-[11px] text-foreground/40 leading-relaxed">
-                Atlas fetches this URL directly in your browser without cookies or a proxy. If cross-origin access fails, paste the public text. Local Ollama uses this text; only a successful Gemini call can be labeled web-grounded.
+                Atlas fetches this URL directly in your browser without cookies or a proxy. If cross-origin access fails, paste the public text. The model reads this text; NaraRouter cannot label an answer web-grounded, so Atlas never claims it did.
               </p>
             </div>
 
@@ -705,6 +770,12 @@ export default function KnowledgeBase() {
               <div className="bg-card border border-border rounded-xl p-5 flex items-start justify-between gap-4 flex-wrap">
                 <div className="min-w-0">
                   <h2 className="font-display text-xl font-semibold truncate">{selected.university_name}</h2>
+                {isPackRecord(selected) && (
+                  <p className="text-[11px] text-foreground/45 mt-0.5">
+                    From the Atlas research pack — written by hand from this university's
+                    own published pages, not generated by a model call.
+                  </p>
+                )}
                   <p className="text-xs text-foreground/40 mt-0.5">
                     Last updated {relativeTime(selected.last_updated).toLowerCase()}
                     {selected.last_updated ? ` · ${new Date(selected.last_updated).toLocaleString()}` : ''}
@@ -808,15 +879,15 @@ function AIStatusPill({ status }) {
   }
   if (status.mode === 'demo' || !status.configured) {
     return (
-      <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title="Demo output is labeled. Configure local Ollama in AI setup for real model output.">
+      <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title="Demo output is labeled. Connect NaraRouter in AI setup for real model output.">
         <AlertTriangle className="w-3 h-3" /> Demo AI
       </Badge>
     );
   }
   return (
-    <Badge variant="outline" className="gap-1.5 text-green-700 border-green-300 bg-green-50" title={status.provider === 'ollama' ? 'Local Ollama. Not web-grounded.' : 'Optional hosted provider; provider quotas apply.'}>
+    <Badge variant="outline" className="gap-1.5 text-green-700 border-green-300 bg-green-50" title="NaraRouter. Not web-grounded; the provider's own plan limits apply.">
       <CheckCircle2 className="w-3 h-3" />
-      {status.provider === 'ollama' ? 'Ollama · local' : `${status.provider} · hosted`}
+      {status.providerLabel || 'NaraRouter'}{status.model ? ` · ${status.model}` : ''}
     </Badge>
   );
 }

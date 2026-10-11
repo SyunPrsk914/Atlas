@@ -14,9 +14,9 @@ craft patterns from successful samples, and reusable tips/reference guidance.
 
 - **Frontend:** React 18 + Vite + Tailwind (shadcn/ui) — `src/`
 - **Backend:** Supabase (Postgres + Auth + Storage) — `supabase/schema.sql`
-- **AI (default):** local Ollama model on the user's computer, called directly by the browser at `127.0.0.1:11434`
-- **Optional AI:** hosted NaraRouter, Gemini, Groq, OpenRouter, OpenAI, or Anthropic key through `api/invoke-llm.js`; provider quotas and errors apply
-- **Hosting:** Vercel (static frontend + optional hosted-provider function)
+- **AI:** [NaraRouter](https://router.bynara.id/docs) through `api/invoke-llm.js`, with the key on the server and the model alias chosen in the app from `api/models.js`
+- **Other providers (optional):** a Gemini, Groq, OpenRouter, OpenAI or Anthropic key is still honoured if set; NaraRouter takes precedence
+- **Hosting:** Vercel (static frontend plus the serverless `api/*` functions)
 
 The app originally ran on Base44. A compatibility layer (`src/api/base44Client.js`)
 keeps every page's `base44.*` calls working unchanged on top of Supabase.
@@ -30,7 +30,7 @@ npm run dev            # no configuration needed -> Demo mode (browser-only data
 
 Atlas needs **Node.js 22.13 or newer** (pdf.js 6, which reads PDFs, requires it).
 
-Atlas itself does not impose an AI request, token, or daily quota. A hosted free key is still capped by its provider; the local Ollama path needs no hosted key and is not routed through Vercel. Follow **[DEPLOYMENT.md](./DEPLOYMENT.md)** for exact Ollama install, `ollama pull`, `OLLAMA_ORIGINS`, Supabase, and Vercel setup commands.
+Atlas itself does not impose an AI request, token, or daily quota — your NaraRouter plan does, and Atlas surfaces the provider's real 429 rather than working around it. Follow **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the key, the model choice, Supabase, and Vercel setup. Without a key the app runs in clearly labeled Demo mode, where every page works and no AI output is persisted as if it were real.
 
 ## Scripts
 
@@ -47,7 +47,11 @@ Atlas itself does not impose an AI request, token, or daily quota. A hosted free
 
 - **Materials** accept a PDF, Word (`.docx`), RTF, HTML or text file, or a web link. Atlas reads the whole document in the browser and starts the analysis as soon as the file is added; there is no Analyze button. Documents up to 200,000 characters (roughly 30 to 40 pages) are analysed in full, one local-model call per part of about 6,000 characters, so a long document can take many minutes. Local AI requests run one at a time, so other AI actions wait until an analysis finishes. Old `.doc` files and scanned or image-only PDFs cannot be read; Atlas says so and asks for another copy. Each material also has an **analysis lens**: Atlas can infer the purpose, or you can mark it as applicant evidence, a writing draft, academic work, personal context, a sample, tips/guide, or a college/application reference. The deep reader extracts literal facts, implied patterns, and what the source is useful for. Only a writing draft receives a writing score and line-level findings; an internal assessment, transcript, guide, or college data sheet is not treated as a personal essay. A sample contributes craft only, never another person's life.
 - The **context box** of each material holds your notes. Text that older versions kept in a "Content" box was moved there, under its own heading, without overwriting your notes. Context helps Atlas understand why a source matters but is never analyzed as document text.
-- **AI Knowledge Base** (`/ai-knowledge`) keeps dense, evidence-grounded items about you, concrete personal points, craft patterns from samples, and a separate tips/reference guidance layer. Rebuilding needs a connected local model. Items you write yourself are never removed by a rebuild, and you can edit or delete any item.
+- **AI Knowledge Base** (`/ai-knowledge`) keeps dense, evidence-grounded items about you, concrete personal points, craft patterns from samples, and a separate tips/reference guidance layer. Rebuilding needs a connected provider. Items you write yourself are never removed by a rebuild, and you can edit or delete any item.
+
+- **University Research** (`/knowledge-base`) stores one structured report per school in eleven fixed sections — admission overview, academic requirements, ideal student profile, essay requirements, programmes and majors, aid, interview, international notes, campus life and traditions, what the school's readers reward, and sources. The section list is defined once in `src/lib/schoolFit.js`: the research prompt is built from it, and every AI job receives only the sections it should judge or draft against, so a review sees the reader's lens while a draft also sees the named programmes, labs, buildings and clubs an applicant can truthfully mention.
+
+- **The Atlas research pack** (`src/data/schoolResearch/`) is thirteen universities researched by hand from their own published pages — admission sites, department sites, catalogues and bulletins — written into those same eleven sections, with every fact attributed and anything only a third party reported labelled as such. In University Research, pick a school in the pack and load it: no key, no call, no quota. It covers Stanford (Aeronautics & Astronautics), MIT (Course 16), UC Berkeley and UCLA (Aerospace Engineering), Princeton (MAE), Michigan (Aerospace), Johns Hopkins (Mechanical, aerospace focus), Caltech (Chemical Engineering with an aerospace minor), Cornell, Columbia and NYU Tandon (chemical engineering with an aerospace minor), WashU (Chemical Engineering) and Penn (Chemical & Biomolecular Engineering with a MEAM minor). Loading it never overwrites a stored report without asking.
 - Every essay has a **required root / direction** field. Use it for the moments, interests, questions, relationships, or qualities the draft must grow from. Generation treats it as a hard constraint and uses the materials to deepen it instead of choosing a random activity.
 
 ## Essay quality: what Atlas enforces
@@ -65,8 +69,8 @@ offline by `npm run verify` (`scripts/verify-quality.mjs`).
   its band is drawn as a banded meter in the editor, never as a plain
   "480 / 650" counter that reads like permission to stop.
 - **Under-length answers are sent back.** If a generation, edit, or repair comes
-  back outside the contract — or Ollama reports `done_reason: 'length'`, meaning
-  the model was cut off mid-answer — Atlas asks once more, and keeps the second
+  back outside the contract — or the provider reports `finish_reason: 'length'`,
+  meaning the model was cut off mid-answer — Atlas asks once more, and keeps the second
   answer only if it is genuinely closer to the band. A second answer that is
   shorter than the first is thrown away. Trimming a 653-word draft down to 300
   words is not accepted as a fix.
@@ -81,6 +85,17 @@ offline by `npm run verify` (`scripts/verify-quality.mjs`).
   in this browser, so the editor can show "compare with the version before the
   last edit" and restore it in one click. Snapshots and revision history live in
   localStorage (`src/lib/persist.js`) — there is no schema change for them.
+- **A review reads only the page.** An admissions officer sees the essay and the
+  rest of the submitted file; they never see your profile fields, your uploaded
+  documents, or Atlas's knowledge base. So a review scores what the sentences do,
+  and never reports "you have X but you did not include it" — that would grade the
+  draft against information the reader does not have, and it pushes applicants to
+  bolt on content and lose the essay they wrote. Everything Atlas knows about you
+  is still used, but in two places only: to flag a claim that looks invented or
+  inflated, and to offer **Ideas you could consider**, which are listed separately,
+  phrased as options, anchored to a place in the draft, and counted against no
+  score. The editing prompt receives them the same way — as options it may decline.
+
 - **Scores are comparable.** One rubric of seven dimensions (prompt alignment,
   authenticity, specificity, structure, voice, risk, length) with anchored
   definitions of what 10/10 means, the previous review embedded in the prompt so
@@ -114,7 +129,10 @@ offline by `npm run verify` (`scripts/verify-quality.mjs`).
 | `src/api/base44Client.js` | Entry point; picks Supabase or demo backend |
 | `src/api/supabaseBackend.js` | Supabase implementation of the entity/auth/storage API |
 | `src/api/localBackend.js` | Demo-mode implementation (localStorage) |
-| `src/api/ollamaClient.js` | Browser-to-local-Ollama client, setup persistence, JSON retry, and FIFO queue |
+| `src/api/aiProvider.js` | AI mode (hosted or demo), the remembered model alias, and the FIFO queue that keeps calls one at a time |
+| `src/api/llmClient.js` | Calls `/api/invoke-llm`, `/api/status` and `/api/models`; maps `finish_reason` to `meta.truncated` |
+| `src/lib/schoolFit.js` | The eleven-section shape of a university research report, and the slice each AI job is allowed to see |
+| `src/data/schoolResearch/` | The hand-researched pack: thirteen universities, official sources only, each entry parsed by `schoolFit` |
 | `src/lib/researchSource.js` | Browser fetch and text extraction for a public admissions page |
 | `src/lib/documentReader.js` | Reads an uploaded PDF, Word (.docx), RTF, HTML or text file, or a web link, into plain text (pdf.js loads only when a PDF is read) |
 | `src/lib/materialJobs.js` | Reads and analyzes each material automatically, one at a time, and keeps each saved result in step with its file |

@@ -2,9 +2,9 @@
 // saved, cached, or written into the applicant's essay, analysis, or knowledge
 // base. Kept free of app-only imports so it can be tested in Node.
 
-import { getAIMode } from '../api/ollamaClient';
+import { getAIMode } from '../api/aiProvider';
 
-/** True when a real model answers: a local Ollama model, or a hosted provider the user selected. */
+/** True when a real model answers through NaraRouter rather than labeled demo output. */
 export function hasLiveModel() {
   return getAIMode() !== 'demo';
 }

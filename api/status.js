@@ -28,7 +28,10 @@ function readEnvStatus() {
   };
 
   const explicit = (process.env.LLM_PROVIDER || '').toLowerCase();
-  const provider = explicit || Object.keys(keys).find((name) => keys[name]) || '';
+  // NaraRouter first: it is the provider Atlas is built around. The others are
+  // reported only when a deployment already has one of those keys.
+  const preference = ['nararouter', 'gemini', 'groq', 'openrouter', 'openai', 'anthropic'];
+  const provider = explicit || preference.find((name) => keys[name]) || '';
 
   return {
     configured: !!provider && keys[provider] === true,

@@ -54,6 +54,11 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing, ca
   if (!reviewResult) return null;
 
   const overall = Number(reviewResult.overall_score) || 0;
+  // Optional ideas from the review. They contributed to no score above, so they
+  // are rendered apart from the findings and labelled as options.
+  const optionalAdditions = (reviewResult.optional_additions || [])
+    .map((item) => (typeof item === 'string' ? { suggestion: item } : item))
+    .filter((item) => item && String(item.suggestion || '').trim());
   const perDimension = Array.isArray(reviewResult.per_dimension) ? reviewResult.per_dimension : [];
   const unit = reviewResult.unit || 'words';
 
@@ -195,6 +200,29 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing, ca
               </li>
             ))}
           </ol>
+        </div>
+      )}
+
+      {optionalAdditions.length > 0 && (
+        <div className="bg-muted/30 border border-border/60 rounded-lg p-4">
+          <h4 className="text-sm font-medium mb-1">Ideas you could consider</h4>
+          <p className="text-xs text-foreground/40 mb-2.5">
+            These changed no score above, and skipping every one is a fine outcome.
+            An admissions officer never sees your profile or your documents — they
+            see this page — so nothing here is something you were expected to include.
+          </p>
+          <ul className="space-y-2">
+            {optionalAdditions.map((item, i) => (
+              <li key={i} className="text-sm text-foreground/60">
+                <span className="block">{item.suggestion}</span>
+                {(item.where || item.why_it_might_help) && (
+                  <span className="block text-xs text-foreground/35 mt-0.5">
+                    {[item.where ? `where: ${item.where}` : '', item.why_it_might_help || ''].filter(Boolean).join(' · ')}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

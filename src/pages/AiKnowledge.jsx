@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
-import { getOllamaConfig } from '@/api/ollamaClient';
+import { getModelOverride } from '@/api/aiProvider';
+import { peekAIStatus } from '@/lib/ai';
 import { runAI, notifyAIError } from '@/lib/ai';
 import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
 import { Button } from '@/components/ui/button';
@@ -174,7 +175,8 @@ export default function AiKnowledge() {
         isLive: isLiveOutcome,
         createRows: (items) => base44.entities.ApplicantKnowledge.bulkCreate(items),
         deleteRow: (id) => base44.entities.ApplicantKnowledge.delete(id),
-        model: getOllamaConfig()?.model || null,
+        // Recorded so an item can be traced to the model that produced it.
+        model: peekAIStatus()?.model || getModelOverride() || null,
       });
       await load();
       toast.success('AI knowledge base updated', {

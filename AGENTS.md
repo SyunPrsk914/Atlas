@@ -17,7 +17,15 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - `src/api/base44Client.js`: API entry point (chooses Supabase vs demo backend).
 - `src/api/supabaseBackend.js`: Supabase implementation of entities/auth/storage.
 - `src/api/localBackend.js`: localStorage demo backend (no keys required).
-- `api/invoke-llm.js`: serverless AI endpoint (Gemini/OpenAI/Anthropic adapters).
+- `api/invoke-llm.js`: serverless AI endpoint — NaraRouter first, then optional
+  Gemini/Groq/OpenRouter/OpenAI/Anthropic adapters. `api/models.js` proxies the
+  provider's authenticated model list so the app can offer only real aliases.
+- `src/api/aiProvider.js`: AI mode (hosted or demo), the remembered model alias,
+  and the FIFO queue that keeps calls one at a time.
+- `src/lib/schoolFit.js`: the eleven-section shape of a university research
+  report and the slice of it each AI job receives (`buildFitBrief(kind)`).
+- `src/data/schoolResearch/`: the hand-researched pack, one module per school,
+  official sources only, matched by `findPackEntry(name)`.
 - `src/lib/essayLength.js`: the length contract (target band, ceiling, hard
   floor, shared UCAS budget) and whether a repair improved the length.
 - `src/lib/essayCraft.js` / `src/lib/essayPrompts.js`: how each essay type is
@@ -39,6 +47,28 @@ Vercel + Supabase deployment, environment variables, and key locations.
 
 ## Working Notes
 
+- There is ONE AI provider: NaraRouter, reached through `/api/invoke-llm` with
+  the key on the server. Do not add a second provider path, a browser-side call
+  to a model, or a silent fallback — demo mode is the only fallback and it must
+  keep working with obvious placeholders that are never persisted as real.
+- A review reads only the page. Never instruct a model to judge an essay against
+  information from the applicant's profile, materials, or knowledge base: that
+  produces "you have X but you did not include it", which no admissions officer
+  can see. Outside facts may only (a) flag an invented or inflated claim and
+  (b) become `optional_additions` — listed separately in the UI, phrased as
+  options, and counted against no score. The polish prompt receives them as
+  options it may decline.
+- University research is structured: `RESEARCH_SECTIONS` in `src/lib/schoolFit.js`
+  is the single source for both the research prompt's headings and the parser, so
+  the two cannot drift. Prompts must call `buildFitBrief(knowledgeText, { kind })`
+  rather than dumping the whole report, and a pack entry must keep all eleven
+  sections with their official sources in section 11.
+- The pack never overwrites stored research without an explicit confirmation, and
+  it writes `research_provider = 'atlas-research-pack'` so the UI can tell a
+  hand-researched report from a generated one.
+- `ibSubjectLines()` returns a whole IB report (subjects, core, bonus points, HL
+  summary, suggested total) — its `.length` is NOT a subject count. Use
+  `ibSubjectSummary()`, which reports the six diploma slots actually filled.
 - Keep the `base44.*` call surface stable — pages depend on its exact shapes
   (e.g. `InvokeLLM` returns a parsed object when `response_json_schema` is
   passed, a string otherwise; `UploadPublicFile` returns `{ file_url }`).

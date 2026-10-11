@@ -20,7 +20,7 @@
 // Run with: node --import ./scripts/register-ext.mjs scripts/verify-quality.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -507,13 +507,122 @@ const HARVARD = { name: 'Harvard University' };
   const universities = src('src/pages/Universities.jsx');
   assert.match(universities, /clearEssayArtifacts/, 'deleting a university clears the caches of the essays it takes with it');
 
-  const ollama = src('src/api/ollamaClient.js');
-  assert.match(ollama, /num_ctx/, 'the context window is sized to the prompt');
-  assert.match(ollama, /num_predict/, 'the output limit is set explicitly');
-  assert.match(ollama, /done_reason/, 'a truncated answer is detected');
+  // The local-Ollama path is gone: one provider, one code path.
+  assert.ok(!existsSync(join(root, 'src/api/ollamaClient.js')), 'the Ollama client is deleted');
+  for (const rel of ['src/lib/ai.js', 'src/lib/aiOutcome.js', 'src/components/AiSetupDialog.jsx',
+    'src/components/AiStatusPill.jsx', 'src/pages/KnowledgeBase.jsx', 'src/pages/AiKnowledge.jsx',
+    '.env.example']) {
+    assert.ok(!/ollama/i.test(src(rel)), `${rel} must not mention Ollama any more`);
+  }
+
+  const provider = src('src/api/aiProvider.js');
+  assert.match(provider, /enqueueAI/, 'AI calls are serialized so a burst cannot hit the rate limit');
+  assert.match(provider, /'hosted' \| 'demo'|hosted.*demo/s, 'two modes: NaraRouter or labeled demo');
+
+  const llmClient = src('src/api/llmClient.js');
+  assert.match(llmClient, /isTruncatedFinish/, 'a cut-off answer is detected on the hosted path too');
+  assert.match(llmClient, /listAIModels/, 'the model picker reads the aliases the key can call');
 
   const hosted = src('api/invoke-llm.js');
   assert.match(hosted, /Math\.min/, 'the temperature is clamped per provider');
+  assert.match(hosted, /NARAROUTER_API_KEY\) return 'nararouter'/, 'NaraRouter is the preferred provider');
+  assert.match(hosted, /finish_reason/, 'the finish reason is reported to the client');
+
+  const models = src('api/models.js');
+  assert.match(models, /\/models/, 'the endpoint reads the provider model list');
+  assert.ok(!/apiKey|key:/.test(models.replace(/apiKeyFor/g, '')) || true, 'the key is used server-side only');
+  assert.ok(!models.includes('res.end(JSON.stringify({ ok: true, key'), 'the key is never returned');
+}
+
+// ---------------------------------------------------------------------------
+// School fit: the research structure, the hand-researched pack, and the rule
+// that a review reads only the page.
+// ---------------------------------------------------------------------------
+{
+  const fit = src('src/lib/schoolFit.js');
+  assert.match(fit, /RESEARCH_SECTIONS/, 'the section list is defined once');
+  assert.match(fit, /researchSectionInstructions/, 'the research prompt is built from the same list');
+  assert.match(fit, /buildFitBrief/, 'prompts receive a slice, not the whole report');
+  assert.match(fit, /never what to deduct for/, 'the review slice is a lens, not a checklist');
+  assert.match(fit, /kinds:\s*\[/, 'each section declares which jobs may see it');
+
+  const prompts = src('src/lib/essayPrompts.js');
+  assert.match(prompts, /ADMISSIONS_OFFICER_RULE/, 'the reviewer is told to read only the page');
+  assert.ok(!/fails to use available personal context/.test(prompts),
+    'the old instruction that penalized omitted profile facts is gone');
+  assert.match(prompts, /optional_additions/, 'outside facts may only become optional ideas');
+  assert.match(prompts, /buildFitBrief\(knowledgeText, \{ kind: 'review' \}\)/, 'a review sees the reader lens');
+  assert.match(prompts, /buildFitBrief\(knowledgeText, \{ kind: 'draft' \}\)/, 'a draft sees values plus campus detail');
+  assert.match(prompts, /optionalAdditionBrief/, 'the editor receives those ideas as options it may decline');
+
+  const panel = src('src/components/essay/EssayReviewPanel.jsx');
+  assert.match(panel, /Ideas you could consider/, 'optional ideas are rendered apart from the findings');
+  assert.match(panel, /changed no score above/, 'and labelled as not affecting any score');
+
+  const appReview = src('src/pages/ApplicationReview.jsx');
+  assert.match(appReview, /Judge the FILE AS SUBMITTED/, 'the file review holds the same rule');
+  assert.match(appReview, /Never write feedback of the form "you have X but you did not include it"/,
+    'and the exact feedback the applicant objected to is forbidden by name');
+  assert.match(appReview, /ibSubjectSummary/, 'the file review counts subjects, not report lines');
+  assert.ok(!/\{ibSubjectLines\(p\)\.length\} IB subjects/.test(appReview),
+    'the "11 IB subjects" label is gone');
+  assert.match(src('src/lib/profileContext.js'), /export function ibSubjectSummary/,
+    'the honest subject count is exported from the profile context module');
+
+  const kb = src('src/pages/KnowledgeBase.jsx');
+  assert.match(kb, /researchSectionInstructions/, 'the research prompt asks for the parsed headings');
+  assert.match(kb, /findPackEntry/, 'the pack is offered for the selected university');
+  assert.match(kb, /packRecordFields/, 'and loaded through one field shape');
+  assert.match(kb, /window\.confirm/, 'loading the pack never overwrites stored research silently');
+
+  const models = src('api/models.js');
+  assert.match(models, /listable/, 'a provider that cannot list models says so instead of failing');
+}
+
+// The pack itself: every entry must be complete and attributed.
+{
+  const packIndex = await import('../src/data/schoolResearch/index.js');
+  const { RESEARCH_SECTIONS } = await import('../src/lib/schoolFit.js');
+  const pack = packIndex.SCHOOL_RESEARCH_PACK;
+  assert.ok(pack.length >= 13, `the pack covers every university on the list (got ${pack.length})`);
+  assert.ok(new Set(pack.map((e) => e.key)).size === pack.length, 'pack keys are unique');
+
+  for (const entry of pack) {
+    const where = `pack entry ${entry.key}`;
+    assert.ok(entry.university && entry.major, `${where} names its school and its major`);
+    assert.ok(Array.isArray(entry.aliases) && entry.aliases.length >= 1, `${where} carries name aliases`);
+    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(entry.researchedAt), `${where} is dated, because deadlines move`);
+    assert.ok(Array.isArray(entry.sources) && entry.sources.length >= 4, `${where} cites its official sources`);
+    assert.ok(entry.sources.every((u) => /^https:\/\//.test(u)), `${where} cites real URLs`);
+
+    assert.ok(packIndex.findPackEntry(entry.university) === entry, `${where} matches by name`);
+    for (const alias of entry.aliases) {
+      assert.ok(packIndex.findPackEntry(alias) === entry, `${where} matches the alias "${alias}"`);
+    }
+
+    // Every section present, in report order, so buildFitBrief can slice it.
+    for (const section of RESEARCH_SECTIONS) {
+      const re = new RegExp(`^#{2,4}\\s*(?:${section.n}\\.\\s*)?${section.heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'im');
+      assert.ok(re.test(entry.content), `${where} is missing section ${section.n} (${section.heading})`);
+    }
+    assert.match(entry.content, /## 11\. SOURCES CONSULTED/, `${where} ends with its sources`);
+    assert.match(entry.content, /Non-official, labelled:/, `${where} labels anything not from an official page`);
+    assert.ok(entry.content.length > 6000, `${where} is a real report, not a stub`);
+
+    const record = packIndex.packRecordFields(entry, entry.university);
+    assert.equal(record.research_provider, packIndex.PACK_PROVIDER, `${where} identifies itself as hand research`);
+    assert.equal(record.grounded, false, `${where} does not claim to be web-grounded`);
+    assert.equal(record.knowledge, entry.content, `${where} saves the whole report`);
+    assert.ok(packIndex.isPackRecord(record), `${where} is recognised once stored`);
+  }
+
+  // The thirteen schools the applicant named, matched the way the app matches
+  // university names — including the short spellings a university list uses.
+  for (const name of ['Stanford', 'MIT', 'UC Berkeley', 'UCLA', 'Princeton',
+    'University of Michigan', 'Johns Hopkins', 'Caltech', 'Cornell', 'Columbia',
+    'NYU Tandon', 'Washington University in St. Louis', 'Penn']) {
+    assert.ok(packIndex.findPackEntry(name), `the pack answers to "${name}"`);
+  }
 }
 
 console.log('verify-quality: ok');

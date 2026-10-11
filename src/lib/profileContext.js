@@ -6,7 +6,7 @@
 // nobody ever saw the IB subject breakdown properly. Every AI feature now
 // builds its context from `buildProfileContext()` so they cannot drift apart.
 
-import { parseIbRecord, ibRecordLines, subjectDisplayName, hlCount } from './ibDiploma';
+import { parseIbRecord, ibRecordLines, subjectDisplayName, hlCount, filledSubjects } from './ibDiploma';
 
 const fmt = (v) => (v === null || v === undefined || v === '' ? null : String(v));
 
@@ -15,6 +15,31 @@ export function ibSubjectLines(profile) {
   const raw = profile?.ib_subjects || '';
   if (!raw) return [];
   return ibRecordLines(raw);
+}
+
+/**
+ * How many IB subjects the applicant actually takes.
+ *
+ * `ibSubjectLines()` returns a whole report — six subjects, the core, the bonus
+ * points, the HL summary, the suggested /45 — so its length is not a subject
+ * count. Reading `.length` as "N IB subjects" is how the application review came
+ * to claim a student takes 11 IB subjects, which the IB does not offer.
+ *
+ * @param {object} profile
+ * @returns {{ count: number, hl: number, lines: string[], unplaced: number, core: boolean }}
+ */
+export function ibSubjectSummary(profile) {
+  const raw = profile?.ib_subjects || '';
+  if (!raw) return { count: 0, hl: 0, lines: [], unplaced: 0, core: false };
+  const record = parseIbRecord(raw);
+  const filled = filledSubjects(record);
+  return {
+    count: filled.length,
+    hl: hlCount(record),
+    lines: ibRecordLines(record),
+    unplaced: (record.unplaced || []).length,
+    core: Boolean(record.tok || record.ee || record.eeCourse?.courseId),
+  };
 }
 
 export function formatActivities(activities, oldText) {

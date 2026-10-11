@@ -21,6 +21,7 @@ import {
 import {
   AMBITION_RULES, ESSAY_REVIEW_DIMENSIONS, SCORE_ANCHORS, craftBrief, schoolVoiceFor,
 } from './essayCraft';
+import { buildFitBrief } from './schoolFit';
 
 /**
  * Sampling temperature per action.
@@ -166,8 +167,7 @@ CRITICAL RULES FOR USING MATERIALS:
 - PLATFORM DISTINCTION: Some samples are US (Common App 650w, UC PIQ 350w) and some are UK (UCAS 4000 chars across 3 Qs). When writing for ${platform === 'ucas' ? 'UCAS (UK)' : 'US platforms (Common App, UC, Coalition, Direct)'}, prioritize samples from the SAME system for structural guidance. You may learn voice/tone from any sample, but NEVER apply UK UCAS structure (3 questions sharing 4000 chars, 80% academic) to a US essay, and NEVER apply US Common App structure to a UCAS answer. This is obvious and you must distinguish.
 - If a material has an attached deep analysis, use the section appropriate to its lens: facts/evidence for applicant-owned sources, intellectual signals for academic work, guidance for references, and craft moves for samples. Do not treat every analysis as a writing score.
 
-UNIVERSITY RESEARCH (from University Research; if empty, use well-established knowledge and say nothing specific you are unsure of):
-${knowledgeText}
+${buildFitBrief(knowledgeText, { kind: 'draft' }) || `UNIVERSITY RESEARCH: none cached for this school. Write from the applicant's own material only — do not invent anything about this university's programmes, buildings, clubs or traditions, and do not assert what it "values". Nothing in the essay may rest on a fact about the school that Atlas does not have.`}
 
 THE ESSAY TO WRITE:
 - University: ${university?.name || 'Unspecified'}
@@ -294,10 +294,9 @@ ESSAY>>>
 
 ${lengthBrief(essay, allEssays)}
 
-UNIVERSITY RESEARCH AND IDEAL STUDENT:
-${knowledgeText || 'No research cached. Judge on the quality of the writing itself.'}
+${buildFitBrief(knowledgeText, { kind: 'review' }) || 'UNIVERSITY RESEARCH: none cached for this school. Judge on the quality of the writing itself and on what this prompt asks — do not invent what this university "values", and do not deduct for it.'}
 
-${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${previousScores ? `${previousScores}\n` : ''}${reviewNotes ? `EARLIER FINDINGS SAVED WITH THIS ESSAY (re-check whether this draft fixed them):\n${reviewNotes}\n` : ''}
+${profileText ? `APPLICANT PROFILE — BACKGROUND YOU MAY NOT SCORE AGAINST. Use it only to spot an invented or inflated claim, and to form optional ideas. Never to list what the essay "should" have mentioned:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS — BACKGROUND YOU MAY NOT SCORE AGAINST (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${previousScores ? `${previousScores}\n` : ''}${reviewNotes ? `EARLIER FINDINGS SAVED WITH THIS ESSAY (re-check whether this draft fixed them):\n${reviewNotes}\n` : ''}
 Score these dimensions 1-10 and answer each one's question:
 ${dimensionInstructions()}
 
@@ -305,8 +304,9 @@ For EVERY dimension, also say in one sentence exactly what would raise it to a 1
 
 Be concrete everywhere: quote the exact phrases you are objecting to. "Feels AI-generated" is not a finding; "\\"In the end, this experience taught me that…\\" appears in the third paragraph" is.
 
-If the essay fails to honor the applicant's required root, call that out as a weakness even if the prose is polished. If no root was supplied, say that the drafting direction is underspecified rather than penalizing the essay for not guessing it.
-If the essay fails to use available personal context from materials, call that out as a weakness.
+${ADMISSIONS_OFFICER_RULE}
+
+If the draft has no coherent through-line of its own — no single story or argument that the sentences keep serving — that IS a flaw visible on the page, and the applicant's stated root tells you what the through-line was meant to be. If no root was supplied, judge the through-line from the text and say the direction is underspecified rather than penalizing the essay for not guessing it.
 Judge length from the MEASURED LENGTH above, not from your own count.
 
 Return JSON only.`;
@@ -329,6 +329,17 @@ export const REVIEW_SCHEMA = {
     strengths: { type: 'array', items: { type: 'string' } },
     weaknesses: { type: 'array', items: { type: 'string' } },
     priority_improvements: { type: 'array', items: { type: 'string' } },
+    optional_additions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          suggestion: { type: 'string' },
+          where: { type: 'string' },
+          why_it_might_help: { type: 'string' },
+        },
+      },
+    },
     per_dimension: {
       type: 'array',
       items: {
@@ -379,6 +390,25 @@ export function reviewAverage(review) {
 // Edit — surgical, conserved, itemised
 // ---------------------------------------------------------------------------
 
+/**
+ * The rule that keeps a review honest.
+ *
+ * An admissions officer never sees the applicant's profile notes, uploaded
+ * documents, or Atlas's knowledge base — they see the essay and the rest of the
+ * submitted file. A review that says "you have a robotics team in your profile
+ * but you did not mention it" is scoring against information the reader does not
+ * have, which both misrepresents the essay and pushes the applicant to bolt on
+ * content and lose the draft they wrote. Context is for catching invention and
+ * for optional ideas, never for deductions.
+ */
+export const ADMISSIONS_OFFICER_RULE = `JUDGE ONLY WHAT IS ON THE PAGE — THE ADMISSIONS OFFICER RULE:
+- The reader sees this essay, its prompt, and the rest of the submitted file. They do NOT see the applicant's profile fields, uploaded materials, or Atlas's knowledge base. You are given those for exactly two purposes: to notice when a claim in the essay is invented, inflated, or inconsistent with what is true; and to offer optional ideas below.
+- NEVER report "you have X but you did not include it" as a weakness, and NEVER lower any score because a fact Atlas knows is missing from the draft. The reader was never promised that fact. Absence of outside information is not a flaw in the writing.
+- Score every dimension from the text alone: what these sentences actually do on the page, not what the applicant could have said.
+- Where something from the context would genuinely strengthen a specific line, put it in "optional_additions" — an idea the applicant may take or leave, phrased as a suggestion ("consider …"), anchored to the exact place in the draft where it would go, and never counted against any score.
+- What you MAY hold against the essay: vagueness, abstraction, claims the text does not support, a sentence that could belong to any applicant, structural drift, AI tells, a tone that does not suit this reader, an over-length or under-length draft, and anything in the essay that contradicts itself or overclaims. All of that is visible on the page.
+- If a claim in the essay looks invented or inflated next to what Atlas knows, that is a risk finding — say which sentence and why it reads as unverifiable. Do not name the private source; describe what a reader would doubt.`;
+
 const PRESERVATION_RULES = `THE PRIME DIRECTIVE — CONSERVE THE APPLICANT'S DRAFT:
 - You are an editor, not an author. The story, the scenes, their order, the timeline, the people in it, and what the essay means must all survive your edit unchanged.
 - Keep at least 80% of the original words recognisably intact. The applicant reads this draft as theirs; a rewrite is a rejection of their work and is not what was asked for.
@@ -386,6 +416,26 @@ const PRESERVATION_RULES = `THE PRIME DIRECTIVE — CONSERVE THE APPLICANT'S DRA
 - NEVER do any of these: replace the required root with another activity; restructure or reorder the narrative; delete a scene, a person, or a piece of evidence; add a new scene, achievement, name, or number; change what the ending means; switch person or tense; rewrite a paragraph that is already working; shorten the essay to make your job easier.
 - Where you believe a substantial change is essential to reach 10/10, make it — and name it in "changes" with the reason. An unnamed substantial change is a failure of this task.
 - Every change you report is shown to the applicant highlighted inside the text, so report the real wording you replaced, not a paraphrase of it.`;
+
+/**
+ * Optional ideas from the last review, passed to the editor as options.
+ *
+ * These are deliberately NOT part of "findings you must fix". An idea that
+ * Atlas knows from the applicant's materials is not a defect in the draft, and
+ * an editor that treats it as one will bolt on content and break the story.
+ */
+function optionalAdditionBrief(reviewResult) {
+  const additions = (reviewResult?.optional_additions || [])
+    .filter((item) => item && (item.suggestion || typeof item === 'string'))
+    .map((item) => (typeof item === 'string'
+      ? item
+      : `- ${item.suggestion}${item.where ? ` (at: ${item.where})` : ''}${item.why_it_might_help ? ` — ${item.why_it_might_help}` : ''}`));
+  if (!additions.length) return '';
+  return `
+OPTIONAL IDEAS FROM THE LAST REVIEW — options, not requirements:
+${additions.join('\n')}
+Use one ONLY where it fits the sentence you are already editing and does not change what the essay is about. Skipping every one of them is a completely acceptable outcome, and is the right one when adding it would mean inventing a fact or starting a second thread. Never restructure the draft around an optional idea.`;
+}
 
 export function buildPolishPrompt({
   essay, university, platform, reviewResult, knowledgeText, allEssays,
@@ -423,10 +473,10 @@ ${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check each 
 - Exact phrases flagged: ${(reviewResult.quoted_evidence || []).join(' | ') || 'none reported'}
 - What would raise each dimension to 10: ${(reviewResult.per_dimension || []).map((d) => `${d.dimension}: ${d.how_to_reach_ten}`).join(' | ') || 'not reported'}
 Fix every one of these that can be fixed by editing. If one genuinely cannot be fixed without new facts, say so in "gaps_for_applicant" instead of quietly leaving it.
+${optionalAdditionBrief(reviewResult)}
 ` : 'No review has been run yet. Edit against the craft rules above and the length contract.'}
 
-UNIVERSITY RESEARCH:
-${knowledgeText || 'None cached.'}
+${buildFitBrief(knowledgeText, { kind: 'polish' }) || 'UNIVERSITY RESEARCH: none cached. Edit for voice, structure and clarity only; add no facts about the school.'}
 
 ${profileText ? `APPLICANT PROFILE (use concrete details from here when the draft needs one):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use applicant-owned evidence according to its lens; academic work informs thinking, guidance supplies rules, samples supply craft only and never borrowed life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT (this is the applicant's own writing — the thing you are conserving):
 <<<ESSAY
@@ -562,7 +612,7 @@ ${rootBrief(essay)}
 
 ${HUMAN_VOICE_RULES}
 
-${profileText ? `APPLICANT PROFILE:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (evidence for the applicant's own life only; samples are craft only):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${knowledgeText && knowledgeText !== 'None cached.' ? `UNIVERSITY RESEARCH:\n${knowledgeText}\n` : ''}
+${profileText ? `APPLICANT PROFILE:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (evidence for the applicant's own life only; samples are craft only):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${(() => { const brief = buildFitBrief(knowledgeText, { kind: 'polish' }); return brief ? `${brief}\n` : ''; })()}
 THE DRAFT TO FIX:
 <<<ESSAY
 ${text}

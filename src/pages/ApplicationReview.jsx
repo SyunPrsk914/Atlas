@@ -14,7 +14,8 @@ import {
   PLATFORM_REQUIREMENTS, isSharedEssay, limitUnitFor, measureEssay,
   findKnowledgeRecord, isUcasQuestion, ucasCharacterBudget, formatLimit,
 } from '@/lib/essayScope';
-import { buildProfileContext, ibSubjectLines } from '@/lib/profileContext';
+import { buildProfileContext, ibSubjectSummary } from '@/lib/profileContext';
+import { buildFitBrief } from '@/lib/schoolFit';
 import { formatMaterialsForAI, presentMaterial, isSampleMaterial } from '@/lib/materialRole';
 import { runAI } from '@/lib/ai';
 import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
@@ -160,7 +161,10 @@ export default function ApplicationReview() {
       const applicantText = await loadApplicantKnowledgeText({ platform });
       const completedTasks = tasks.filter((t) => t.completed).length;
       const profileText = buildProfileContext(p, { includeLeadershipBrief: true }) || 'No profile data saved.';
-      const ibLines = ibSubjectLines(p);
+      // A count of lines is not a count of subjects: the IB report includes the
+      // core, the bonus points, and the HL summary. The diploma has six.
+      const ib = ibSubjectSummary(p);
+      const ibLines = ib.lines;
 
       const dimensionList = APPLICATION_REVIEW_DIMENSIONS
         .map((name, i) => `${i + 1}. ${name} — ${DIMENSION_GUIDANCE[name]}`)
@@ -176,9 +180,10 @@ ${Object.entries(SCORE_ANCHORS.overall).sort((a, b) => Number(b[0]) - Number(a[0
 - A missing or unwritten essay is a material weakness, not a neutral gap. Score it as one.
 - Read the applicant's context properly. This student is applying internationally through ${PLATFORMS[platform]?.label}. Where their education system, curriculum, or nationality differs from the US/UK norm, that is context to be read intelligently — not a weakness — but an unexplained difference is still a weakness.
 - Do not inflate anything. If the evidence is not in the file, it is not in the file.
+- Judge the FILE AS SUBMITTED. The committee sees what is in front of it — the essays, the activities, the grades, the supplements — and never sees Atlas's private store of the applicant's notes, documents, or knowledge-base entries. So: a required component that is missing or thin IS a legitimate finding, because the committee sees that too. But a fact Atlas knows from a private material that the applicant never put in the file is NOT a weakness and must never lower a score or appear under "key_weaknesses" or "gaps". If that fact would genuinely strengthen the file, put it under "what_would_help" phrased as something the applicant may choose to do ("consider adding …"), and say why it would help this particular reader.
+- Never write feedback of the form "you have X but you did not include it". The reader cannot see X. Judge what is on the page, and offer X only as an optional next step.
 
-RESEARCH AND IDEAL STUDENT PROFILE (from University Research):
-${knowledgeText}
+${buildFitBrief(knowledgeText, { kind: 'application' }) || `INSTITUTIONAL RESEARCH: none cached for this university. Judge the file on its own merits and on what this platform requires; say plainly where you are estimating because you do not have the school's published criteria, and do not invent them.`}
 ${applicantText ? `
 WHAT ATLAS KNOWS ABOUT THIS APPLICANT (AI knowledge base; AI-built and applicant-edited. Judge the file against it. It never adds to the file):
 ${applicantText}
@@ -191,7 +196,7 @@ THE COMPLETE APPLICATION:
 
 --- PERSONAL AND ACADEMIC BACKGROUND ---
 ${profileText}
-${ibLines.length ? `\nIB subject workload (${ibLines.length} subjects):\n${ibLines.join('\n')}\nTreat Higher Level subject choice as evidence of academic ambition, and note where the workload is lighter than a US applicant would expect.` : ''}
+${ib.count || ibLines.length ? `\nIB SUBJECT WORKLOAD (${ib.count} of 6 diploma subjects${ib.hl ? `, ${ib.hl} at Higher Level` : ''}${ib.unplaced ? `, plus ${ib.unplaced} imported line(s) that could not be placed in a diploma slot` : ''}):\n${ibLines.join('\n')}\nThe IB diploma is six subjects plus the TOK/Extended Essay core — never more. Treat Higher Level subject choice as evidence of academic ambition, and note where the workload is lighter than a US applicant would expect. If a subject or grade is missing, say it is missing rather than inferring one.` : ''}
 
 --- ESSAYS ---
 ${formatEssays(essays)}
@@ -206,7 +211,7 @@ ${university.deadline ? `- Deadline: ${university.deadline}` : '- No deadline se
 - Research available: ${knowledge ? 'yes' : 'NO — you are judging without institutional data, and must flag that'}
 
 MATERIALS USAGE RULES:
-- Personal materials (resume, own essays, notes) are evidence — use their concrete details as much as possible when assessing authenticity and specificity.
+- Personal materials (resume, own essays, notes) are evidence about the applicant — use their concrete details when assessing authenticity and specificity, and to spot a claim in the file that is invented or inflated. They are NOT a list of things the file should have mentioned: never deduct for a detail that appears here but not in the submitted file.
 - Sample essays (successful essays from others) must be treated as craft examples only. Never treat a sample's biography as this applicant's life. Distinguish US Common App/UC samples from UK UCAS samples — do not apply UK structure to US evaluation or vice versa. If a UK sample is present, do not penalize the US application for not following UK conventions, and vice versa.
 - If materials have been analyzed word-by-word, use those analyses to inform your assessment of voice, specificity, and authenticity.
 
@@ -217,7 +222,7 @@ RETURN FORMAT — use exactly these field names:
 - "acceptance_probability": your single best estimate as a number 0-100.
 - "verdict": one of "Hard Reach", "Reach", "Target", "Likely", "Safety".
 - "dimensions": one entry per dimension above, in that order, each { "name", "score" (1-10), "assessment" }.
-- "key_strengths", "key_weaknesses", "what_would_help", "gaps": arrays of short, concrete sentences. No vague advice — each item must name something the applicant can actually do or check.
+- "key_strengths", "key_weaknesses", "what_would_help", "gaps": arrays of short, concrete sentences. No vague advice — each item must name something the applicant can actually do or check. "key_weaknesses" and "gaps" are only about what is IN the file (weak writing, thin evidence, a missing required component, an inconsistency). Anything that depends on information from outside the file goes in "what_would_help", phrased as an option.
 - "summary": three or four sentences of overall assessment, in the voice of a reader who has just finished the file.
 
 Return JSON only.`;
@@ -256,6 +261,7 @@ Return JSON only.`;
   }
 
   const p = profile || {};
+  const ibSummary = ibSubjectSummary(p);
   const platform = getUniversityPlatform(university);
   const completedTasks = tasks.filter((t) => t.completed).length;
   const shownMaterials = materials.map(presentMaterial);
@@ -377,11 +383,13 @@ Return JSON only.`;
               <Row label="IELTS" value={p.ielts_listening ? `L${p.ielts_listening} R${p.ielts_reading} W${p.ielts_writing} S${p.ielts_speaking}` : null} />
               <Row label="TOEFL" value={p.toefl_total} />
             </dl>
-            {ibSubjectLines(p).length > 0 && (
+            {(ibSummary.count > 0 || ibSummary.lines.length > 0) && (
               <div className="text-xs text-foreground/50 mt-3 pt-3 border-t border-border">
-                {ibSubjectLines(p).length} IB subjects
+                {ibSummary.count > 0
+                  ? `${ibSummary.count} IB subject${ibSummary.count === 1 ? '' : 's'}${ibSummary.hl ? ` · ${ibSummary.hl} HL` : ''} of the 6 the diploma has`
+                  : 'IB record (no subject placed in a diploma slot yet)'}
                 <span className="block text-[11px] text-foreground/35 mt-0.5">
-                  {ibSubjectLines(p).map((line, i) => <span key={i} className="block">{line}</span>)}
+                  {ibSummary.lines.map((line, i) => <span key={i} className="block">{line}</span>)}
                 </span>
               </div>
             )}

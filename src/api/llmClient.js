@@ -1,6 +1,5 @@
-// Optional hosted-provider client for /api/invoke-llm. The default local
-// Ollama path is implemented separately in ollamaClient.js and never reaches
-// this endpoint. Used only after explicit Hosted mode selection.
+// Client for /api/invoke-llm — the only real-model path Atlas has. NaraRouter
+// is the provider; its key lives server-side and never reaches the bundle.
 //
 // invokeLLM() keeps the historical contract (returns the parsed object or the
 // string) so `base44.integrations.Core.InvokeLLM` is unchanged for callers.
@@ -9,6 +8,11 @@
 // a demo placeholder, or cut short — instead of guessing.
 
 import { makeError } from '@/lib/aiError';
+
+/** `length` / `max_tokens` means the model was cut off mid-answer. */
+export function isTruncatedFinish(finishReason) {
+  return ['length', 'max_tokens', 'MAX_TOKENS'].includes(String(finishReason || ''));
+}
 
 async function authHeaders(getAuthToken) {
   const headers = { 'Content-Type': 'application/json' };
@@ -54,12 +58,41 @@ export async function invokeLLMDetailed(params, getAuthToken) {
     });
   }
 
-  return { result: body.result, meta: body.meta || {} };
+  const meta = body.meta || {};
+  // A provider that stopped at its output cap returned an unfinished answer.
+  // Callers treat that as "not done yet" and send the request back, so it is
+  // decided in one place rather than re-derived from finish_reason everywhere.
+  if (!meta.truncated && isTruncatedFinish(meta.finish_reason)) meta.truncated = true;
+  return { result: body.result, meta };
 }
 
 export async function invokeLLM(params, getAuthToken) {
   const { result } = await invokeLLMDetailed(params, getAuthToken);
   return result;
+}
+
+/**
+ * The model aliases this deployment's key can actually call.
+ *
+ * NaraRouter's authenticated `/v1/models` returns only what the plan entitles,
+ * which is the difference between a model picker that works and one that lists
+ * aliases the key will 404 on. Never throws: an unreadable list just means the
+ * deployment's default model stays in use.
+ *
+ * @returns {Promise<{ ok: boolean, provider: string|null, models: string[], default_model: string|null, listable: boolean, message?: string }>}
+ */
+export async function listAIModels() {
+  try {
+    const res = await fetch('/api/models');
+    const body = await res.json().catch(() => null);
+    if (!body) return { ok: false, provider: null, models: [], default_model: null, listable: false, message: `HTTP ${res.status}` };
+    return body;
+  } catch {
+    return {
+      ok: false, provider: null, models: [], default_model: null, listable: false,
+      message: 'No API server found. Run `npm run dev` locally, or redeploy on Vercel so the `api/` functions deploy.',
+    };
+  }
 }
 
 /**
