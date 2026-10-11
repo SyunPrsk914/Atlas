@@ -14,7 +14,8 @@ import {
   ANALYSIS_VERSION, LEGACY_NOTE_HEADING,
 } from '../src/lib/materialDocument.js';
 import {
-  presentMaterial, formatMaterialsForAI, isSampleMaterial,
+  presentMaterial, formatMaterialsForAI, isSampleMaterial, materialAnalysisRole,
+  analysisMatchesMaterialRole, materialWritePayload,
 } from '../src/lib/materialRole.js';
 import {
   splitIntoParts, analyzeDocument, buildEssayAnalysisPrompt, normalizeAnalysis, mergeAnalysisParts,
@@ -218,7 +219,7 @@ await check('presentation: stored text is used only for the source it was read f
 
 await check('presentation keeps a current analysis and hides one from another source', () => {
   const key = sourceKey(FILE);
-  const current = { version: ANALYSIS_VERSION, status: 'ready', source: { key }, summary: 'ok' };
+  const current = { version: ANALYSIS_VERSION, status: 'ready', analysis_role: 'writing_draft', source: { key }, summary: 'ok' };
   assert.equal(analysisMatchesSource(current, key), true);
   const shown = presentMaterial({ id: 'm3', title: 'A', type: 'essay', file_url: FILE, content: encodeDocumentText({ source: FILE, reader: 'pdf', text: 'x' }), analysis: current });
   assert.equal(shown.analysis.summary, 'ok');
@@ -234,13 +235,14 @@ await check('presentMaterial is idempotent and never re-moves text', () => {
   assert.equal(once.notes.split('Old box text.').length - 1, 1);
 });
 
-await check('migration patch moves legacy text and clears only old analyses', () => {
-  const patch = legacyMigrationPatch({ id: 'm5', content: 'Pasted.', notes: 'Note.', analysis: { summary: 'FAKE' } });
+await check('migration patch moves legacy text without deleting derived analyses', () => {
+  const oldAnalysis = { summary: 'FAKE' };
+  const patch = legacyMigrationPatch({ id: 'm5', content: 'Pasted.', notes: 'Note.', analysis: oldAnalysis });
   assert.equal(patch.content, null);
-  assert.equal(patch.analysis, null);
+  assert.equal(patch.analysis, undefined, 'the patch does not overwrite the old analysis');
   assert.ok(patch.notes.startsWith('Note.'));
   assert.ok(patch.notes.includes('Pasted.'));
-  assert.equal(legacyMigrationPatch({ id: 'm6', content: encodeDocumentText({ source: FILE, reader: 'pdf', text: 'Doc' }), analysis: { version: ANALYSIS_VERSION, status: 'ready', source: { key: sourceKey(FILE) } } }), null);
+  assert.equal(legacyMigrationPatch({ id: 'm6', content: encodeDocumentText({ source: FILE, reader: 'pdf', text: 'Doc' }), analysis: { version: ANALYSIS_VERSION, status: 'ready', analysis_role: 'writing_draft', source: { key: sourceKey(FILE) } } }), null);
   assert.equal(legacyMigrationPatch({ id: 'm7', content: null, notes: 'Only a note.' }), null);
 });
 
@@ -251,6 +253,54 @@ await check('sample tags survive the migration of legacy text', () => {
   assert.ok(patch.notes.startsWith(sampleTag));
   assert.equal(isSampleMaterial({ type: 'other', notes: patch.notes }), true);
   assert.equal(presentMaterial({ ...row, ...patch }).type, 'sample_essay');
+});
+
+await check('analysis lenses are persisted on old databases without exposing tags to the AI', () => {
+  const payload = materialWritePayload({ title: 'Physics IA', type: 'document', analysis_role: 'academic_work', notes: 'Aerodynamics investigation.' });
+  assert.equal(materialAnalysisRole(payload), 'academic_work');
+  assert.match(payload.notes, /atlas-analysis-role:academic_work/);
+  const shown = presentMaterial({ id: 'lens', ...payload, content: null });
+  assert.equal(shown.analysis_role, 'academic_work');
+  assert.equal(shown.notes, 'Aerodynamics investigation.');
+});
+
+await check('non-writing analysis cannot keep a score or line findings', () => {
+  const academic = normalizeAnalysis({
+    analysis_role: 'academic_work',
+    overall_score: 9,
+    facts: ['Designed a controlled investigation.'],
+    findings: [{ kind: 'issue', quote: 'Designed', offset: 0, note: 'not a writing issue' }],
+  }, 'Designed a controlled investigation.', 'academic_work');
+  assert.equal(academic.analysis_role, 'academic_work');
+  assert.equal(academic.overall_score, null);
+  assert.deepEqual(academic.findings, []);
+  assert.deepEqual(academic.facts, ['Designed a controlled investigation.']);
+});
+
+await check('an explicit lens wins over a conflicting model classification', () => {
+  const academic = normalizeAnalysis({
+    analysis_role: 'writing_draft', overall_score: 10, findings: [{ quote: 'word', offset: 0 }],
+  }, 'word', 'academic_work');
+  assert.equal(academic.analysis_role, 'academic_work');
+  assert.equal(academic.overall_score, null);
+  assert.deepEqual(academic.findings, []);
+  const prompt = buildEssayAnalysisPrompt({ title: 'Physics IA', text: 'I tested a hypothesis.', kind: 'document', analysisRole: 'academic_work' });
+  assert.match(prompt, /academic_work/);
+  assert.match(prompt, /Only a writing draft receives a writing assessment/);
+});
+
+await check('changing a material lens hides stale analysis until it is rebuilt', () => {
+  const stored = encodeDocumentText({ source: FILE, reader: 'pdf', text: 'An assessment.' });
+  const row = {
+    id: 'lens-change', title: 'Physics IA', type: 'document', analysis_role: 'academic_work',
+    file_url: FILE, content: stored,
+    analysis: { version: ANALYSIS_VERSION, status: 'ready', analysis_role: 'writing_draft', source: { key: sourceKey(FILE) }, overall_score: 10 },
+  };
+  assert.equal(analysisMatchesMaterialRole(row), false);
+  const shown = presentMaterial(row);
+  assert.equal(shown.analysis, null);
+  assert.equal(shown.analysis_outdated, true);
+  assert.equal(materialAnalysisRole(shown), 'academic_work');
 });
 
 // ---------------------------------------------------------------------------
@@ -264,12 +314,23 @@ await check('the AI gets the document text under its own heading, with context s
   assert.match(out, /Document text \(read from the uploaded file itself/);
   assert.ok(out.includes(text));
   assert.ok(out.indexOf('Document text') < out.indexOf('Context from the applicant'));
-  assert.match(out, /facts stated here are the applicant's own/);
+  assert.match(out, /Context from the applicant about this material/);
+  assert.match(out, /not as proof beyond the document/);
 });
 
 await check('the AI is told when a document has not been read', () => {
   const out = formatMaterialsForAI([{ id: 'b', title: 'Link', type: 'link', link_url: LINK, content: '' }]);
   assert.match(out, /Document text: not read yet\. Do not describe what it says\./);
+});
+
+await check('tips and references are separated from applicant evidence', () => {
+  const guide = formatMaterialsForAI([{
+    id: 'guide', title: 'Essay tips guide', type: 'document', analysis_role: 'advice',
+    file_url: FILE, content: encodeDocumentText({ source: FILE, reader: 'txt', text: 'Use a concrete scene before reflection.' }),
+  }]);
+  assert.match(guide, /TIPS, GUIDES, AND APPLICATION REFERENCES/);
+  assert.doesNotMatch(guide, /APPLICANT'S OWN MATERIALS[\s\S]*Use a concrete scene/);
+  assert.match(guide, /not proof of what this student has done/);
 });
 
 await check('a long document is cut for the prompt with an explicit note', () => {
@@ -294,8 +355,8 @@ await check('a current analysis is included with its facts; an old one is not', 
     content: encodeDocumentText({ source: FILE, reader: 'pdf', text: 'Text.' }),
     analysis,
   }]);
-  const good = withAnalysis({ version: ANALYSIS_VERSION, status: 'ready', source: { key }, facts: ['Led a robotics club of 14 students.'], coverage: { complete: true, analyzed_chars: 5, total_chars: 5 } });
-  assert.match(good, /Facts about the applicant found in the document/);
+  const good = withAnalysis({ version: ANALYSIS_VERSION, status: 'ready', analysis_role: 'writing_draft', source: { key }, facts: ['Led a robotics club of 14 students.'], coverage: { complete: true, analyzed_chars: 5, total_chars: 5 } });
+  assert.match(good, /Concrete evidence retained/);
   assert.match(good, /Led a robotics club of 14 students/);
   const old = withAnalysis({ summary: 'FAKE OUTPUT' });
   assert.doesNotMatch(old, /FAKE OUTPUT/);
@@ -369,7 +430,7 @@ await check('the prompt names the part and keeps context out of the text block',
 await check('sample prompts ask for craft moves, not facts', () => {
   const prompt = buildEssayAnalysisPrompt({ title: 'S', text: 'x', kind: 'sample_essay' });
   assert.match(prompt, /craft_moves/);
-  assert.match(prompt, /Leave "facts" empty/);
+  assert.match(prompt, /facts.*Empty for samples/s);
 });
 
 await check('model findings are placed in the whole document, and quotes match', async () => {
@@ -646,7 +707,7 @@ await check('the stored text is re-read when the source changed since it was rea
 });
 
 await check('needsWork decides what opens with the page', () => {
-  const ready = presentMaterial({ id: 'n1', title: 'A', type: 'essay', file_url: FILE, content: encodeDocumentText({ source: FILE, reader: 'pdf', text: BODY }), analysis: { version: ANALYSIS_VERSION, status: 'ready', source: { key: sourceKey(FILE) }, coverage: { complete: true } } });
+  const ready = presentMaterial({ id: 'n1', title: 'A', type: 'essay', file_url: FILE, content: encodeDocumentText({ source: FILE, reader: 'pdf', text: BODY }), analysis: { version: ANALYSIS_VERSION, status: 'ready', analysis_role: 'writing_draft', source: { key: sourceKey(FILE) }, coverage: { complete: true } } });
   assert.equal(needsWork(ready, { modelReady: true }), false);
   const noAnalysis = presentMaterial({ id: 'n2', title: 'A', type: 'essay', file_url: FILE, content: encodeDocumentText({ source: FILE, reader: 'pdf', text: BODY }) });
   assert.equal(needsWork(noAnalysis, { modelReady: true }), true);
@@ -697,7 +758,7 @@ await check('an Extended Essay in a language subject needs its language', () => 
   assert.ok(warnings.some((w) => /Extended Essay subject .* needs a language/.test(w)));
 });
 
-await check('a long analysis keeps facts from every part, not only the first pages', () => {
+await check('a long analysis keeps evidence from every part, not only the first pages', () => {
   const results = Array.from({ length: 4 }, (_, p) => ({
     index: p,
     start: p * 100,
@@ -720,12 +781,12 @@ await check('a long analysis keeps facts from every part, not only the first pag
 await check('a sample never contributes facts, and a long list says how much it left out', () => {
   const key = sourceKey(FILE);
   const facts = Array.from({ length: 200 }, (_, i) => `Fact number ${i} about the applicant`);
-  const analysis = { version: ANALYSIS_VERSION, status: 'ready', source: { key }, facts, craft_moves: ['Opens with a concrete scene.'], summary: 'Summary.' };
+  const analysis = { version: ANALYSIS_VERSION, status: 'ready', analysis_role: 'applicant_evidence', source: { key }, facts, craft_moves: ['Opens with a concrete scene.'], summary: 'Summary.' };
   const content = encodeDocumentText({ source: FILE, reader: 'pdf', text: 'Text.' });
   const own = formatMaterialsForAI([{ id: 'o', title: 'Resume', type: 'resume', file_url: FILE, content, analysis }]);
-  assert.match(own, /Facts about the applicant found in the document/);
+  assert.match(own, /Concrete evidence retained/);
   assert.match(own, /…and \d+ more in the saved analysis/);
-  const sample = formatMaterialsForAI([{ id: 's', title: 'Sample', type: 'sample_essay', file_url: FILE, content, analysis: { ...analysis, facts: ['Lived in a small town in Ohio.'] } }]);
+  const sample = formatMaterialsForAI([{ id: 's', title: 'Sample', type: 'sample_essay', file_url: FILE, content, analysis: { ...analysis, analysis_role: 'sample_craft', facts: ['Lived in a small town in Ohio.'] } }]);
   assert.ok(!sample.includes('Lived in a small town in Ohio'), 'a sample fact reached the prompt');
   assert.ok(sample.includes('Opens with a concrete scene.'));
 });

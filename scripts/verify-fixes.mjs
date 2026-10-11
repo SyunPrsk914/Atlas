@@ -141,7 +141,7 @@ assert.ok(harvardChoices.some((c) => /Harvard/.test(c.label)));
 assert.equal(harvardChoices.some((c) => /Common App personal/.test(c.group)), false);
 
 const generated = buildGeneratePrompt({
-  essay: { title: 'UCAS Q1 — Motivation', prompt: ucas[0].prompt, content: '', application_platform: 'ucas', limit_unit: 'characters', word_limit: 4000, type: 'personal_statement' },
+  essay: { title: 'UCAS Q1 — Motivation', prompt: ucas[0].prompt, content: '', draft_anchor: 'A required intellectual question and the personal habit behind it.', application_platform: 'ucas', limit_unit: 'characters', word_limit: 4000, type: 'personal_statement' },
   university: { name: 'Oxford' },
   platform: 'ucas',
   profileText: '',
@@ -154,6 +154,8 @@ const generated = buildGeneratePrompt({
   ],
 });
 assert.match(generated, /must stay within 1,000 characters/);
+assert.match(generated, /A required intellectual question and the personal habit behind it/);
+assert.match(generated, /hard constraint/);
 assert.match(generated, /NOT written by the applicant/);
 assert.doesNotMatch(generated, /I grew up in Oslo[\s\S]*APPLICANT'S OWN/);
 

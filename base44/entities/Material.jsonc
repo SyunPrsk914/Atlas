@@ -31,6 +31,10 @@
     },
     "notes": {
       "type": "string"
+    },
+    "analysis_role": {
+      "type": "string",
+      "description": "How Atlas should interpret this material"
     }
   },
   "required": [

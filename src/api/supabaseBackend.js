@@ -43,8 +43,8 @@ const TABLES = {
 // functional against an older database — you simply re-run `supabase/schema.sql`
 // (idempotent) to turn the extra persistence on.
 const OPTIONAL_COLUMNS = {
-  materials: ['analysis'],
-  essays: ['limit_unit'],
+  materials: ['analysis', 'analysis_role'],
+  essays: ['limit_unit', 'draft_anchor'],
   universities: ['application_platform'],
   college_knowledge: ['source_url', 'source_text', 'research_provider', 'research_model', 'grounded'],
   profiles: [
@@ -61,13 +61,13 @@ const COLUMNS = {
   },
   essays: {
     university_id: 'text', university_name: 'text', title: 'text', prompt: 'text',
-    word_limit: 'number', content: 'text', status: 'text', type: 'text',
+    draft_anchor: 'text', word_limit: 'number', content: 'text', status: 'text', type: 'text',
     scope: 'text', application_platform: 'text', review_notes: 'text',
     limit_unit: 'text',
   },
   materials: {
     title: 'text', type: 'text', content: 'text', file_url: 'text', link_url: 'text', notes: 'text',
-    analysis: 'json',
+    analysis: 'json', analysis_role: 'text',
   },
   profiles: {
     nationality: 'text', school_system: 'text', graduation_year: 'text', background_summary: 'text',

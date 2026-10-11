@@ -14,13 +14,14 @@ import {
 } from 'lucide-react';
 import {
   KNOWLEDGE_KINDS, ABOUT_CATEGORIES, POINT_CATEGORIES, PATTERN_CATEGORIES, PATTERN_PLATFORMS,
-  buildKnowledgeInputs, knowledgeStatus, rebuildApplicantKnowledge,
+  GUIDANCE_CATEGORIES, buildKnowledgeInputs, knowledgeStatus, rebuildApplicantKnowledge,
 } from '@/lib/applicantKnowledge';
 
 const CATEGORIES = {
   brief: ABOUT_CATEGORIES,
   evidence: POINT_CATEGORIES,
   pattern: PATTERN_CATEGORIES,
+  guidance: GUIDANCE_CATEGORIES,
 };
 
 const EMPTY_DRAFT = { kind: 'brief', category: 'personality', text: '', source_label: '', platform: 'General' };
@@ -61,8 +62,8 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
           )}
         </div>
         <Textarea value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} rows={3} />
-        {item.kind === 'evidence' && (
-          <Input value={draft.source_label} onChange={(e) => setDraft({ ...draft, source_label: e.target.value })} placeholder="Where this comes from, e.g. Robotics material" />
+        {(item.kind === 'evidence' || item.kind === 'guidance') && (
+          <Input value={draft.source_label} onChange={(e) => setDraft({ ...draft, source_label: e.target.value })} placeholder={item.kind === 'guidance' ? 'Which guide or reference this comes from' : 'Where this comes from, e.g. Robotics material'} />
         )}
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={onSave} disabled={!draft.text.trim()}>
@@ -87,7 +88,7 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
           </span>
         </div>
         <p className="text-sm text-foreground/75 leading-relaxed">{item.text}</p>
-        {item.kind === 'evidence' && item.source_label && (
+        {(item.kind === 'evidence' || item.kind === 'guidance') && item.source_label && (
           <p className="text-[11px] text-foreground/40 mt-1">Source: {item.source_label}</p>
         )}
       </div>
@@ -177,7 +178,7 @@ export default function AiKnowledge() {
       });
       await load();
       toast.success('AI knowledge base updated', {
-        description: `${plural(outcome.counts.brief, 'item')} about you, ${plural(outcome.counts.evidence, 'personal point')}, ${plural(outcome.counts.pattern, 'pattern')}.`,
+        description: `${plural(outcome.counts.brief, 'item')} about you, ${plural(outcome.counts.evidence, 'personal point')}, ${plural(outcome.counts.pattern, 'pattern')}, and ${plural(outcome.counts.guidance || 0, 'guidance item')}.`,
       });
       for (const warning of outcome.warnings) toast.warning('Some items were kept', { description: warning });
     } catch (e) {
@@ -258,7 +259,7 @@ export default function AiKnowledge() {
   }
 
   const patterns = byKind('pattern').filter((r) => patternFilter === 'all' || r.platform === patternFilter);
-  const sourceCounts = inputs?.counts || { profile: 0, materials: 0, samples: 0, essays: 0 };
+  const sourceCounts = inputs?.counts || { profile: 0, materials: 0, samples: 0, guidance: 0, essays: 0 };
 
   const renderSection = (kind, items, extra = null) => (
     <section className="space-y-3">
@@ -297,8 +298,8 @@ export default function AiKnowledge() {
           <Brain className="w-7 h-7 text-foreground/40" /> AI Knowledge Base
         </h1>
         <p className="text-foreground/50 mt-1.5 leading-relaxed">
-          What Atlas understands about you, and what successful applications look like. Essay drafts, reviews, and the full
-          application review read it. It is kept to your account, and you can edit or remove anything. It is separate from
+          What Atlas understands about you, what successful applications do well, and what your tips/reference sources teach. Essay drafts,
+          reviews, and the full application review read it. It is kept to your account, and you can edit or remove anything. It is separate from
           <span className="text-foreground/65"> University Research</span>, which is about schools.
         </p>
       </div>
@@ -325,11 +326,11 @@ export default function AiKnowledge() {
                 : 'Not built yet'}
             </p>
             <p className="text-xs text-foreground/45">
-              Sources: {sourceCounts.profile ? 'your profile' : 'no profile'} · {plural(sourceCounts.materials, 'material')} · {plural(sourceCounts.samples, 'sample essay')} · {plural(sourceCounts.essays, 'essay draft')}
+              Sources: {sourceCounts.profile ? 'your profile' : 'no profile'} · {plural(sourceCounts.materials, 'evidence material')} · {plural(sourceCounts.guidance, 'guide/reference')} · {plural(sourceCounts.samples, 'sample essay')} · {plural(sourceCounts.essays, 'essay draft')}
             </p>
             {status.built && (
               <p className="text-xs text-foreground/45">
-                {plural(status.counts.brief, 'item')} about you · {plural(status.counts.evidence, 'personal point')} · {plural(status.counts.pattern, 'pattern')}
+                {plural(status.counts.brief, 'item')} about you · {plural(status.counts.evidence, 'personal point')} · {plural(status.counts.pattern, 'pattern')} · {plural(status.counts.guidance, 'guidance item')}
               </p>
             )}
             {status.stale && (
@@ -373,6 +374,8 @@ export default function AiKnowledge() {
           ))}
         </div>
       ))}
+
+      {renderSection('guidance', byKind('guidance'))}
 
       <section className="space-y-3">
         {adding && !editingId ? (

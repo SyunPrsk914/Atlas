@@ -19,6 +19,7 @@ import {
   mergeLegacyIntoNotes,
   sourceKey,
 } from './materialDocument';
+import { analysisMatchesMaterialRole, materialAnalysisRole, presentMaterial } from './materialRole';
 
 /** Failures that will not change by themselves, so they are not retried on every visit. */
 export const NO_AUTO_RETRY_CODES = new Set([
@@ -47,7 +48,7 @@ export function needsWork(presented, { modelReady = false } = {}) {
  * @param {(file: File) => Promise<{ text: string, reader: string }>} deps.readFile
  * @param {(url: string) => Promise<{ text: string, reader: string }>} deps.readUrl
  * @param {(url: string, name: string) => Promise<{ text: string, reader: string }>} deps.readStored re-reads an uploaded file that is already stored
- * @param {(args: { title: string, kind: string, text: string, contextNotes: string, onProgress: (progress: { part: number, parts: number }) => void }) => Promise<object>} deps.analyze
+ * @param {(args: { title: string, kind: string, analysisRole: string, text: string, contextNotes: string, onProgress: (progress: { part: number, parts: number }) => void }) => Promise<object>} deps.analyze
  * @param {() => boolean} deps.hasModel true only when a real model is connected
  * @param {(id: string, patch: object) => Promise<object | null>} deps.save
  * @param {(id: string) => Promise<object | null>} deps.load the current row
@@ -168,7 +169,9 @@ export function createMaterialJobs({ readFile, readUrl, readStored, analyze, has
     }
     working = { ...working, ...fresh };
 
-    if (!force && working.analysis?.status === 'ready' && analysisMatchesSource(working.analysis, key)) {
+    if (!force && working.analysis?.status === 'ready'
+      && analysisMatchesSource(working.analysis, key)
+      && analysisMatchesMaterialRole(working)) {
       publish(id, { state: 'done' });
       return { ...working, legacyMoved };
     }
@@ -183,8 +186,9 @@ export function createMaterialJobs({ readFile, readUrl, readStored, analyze, has
       const merged = await analyze({
         title: working.title || '',
         kind: working.type || 'essay',
+        analysisRole: materialAnalysisRole(working),
         text,
-        contextNotes: working.notes || '',
+        contextNotes: presentMaterial(working).notes || '',
         onProgress: ({ part, parts }) => publish(id, { state: 'analyzing', part, parts }),
       });
       const record = {

@@ -7,8 +7,8 @@ per-university roadmaps, an Essay Hub with scope awareness (e.g. the Common App
 personal statement is shared by all US schools except UC/MIT), full-application
 holistic review with strict acceptance estimates, material import (PDF, Word,
 RTF, HTML and text files, and web links, each read in full) that feeds every AI
-feature, and an AI Knowledge Base: a short profile of you, and the patterns that
-successful applications share, built from your own material.
+feature, and an AI Knowledge Base: a deep, evidence-grounded portrait of you, separate
+craft patterns from successful samples, and reusable tips/reference guidance.
 
 ## Stack
 
@@ -44,9 +44,10 @@ Atlas itself does not impose an AI request, token, or daily quota. A hosted free
 
 ## Materials and the AI Knowledge Base
 
-- **Materials** accept a PDF, Word (`.docx`), RTF, HTML or text file, or a web link. Atlas reads the whole document in the browser and starts the analysis as soon as the file is added; there is no Analyze button. Documents up to 200,000 characters (roughly 30 to 40 pages) are analysed in full, one local-model call per part of about 6,000 characters, so a long document can take many minutes. Local AI requests run one at a time, so other AI actions wait until an analysis finishes. Old `.doc` files and scanned or image-only PDFs cannot be read; Atlas says so and asks for another copy.
-- The **context box** of each material holds your notes. Text that older versions kept in a "Content" box was moved there, under its own heading, without overwriting your notes.
-- **AI Knowledge Base** (`/ai-knowledge`) lists what Atlas understands about you and what successful applications look like. Rebuilding needs a connected local model. Items you write yourself are never removed by a rebuild, and you can edit or delete any item.
+- **Materials** accept a PDF, Word (`.docx`), RTF, HTML or text file, or a web link. Atlas reads the whole document in the browser and starts the analysis as soon as the file is added; there is no Analyze button. Documents up to 200,000 characters (roughly 30 to 40 pages) are analysed in full, one local-model call per part of about 6,000 characters, so a long document can take many minutes. Local AI requests run one at a time, so other AI actions wait until an analysis finishes. Old `.doc` files and scanned or image-only PDFs cannot be read; Atlas says so and asks for another copy. Each material also has an **analysis lens**: Atlas can infer the purpose, or you can mark it as applicant evidence, a writing draft, academic work, personal context, a sample, tips/guide, or a college/application reference. The deep reader extracts literal facts, implied patterns, and what the source is useful for. Only a writing draft receives a writing score and line-level findings; an internal assessment, transcript, guide, or college data sheet is not treated as a personal essay. A sample contributes craft only, never another person's life.
+- The **context box** of each material holds your notes. Text that older versions kept in a "Content" box was moved there, under its own heading, without overwriting your notes. Context helps Atlas understand why a source matters but is never analyzed as document text.
+- **AI Knowledge Base** (`/ai-knowledge`) keeps dense, evidence-grounded items about you, concrete personal points, craft patterns from samples, and a separate tips/reference guidance layer. Rebuilding needs a connected local model. Items you write yourself are never removed by a rebuild, and you can edit or delete any item.
+- Every essay has a **required root / direction** field. Use it for the moments, interests, questions, relationships, or qualities the draft must grow from. Generation treats it as a hard constraint and uses the materials to deepen it instead of choosing a random activity.
 
 ## Layout
 
@@ -60,7 +61,7 @@ Atlas itself does not impose an AI request, token, or daily quota. A hosted free
 | `src/lib/researchSource.js` | Browser fetch and text extraction for a public admissions page |
 | `src/lib/documentReader.js` | Reads an uploaded PDF, Word (.docx), RTF, HTML or text file, or a web link, into plain text (pdf.js loads only when a PDF is read) |
 | `src/lib/materialJobs.js` | Reads and analyzes each material automatically, one at a time, and keeps each saved result in step with its file |
-| `src/lib/applicantKnowledge.js` | Builds and reads the AI Knowledge Base: about you, personal points, and successful-application patterns |
+| `src/lib/applicantKnowledge.js` | Builds and reads the AI Knowledge Base: deep About you items, personal points, sample craft patterns, and tips/reference guidance |
 | `api/invoke-llm.js` | Optional hosted-provider endpoint (Gemini grounding only on successful Gemini calls) |
 | `supabase/schema.sql` | Database schema + RLS + storage bucket (run once in Supabase SQL Editor) |
 | `base44/` | Original Base44 entity schemas — reference only |
