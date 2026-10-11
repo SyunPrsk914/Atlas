@@ -21,7 +21,9 @@ import { needsWork } from '@/lib/materialJobs';
 import { FINDING_KINDS, localSignals } from '@/lib/materialAnalysis';
 import { MAX_DOCUMENT_CHARS } from '@/lib/documentReader';
 import {
-  MATERIAL_TYPES, presentMaterial, materialWritePayload, isMaterialTypeCheckError, isSampleMaterial,
+  MATERIAL_TYPES, MATERIAL_ANALYSIS_ROLES, presentMaterial, materialWritePayload,
+  isMaterialTypeCheckError, isSampleMaterial, materialAnalysisRole, materialAnalysisRoleChoice,
+  materialRoleLabel, isWritingMaterial,
 } from '@/lib/materialRole';
 import {
   legacyMigrationPatch, legacyTypedText, mergeLegacyIntoNotes, materialSource, materialDisplayName,
@@ -45,7 +47,7 @@ const typeIcon = (type) => materialTypes.find((t) => t.value === type)?.icon || 
 /** Files Atlas can read. Old .doc files and images are offered, and explained, when chosen. */
 const FILE_ACCEPT = '.pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.rtf,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/csv,text/html';
 
-const EMPTY_FORM = { title: '', type: 'document', link_url: '', notes: '' };
+const EMPTY_FORM = { title: '', type: 'document', analysis_role: 'auto', link_url: '', notes: '' };
 
 const FINDING_ICON = {
   strength: CheckCircle2,
@@ -151,7 +153,7 @@ function ScoreBar({ label, value, hint }) {
   );
 }
 
-/** The instant, zero-cost read on the document text. Shown without a model call. */
+/** Instant writing-only signals. Non-writing documents are not scored or style-flagged. */
 function SignalLine({ text }) {
   const signals = useMemo(() => localSignals(text || ''), [text]);
   return (
@@ -215,16 +217,40 @@ function coverageNote(analysis) {
   return parts.join(' ');
 }
 
-function AnalysisView({ analysis }) {
+function AnalysisView({ analysis, item }) {
   const findings = analysis.findings || [];
+  const role = analysis.analysis_role || materialAnalysisRole(item);
+  const isWriting = role === 'writing_draft';
+  const isSample = role === 'sample_craft';
+  const roleLabel = materialRoleLabel(role);
+  const insightHeading = isSample
+    ? 'Craft reading — what the writer is doing'
+    : role === 'academic_work'
+      ? 'What this work suggests about the applicant as a thinker'
+      : role === 'personal_context'
+        ? 'What this suggests about the applicant'
+        : role === 'advice' || role === 'application_reference'
+          ? 'Useful guidance, not applicant biography'
+          : 'What this suggests about the applicant';
+  const factsHeading = role === 'application_reference'
+    ? 'Concrete reference points'
+    : isSample ? '' : 'Concrete evidence retained';
+
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap gap-4">
-        <ScoreBar label="Overall" value={analysis.overall_score} />
-        <ScoreBar label="Specificity" value={analysis.specificity_score} hint="names, numbers, concrete verbs" />
-        <ScoreBar label="Rhythm" value={analysis.rhythm_score} hint="sentence-length variety" />
-        <ScoreBar label="Voice" value={analysis.voice_score} hint="could only be this person" />
+      <div className="flex items-center gap-2 flex-wrap">
+        <Badge variant="outline" className="text-[10px] h-5 px-1.5">{roleLabel}</Badge>
+        {analysis.document_type && <span className="text-xs text-foreground/45">{analysis.document_type}</span>}
       </div>
+
+      {isWriting && (
+        <div className="flex flex-wrap gap-4">
+          <ScoreBar label="Overall" value={analysis.overall_score} />
+          <ScoreBar label="Specificity" value={analysis.specificity_score} hint="names, numbers, concrete verbs" />
+          <ScoreBar label="Rhythm" value={analysis.rhythm_score} hint="sentence-length variety" />
+          <ScoreBar label="Voice" value={analysis.voice_score} hint="could only be this person" />
+        </div>
+      )}
 
       {coverageNote(analysis) && (
         <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200">
@@ -233,31 +259,43 @@ function AnalysisView({ analysis }) {
         </div>
       )}
 
-      {analysis.sounds_like_ai && (
+      {isWriting && analysis.sounds_like_ai && (
         <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200">
           <TriangleAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
           <p className="text-xs text-red-700">
-            The AI read this as machine-generated. Admissions readers are trained to spot exactly this —
-            fix the stock phrases below before sending anything.
+            The writing contains patterns that can sound machine-generated. Treat this as a prompt to inspect the highlighted lines,
+            not as a verdict about the applicant or the document&apos;s author.
           </p>
         </div>
       )}
 
-      {analysis.thesis && (
-        <p className="text-xs text-foreground/55">
-          <span className="font-medium text-foreground/70">What it is actually saying: </span>
-          {analysis.thesis}
+      {(analysis.deep_read || analysis.summary) && (
+        <div className="rounded-lg border border-border p-3.5">
+          <h4 className="text-xs font-medium text-foreground/60 mb-1.5">Deep reading — beyond the literal summary</h4>
+          <p className="text-sm text-foreground/65 leading-relaxed whitespace-pre-line">{analysis.deep_read || analysis.summary}</p>
+        </div>
+      )}
+      {analysis.significance && (
+        <p className="text-sm text-foreground/60 leading-relaxed">
+          <span className="font-medium text-foreground/70">Why this matters: </span>
+          {analysis.significance}
         </p>
       )}
-      {analysis.summary && (
-        <p className="text-sm text-foreground/60 leading-relaxed whitespace-pre-line">{analysis.summary}</p>
+
+      {analysis.personal_signals?.length > 0 && (
+        <div className="rounded-lg border border-accent/20 bg-accent/5 p-3.5">
+          <h4 className="text-xs font-medium text-accent mb-1.5">{insightHeading}</h4>
+          <ul className="space-y-2 list-disc pl-4">
+            {analysis.personal_signals.map((signal, i) => (
+              <li key={i} className="text-xs text-foreground/70 leading-relaxed">{signal}</li>
+            ))}
+          </ul>
+        </div>
       )}
 
-      {analysis.facts?.length > 0 && (
+      {analysis.facts?.length > 0 && factsHeading && (
         <div className="rounded-lg border border-border p-3.5">
-          <h4 className="text-xs font-medium text-foreground/60 mb-1.5">
-            Facts about the applicant in this document — used in drafts and reviews
-          </h4>
+          <h4 className="text-xs font-medium text-foreground/60 mb-1.5">{factsHeading}</h4>
           <ul className="space-y-1 list-disc pl-4">
             {analysis.facts.map((fact, i) => (
               <li key={i} className="text-xs text-foreground/65">{fact}</li>
@@ -266,23 +304,34 @@ function AnalysisView({ analysis }) {
         </div>
       )}
 
-      {analysis.craft_moves?.length > 0 && (
-        <div className="rounded-lg border border-border p-3.5">
-          <h4 className="text-xs font-medium text-foreground/60 mb-1.5">
-            Craft moves to study — technique, never this writer&apos;s life
-          </h4>
+      {analysis.guidance?.length > 0 && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3.5">
+          <h4 className="text-xs font-medium text-blue-800 mb-1.5">{insightHeading}</h4>
           <ul className="space-y-1 list-disc pl-4">
-            {analysis.craft_moves.map((move, i) => (
-              <li key={i} className="text-xs text-foreground/65">{move}</li>
+            {analysis.guidance.map((guidance, i) => (
+              <li key={i} className="text-xs text-foreground/65 leading-relaxed">{guidance}</li>
             ))}
           </ul>
         </div>
       )}
 
-      {analysis.top_actions?.length > 0 && (
+      {analysis.craft_moves?.length > 0 && (
+        <div className="rounded-lg border border-border p-3.5">
+          <h4 className="text-xs font-medium text-foreground/60 mb-1.5">
+            {isSample ? 'Craft moves to study — technique, never this writer’s life' : 'Craft observations'}
+          </h4>
+          <ul className="space-y-1 list-disc pl-4">
+            {analysis.craft_moves.map((move, i) => (
+              <li key={i} className="text-xs text-foreground/65 leading-relaxed">{move}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {isWriting && analysis.top_actions?.length > 0 && (
         <div className="bg-accent/5 border border-accent/20 rounded-lg p-3.5">
           <h4 className="text-xs font-medium text-accent mb-1.5 flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5" /> Do these first
+            <Sparkles className="w-3.5 h-3.5" /> Do these writing fixes first
           </h4>
           <ol className="space-y-1">
             {analysis.top_actions.map((a, i) => (
@@ -294,7 +343,7 @@ function AnalysisView({ analysis }) {
         </div>
       )}
 
-      {findings.length > 0 && (
+      {isWriting && findings.length > 0 && (
         <div className="space-y-2">
           <h4 className="text-xs font-medium text-foreground/60">
             {plural(findings.length, 'word-level finding')} — highlighted in the document text below
@@ -349,6 +398,9 @@ function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit,
   const Icon = typeIcon(item.type);
   const status = describeMaterial(item, job, modelReady);
   const sample = isSampleMaterial(item);
+  const writing = isWritingMaterial(item) || item.analysis?.analysis_role === 'writing_draft';
+  const lensChoice = materialAnalysisRoleChoice(item);
+  const roleLabel = materialRoleLabel(item.analysis?.analysis_role || materialAnalysisRole(item));
   const hasDocument = item.document_state === 'ready';
   const canExpand = hasDocument || item.analysis?.status === 'ready';
   const sourceUrl = materialSource(item);
@@ -368,9 +420,14 @@ function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit,
                 <CheckCircle2 className="w-2.5 h-2.5" /> analyzed
               </Badge>
             )}
-            {item.analysis?.sounds_like_ai && (
+            {item.analysis?.sounds_like_ai && writing && (
               <Badge variant="outline" className="h-5 px-1.5 text-[10px] gap-1 text-red-700 border-red-300 bg-red-50">
-                reads as AI
+                writing signal
+              </Badge>
+            )}
+            {!sample && (item.analysis?.status === 'ready' || lensChoice !== 'auto') && (
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-foreground/50 border-border bg-muted/30">
+                {roleLabel}
               </Badge>
             )}
             {sample && (
@@ -414,7 +471,7 @@ function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit,
             </div>
           )}
 
-          {!expanded && hasDocument && <SignalLine text={item.content} />}
+          {!expanded && hasDocument && writing && <SignalLine text={item.content} />}
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
@@ -459,7 +516,7 @@ function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit,
               </span>
             )}
           </div>
-          {item.analysis?.status === 'ready' && <AnalysisView analysis={item.analysis} />}
+          {item.analysis?.status === 'ready' && <AnalysisView analysis={item.analysis} item={item} />}
           {hasDocument && (
             <DocumentText
               text={item.content}
@@ -577,6 +634,7 @@ export default function Materials() {
     setForm({
       title: row.title || '',
       type: isSampleMaterial(row) ? 'sample_essay' : (row.type || 'document'),
+      analysis_role: materialAnalysisRoleChoice(row),
       link_url: row.link_url || '',
       notes: presentMaterial(row).notes || '',
     });
@@ -603,8 +661,11 @@ export default function Materials() {
     if (!title) return;
     setSaving(true);
     try {
-      const previousSource = editing ? materialSource(editing) : '';
-      let fileUrl = editing?.file_url || '';
+      const existing = editing ? rows.find((row) => row.id === editing.id) || editing : null;
+      const previousSource = existing ? materialSource(existing) : '';
+      const previousNotes = existing ? presentMaterial(existing).notes || '' : '';
+      const previousLens = existing ? materialAnalysisRoleChoice(existing) : 'auto';
+      let fileUrl = existing?.file_url || '';
       if (file) {
         const uploaded = await base44.integrations.Core.UploadPublicFile({ file });
         fileUrl = uploaded.file_url;
@@ -613,6 +674,7 @@ export default function Materials() {
       const payload = {
         title,
         type: form.type,
+        analysis_role: form.analysis_role || 'auto',
         link_url: linkUrl,
         file_url: fileUrl,
         notes: form.notes,
@@ -635,12 +697,18 @@ export default function Materials() {
 
       const nextSource = materialSource({ file_url: fileUrl, link_url: linkUrl });
       const documentChanged = !!file || nextSource !== previousSource;
+      const analysisContextChanged = !!existing && (
+        existing.title !== title
+        || existing.type !== form.type
+        || previousLens !== (form.analysis_role || 'auto')
+        || previousNotes !== form.notes
+      );
       setRows((prev) => (editing
         ? prev.map((row) => (row.id === saved.id ? { ...row, ...saved } : row))
         : [...prev, saved]));
       setDialogOpen(false);
 
-      if (nextSource && documentChanged) {
+      if (nextSource && (documentChanged || analysisContextChanged)) {
         // A new or replaced document is read, then analysed, with no further step.
         queueRead(saved, { file: file || null, force: true, notify: true });
         toast.success(editing ? 'Material updated' : 'Material added', {
@@ -699,13 +767,12 @@ export default function Materials() {
         <div className="max-w-2xl">
           <h1 className="font-display text-3xl font-semibold tracking-tight">Materials</h1>
           <p className="text-foreground/50 mt-1.5 leading-relaxed">
-            Your own documents and links are evidence about you. Atlas reads each one itself — a PDF, a Word file, a text file, or a web page — and
-            analyzes the whole text, marking word-level findings, starting as soon as it is added. A successful essay from someone else is kept separately:
-            Atlas studies its craft but never treats that life as yours.
+            Your own documents and links are evidence about you. Atlas reads each one itself — a PDF, a Word file, a text file, or a web page —
+            then chooses a reading lens instead of forcing every source into an essay score. It looks for the document&apos;s deeper meaning, the person or
+            thinking behind it, and what is useful later. A successful essay from someone else is kept separately: Atlas studies its craft but never treats that life as yours.
           </p>
           <p className="text-xs text-foreground/40 mt-2 leading-relaxed">
-            Context / Notes is for telling Atlas what a file is, for example “My robotics reflection, junior year” or “UK sample — Oxford PPE 2024”.
-            It is kept with the material and is never analyzed as the document.
+            Context / Notes explains what a source is and why you kept it. It is kept with the material, helps Atlas read between the lines, and is never analyzed as the document itself.
           </p>
           {shown.length > 0 && (
             <p className="text-xs text-foreground/40 mt-2 flex items-center gap-2 flex-wrap">
@@ -822,7 +889,7 @@ export default function Materials() {
           <DialogHeader>
             <DialogTitle className="font-display">{editing ? 'Edit Material' : 'Add Material'}</DialogTitle>
             <DialogDescription>
-              Atlas reads the file or page itself, so nothing needs to be pasted. Reading and analysis start when you save.
+              Atlas reads the file or page itself, so nothing needs to be pasted. Saving starts the read; the selected lens determines what Atlas should learn from it.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
@@ -849,6 +916,23 @@ export default function Materials() {
                   This is not your writing. Reviews will study its content, expression, voice, tone, and word
                   choice, and will not score it as your essay or borrow its biography.
                 </p>
+              )}
+            </div>
+            <div>
+              <Label className="block text-xs font-medium text-foreground/50 mb-1.5">How should Atlas use this material?</Label>
+              <Select value={form.analysis_role || 'auto'} onValueChange={(v) => setForm({ ...form, analysis_role: v })}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {Object.entries(MATERIAL_ANALYSIS_ROLES).map(([value, meta]) => (
+                    <SelectItem key={value} value={value}>{meta.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-foreground/35 mt-1.5 leading-relaxed">
+                This lens prevents a physics assessment, tips sheet, or college reference from being treated like a personal essay. Choose “Let Atlas identify” if you are unsure.
+              </p>
+              {form.analysis_role && form.analysis_role !== 'auto' && (
+                <p className="text-[11px] text-accent/80 mt-1">{MATERIAL_ANALYSIS_ROLES[form.analysis_role]?.hint}</p>
               )}
             </div>
             <div>
@@ -881,14 +965,14 @@ export default function Materials() {
               </p>
             </div>
             <div>
-              <Label className="block text-xs font-medium text-foreground/50 mb-1.5">Context / Notes — what this file is (not analyzed as the document)</Label>
+              <Label className="block text-xs font-medium text-foreground/50 mb-1.5">Context / Notes — what this source is and why it matters</Label>
               <Textarea
                 value={form.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                placeholder="e.g. 'My personal reflection on robotics club, junior year — focus on leadership' or 'UK sample — Oxford PPE successful essay 2024, study its opening'"
+                placeholder="Describe what this source is, the situation around it, or what you want Atlas to notice."
                 rows={3}
               />
-              <p className="text-[11px] text-foreground/35 mt-1">Tell the AI what this file is. It is never scored for authenticity.</p>
+              <p className="text-[11px] text-foreground/35 mt-1">Atlas uses this as context, not as document text. It will not treat a guide or reference as proof about you.</p>
             </div>
           </div>
           <DialogFooter>

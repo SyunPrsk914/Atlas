@@ -9,7 +9,11 @@
 // into the Context / Notes field, so nothing is lost and the AI never treats
 // it as the document itself.
 
-export const ANALYSIS_VERSION = 2;
+// Increment when the analysis contract changes. Older derived analyses stay in
+// the database but are never presented as if they were produced by the new
+// reading lens; the next run creates a fresh interpretation without touching
+// the uploaded document or the applicant's notes.
+export const ANALYSIS_VERSION = 3;
 
 const DOCUMENT_HEADER = /^\[\[atlas-doc:v1 key=([0-9a-f]{8}) reader=([a-z0-9-]+) chars=(\d+)\]\]\n?/;
 
@@ -101,20 +105,21 @@ export function analysisMatchesSource(analysis, currentKey) {
 }
 
 /**
- * The write that moves old free text into Context and drops analyses that were
- * made from it. Returns null when there is nothing to migrate.
- * The patch never touches a current (version 2) analysis.
+ * The write that moves old free text into Context without deleting any derived
+ * analysis. Returns null when there is nothing to migrate. An analysis from an
+ * old text/source/version is hidden by presentMaterial until it is rebuilt.
  */
 export function legacyMigrationPatch(row) {
   const legacy = legacyTypedText(row);
-  const oldAnalysis = !!row?.analysis && row.analysis.version !== ANALYSIS_VERSION;
-  if (!legacy && !oldAnalysis) return null;
-  const patch = {};
-  if (legacy) {
+  if (!legacy) return null;
+  const patch = {
     // The raw notes are used on purpose: a legacy sample-essay tag must survive.
-    patch.notes = mergeLegacyIntoNotes(row.notes, legacy);
-    patch.content = null;
-  }
-  if (oldAnalysis) patch.analysis = null;
+    notes: mergeLegacyIntoNotes(row.notes, legacy),
+    content: null,
+  };
+  // Do not delete an older derived analysis during migration. It is hidden by
+  // presentMaterial when it does not match ANALYSIS_VERSION, then replaced by
+  // the new lens once a model is available. Keeping it here makes the upgrade
+  // non-destructive even if the user has not connected a model yet.
   return patch;
 }

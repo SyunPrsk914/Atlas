@@ -17,43 +17,49 @@ export const FINDING_KINDS = {
  * strict about granularity: a finding must quote the exact words it is about,
  * otherwise the reviewer UI has nothing to highlight.
  */
-const GRANULARITY_RULES = `ANALYSIS METHOD — read the text word by word, not by topic:
-1. Break the text into sentences, then examine every sentence for: filler phrases, hedging, passive voice, nominalisation, sentence-length spikes, repeated sentence openers, and word choices that sound machine-generated.
-2. For every issue you find, quote the EXACT phrase you are objecting to, give its character offset (the 0-based index of the phrase within the text), and say concretely what to do instead. Never report a finding without a quote and an offset.
-3. Score the rhythm and specificity separately. "Specific" means names, numbers, places, and concrete verbs. "Rhythm" means sentence lengths and openings actually vary.
-4. Do not invent problems. If the text is clean in an area, say so in the summary rather than manufacturing findings.
-5. Do not rewrite the whole piece — this is a diagnosis, not a rewrite.`;
+const GRANULARITY_RULES = `ANALYSIS METHOD — read the text word by word and interpret it in context, not by topic alone:
+1. First decide what kind of source this is and what job it is doing. A document may be an internal assessment, research report, transcript, tips sheet, college data, personal reflection, past essay, or someone else's sample. Do not assume every document is an admissions essay.
+2. Read for the literal layer (what it says), the implied layer (what choices, priorities, habits, emotions, tensions, or values those details reveal), and the useful layer (what Atlas should remember or apply later). Separate direct evidence from cautious interpretation.
+3. For an applicant's own work, connect observations across the document: why this question, method, example, subject, or detail; what the author persists through; what they notice; how they respond to uncertainty; and what this suggests about the person. Do not invent biography or certainty.
+4. Only a writing draft receives a writing assessment and exact word-level findings. Do not score an internal assessment, transcript, guide, data sheet, or reference document as an essay. For non-writing sources, explain the meaning and usefulness instead.
+5. For every writing finding, quote the EXACT phrase, give its character offset (0-based within this part), and say concretely what to do instead. Never manufacture a finding just to fill a list.
+6. Do not rewrite the whole piece. Return a deep reading that helps the applicant understand what the material means and how it can be used.`;
+
+const ANALYSIS_ROLES = {
+  auto: 'The lens is automatic. Infer the document role from the title, applicant context, and text, then name it in analysis_role.',
+  applicant_evidence: 'This is the applicant\'s evidence. Extract facts, experiences, choices, values, habits, motivations, and the person that emerges between the lines. Do not reduce it to a résumé summary.',
+  writing_draft: 'This is the applicant\'s writing draft. Interpret its underlying story and voice, then assess writing quality and add exact line-level findings. The score is about this draft, not the applicant\'s worth.',
+  sample_craft: 'This is someone else\'s successful writing. Study its structure, pacing, diction, emotional movement, evidence, and reader effect. Never extract its biography as the applicant\'s facts and never score it as the applicant\'s writing.',
+  academic_work: 'This is the applicant\'s academic work or assessment. Do not rate it as a college essay. Read the intellectual problem, method, evidence, curiosity, persistence, standards, and approach to uncertainty; explain what that can reveal about the applicant.',
+  personal_context: 'This is the applicant\'s personal context or reflection. Read for identity, relationships, values, tensions, motivations, change, and the details that make the person distinctive. Keep interpretations anchored to evidence.',
+  advice: 'This is a tips document or writing guide. Extract principles, warnings, decision rules, and useful process guidance. It is not evidence about the applicant and must not create applicant facts or personality claims.',
+  application_reference: 'This is an application or college reference. Extract requirements, criteria, constraints, definitions, and practical implications. It is not the applicant\'s biography and must not be scored as an essay.',
+};
+
+const VALID_ANALYSIS_ROLES = Object.keys(ANALYSIS_ROLES);
 
 /** Prompt for analysing one part of a material (the whole material when it is short). */
 export function buildEssayAnalysisPrompt({
   title,
   text,
   kind = 'essay',
+  analysisRole = 'auto',
   contextNotes = '',
   partIndex = 1,
   partCount = 1,
   partStart = 0,
   documentChars = text.length,
 }) {
-  const kindLabel = {
-    essay: 'a personal statement or essay written by the applicant',
-    sample_essay: 'a successful essay written by someone else',
-    resume: 'a resume or CV',
-    transcript: 'an academic transcript',
-    document: 'a supporting document',
-    note: 'a personal note or reflection',
-    other: 'a supporting document',
-  }[kind] || 'a document';
-
-  const isSample = kind === 'sample_essay';
+  const requestedRole = VALID_ANALYSIS_ROLES.includes(analysisRole) ? analysisRole : 'auto';
+  const isSample = requestedRole === 'sample_craft' || kind === 'sample_essay';
+  const roleInstruction = ANALYSIS_ROLES[isSample ? 'sample_craft' : requestedRole];
   const sampleRule = isSample
-    ? `THIS IS A SAMPLE. It was not written by the applicant.
-Study it as craft, word by word: content, expression, voice, tone, the characteristics of the writing, the emotion it evokes, and how each word is used to show what the writer wants the reader to understand.
-Do not score it as the applicant's writing. Do not suggest they submit it. Do not treat any person, place, or event in it as their life.
-For a sample, your job is to extract reusable technique (opening, structure, evidence density, reflection move, closing) that the applicant can apply to their OWN story. Put those in "craft_moves". Leave "facts" empty.
+    ? `THIS IS A SAMPLE. It was not written by the applicant. Put facts about its writer in neither "facts" nor "personal_signals". Put reusable technique in "craft_moves" only.
 `
-    : `THIS IS THE APPLICANT'S OWN MATERIAL. It is evidence about their life.
-Read it for concrete facts, experiences, values, and voice that can be reused when drafting essays. Put the concrete facts the text states in "facts" (roles, dates, places, numbers, outcomes, responsibilities, relationships, and values they show), one short line each. Leave "craft_moves" empty.
+    : requestedRole === 'advice' || requestedRole === 'application_reference'
+      ? `THIS IS NOT THE APPLICANT'S BIOGRAPHY. Do not turn its advice, requirements, examples, or statistics into facts about the applicant. Use "guidance" for what should be remembered.
+`
+      : `THIS IS THE APPLICANT'S OWN MATERIAL. Its details are evidence, but interpretations must be cautious and tied to the text. Use "facts" for what it directly establishes and "personal_signals" for supported between-the-lines reading.
 `;
 
   const contextBlock = contextNotes && String(contextNotes).trim()
@@ -61,7 +67,7 @@ Read it for concrete facts, experiences, values, and voice that can be reused wh
 ---
 ${String(contextNotes).trim()}
 ---
-The context above only tells you what kind of document this is. Use it to understand what to expect in the text below, and nothing more.
+Use this only to understand what the source is and why the applicant kept it. If the note conflicts with the document, say so cautiously rather than treating the note as proof.
 `
     : '';
 
@@ -69,17 +75,20 @@ The context above only tells you what kind of document this is. Use it to unders
     ? `This is PART ${partIndex} of ${partCount} of the document (characters ${partStart + 1} to ${partStart + text.length} of ${documentChars}). The other parts are analyzed separately. Judge only this part, and do not guess at text you cannot see. Offsets count from the start of the TEXT TO ANALYZE block below.`
     : 'This is the whole document. Offsets count from the start of the TEXT TO ANALYZE block below.';
 
-  return `You are a meticulous line editor reviewing ${kindLabel} titled "${title}".
+  return `You are Atlas's deep reader, not an automatic essay scorer. You are reviewing the source titled "${title}".
+
+REQUESTED ANALYSIS LENS: ${requestedRole}
+${roleInstruction}
 
 ${sampleRule}${contextBlock}
 ${GRANULARITY_RULES}
 
-WHAT THE ADMISSIONS COMMITTEE IS ACTUALLY LOOKING FOR:
-- A distinct voice that could only belong to this applicant.
-- Evidence rather than assertion: names, numbers, roles, outcomes.
-- Reflection that changes something, not a moral at the end of the story.
-- For a resume/CV: signal density, quantified impact, and whether it reads as a list of duties.
-- For a sample: what craft move makes it work, and how could that move be applied to a completely different life?
+WHAT A USEFUL DEEP READ LOOKS LIKE:
+- Do not stop at "the document says X." Ask what the selection, ordering, specificity, omissions, method, emotional distance, and repeated concerns imply.
+- Name the document's central meaning and why it matters for the applicant's larger story.
+- For own material, identify patterns in how the applicant thinks, works, relates to people, handles difficulty, chooses problems, and spends attention — only when the text supports it.
+- For advice/reference sources, convert information into usable rules, not personality claims.
+- For samples, explain the writer's craft and reader effect without importing any event, identity, or achievement into the applicant's life.
 
 CRITICAL RULE ABOUT CONTEXT:
 The context note (if any) is NEVER the text to analyze. Analyze ONLY the TEXT TO ANALYZE block below. If you analyze the context note and say "this is not authentic" or "this sounds like AI", you are making a fundamental mistake.
@@ -91,11 +100,18 @@ TEXT TO ANALYZE (between the markers; do not include the markers in offsets):
 ${text}
 TEXT>>>
 
-Return findings as a flat list. Use these exact "kind" values:
-- "strength" — something that is genuinely working and should be protected while editing.
-- "issue"   — a concrete defect that must be fixed.
-- "risk"    — something an admissions reader could read as a weakness (generic, overclaiming, résumé-in-prose).
-- "style"   — a craft observation (rhythm, sentence variety, diction).
+Return JSON only. Use these fields:
+- "analysis_role": one of ${VALID_ANALYSIS_ROLES.join(', ')}. For auto, choose the best role after reading.
+- "document_type": a specific plain-language classification (for example, physics internal assessment, writing guide, personal reflection, college requirements, or past essay).
+- "deep_read": one dense paragraph about what the source is really doing and what its choices imply, beyond a factual summary.
+- "significance": one dense paragraph about why this matters to the applicant's profile or future application, or why it is useful as guidance/reference.
+- "personal_signals": several dense, cautious interpretations in the form signal → textual evidence → why it may matter. Empty for samples, tips, and references.
+- "facts": direct, reusable facts only. Empty for samples, tips, and references; do not turn another person's life or a guide's examples into the applicant's facts.
+- "guidance": reusable rules, requirements, warnings, or practical implications. Use this for tips, guides, and references; it may also contain a next step for another source.
+- "craft_moves": reusable writing technique. Required for samples; empty unless craft is genuinely relevant.
+- "top_actions": at most a few next actions. These are not sentence-by-sentence writing fixes for non-writing sources.
+- "writing_assessment": only for writing_draft; include overall_score, specificity_score, rhythm_score, and voice_score from 0 to 10. For every other role leave it empty.
+- "findings": only for writing_draft; each item has kind, exact quote, offset, note, and suggestion. Leave it empty for every other role.
 
 Return JSON only, matching the requested fields.`;
 }
@@ -103,6 +119,26 @@ Return JSON only, matching the requested fields.`;
 export const ESSAY_ANALYSIS_SCHEMA = {
   type: 'object',
   properties: {
+    analysis_role: { type: 'string' },
+    document_type: { type: 'string' },
+    deep_read: { type: 'string' },
+    significance: { type: 'string' },
+    personal_signals: { type: 'array', items: { type: 'string' } },
+    facts: { type: 'array', items: { type: 'string' } },
+    guidance: { type: 'array', items: { type: 'string' } },
+    craft_moves: { type: 'array', items: { type: 'string' } },
+    top_actions: { type: 'array', items: { type: 'string' } },
+    writing_assessment: {
+      type: 'object',
+      properties: {
+        overall_score: { type: 'number' },
+        specificity_score: { type: 'number' },
+        rhythm_score: { type: 'number' },
+        voice_score: { type: 'number' },
+      },
+    },
+    // These legacy top-level fields are accepted so an older local model can
+    // still be normalized; they are ignored for non-writing roles.
     overall_score: { type: 'number' },
     specificity_score: { type: 'number' },
     rhythm_score: { type: 'number' },
@@ -125,9 +161,6 @@ export const ESSAY_ANALYSIS_SCHEMA = {
         },
       },
     },
-    top_actions: { type: 'array', items: { type: 'string' } },
-    facts: { type: 'array', items: { type: 'string' } },
-    craft_moves: { type: 'array', items: { type: 'string' } },
   },
 };
 
@@ -215,10 +248,27 @@ const cleanList = (value, max) => (Array.isArray(value) ? value : [])
   .filter(Boolean)
   .slice(0, max);
 
-export function normalizeAnalysis(raw, sourceText = '') {
+export function normalizeAnalysis(raw, sourceText = '', fallbackRole = 'writing_draft') {
   if (!raw || typeof raw !== 'object') return null;
+  const requested = VALID_ANALYSIS_ROLES.includes(fallbackRole) ? fallbackRole : 'auto';
+  const returned = VALID_ANALYSIS_ROLES.includes(String(raw.analysis_role || '').trim())
+    ? String(raw.analysis_role).trim()
+    : '';
+  // "auto" is an instruction, not a useful final classification, when the
+  // caller already knows that this is a writing draft or sample.
+  // An explicit applicant-selected lens is authoritative. Only automatic
+  // materials allow the model to choose a final role; this prevents a model
+  // from turning an internal assessment into a writing score by accident.
+  const analysisRole = requested !== 'auto'
+    ? requested
+    : returned || requested;
+  const writing = analysisRole === 'writing_draft';
+  const sampleOrReference = ['sample_craft', 'advice', 'application_reference'].includes(analysisRole);
+  const assessment = raw.writing_assessment && typeof raw.writing_assessment === 'object'
+    ? raw.writing_assessment
+    : raw;
 
-  const findings = Array.isArray(raw.findings)
+  const findings = writing && Array.isArray(raw.findings)
     ? raw.findings
       .filter((f) => f && (f.quote || f.note))
       .map((f, i) => {
@@ -246,19 +296,25 @@ export function normalizeAnalysis(raw, sourceText = '') {
     : [];
 
   return {
-    overall_score: clampScore(raw.overall_score),
-    specificity_score: clampScore(raw.specificity_score),
-    rhythm_score: clampScore(raw.rhythm_score),
-    voice_score: clampScore(raw.voice_score),
-    sounds_like_ai: !!raw.sounds_like_ai,
+    analysis_role: analysisRole,
+    document_type: String(raw.document_type || ''),
+    deep_read: String(raw.deep_read || raw.summary || ''),
+    significance: String(raw.significance || ''),
+    personal_signals: sampleOrReference ? [] : cleanList(raw.personal_signals, 80),
+    overall_score: writing ? clampScore(assessment.overall_score) : null,
+    specificity_score: writing ? clampScore(assessment.specificity_score) : null,
+    rhythm_score: writing ? clampScore(assessment.rhythm_score) : null,
+    voice_score: writing ? clampScore(assessment.voice_score) : null,
+    sounds_like_ai: writing && !!raw.sounds_like_ai,
     word_count: Number(raw.word_count) || textStats(sourceText).words,
-    reading_level: String(raw.reading_level || ''),
+    reading_level: writing ? String(raw.reading_level || '') : '',
     thesis: String(raw.thesis || ''),
-    summary: String(raw.summary || ''),
+    summary: String(raw.summary || raw.deep_read || ''),
     findings,
     top_actions: cleanList(raw.top_actions, 12),
-    facts: cleanList(raw.facts, 40),
-    craft_moves: cleanList(raw.craft_moves, 20),
+    facts: sampleOrReference ? [] : cleanList(raw.facts, 80),
+    guidance: cleanList(raw.guidance, 60),
+    craft_moves: cleanList(raw.craft_moves, 40),
   };
 }
 
@@ -274,10 +330,17 @@ function briefly(text, max) {
   return `${value.slice(0, max).replace(/\s+\S*$/, '')}…`;
 }
 
-export function mergeAnalysisParts(results, { fullText = '' } = {}) {
+export function mergeAnalysisParts(results, { fullText = '', analysisRole: requestedRole = 'writing_draft' } = {}) {
   const usable = results
-    .map((r) => ({ ...r, analysis: normalizeAnalysis(r.raw, r.text) }))
+    .map((r) => ({ ...r, analysis: normalizeAnalysis(r.raw, r.text, r.analysisRole || requestedRole) }))
     .filter((r) => r.analysis);
+  const roleCounts = usable.reduce((counts, item) => {
+    counts[item.analysis.analysis_role] = (counts[item.analysis.analysis_role] || 0) + 1;
+    return counts;
+  }, {});
+  const analysisRole = Object.entries(roleCounts)
+    .sort((a, b) => b[1] - a[1])[0]?.[0] || 'auto';
+  const writing = analysisRole === 'writing_draft';
   if (!usable.length) {
     throw new Error('The model returned no usable analysis for any part of the document.');
   }
@@ -335,19 +398,33 @@ export function mergeAnalysisParts(results, { fullText = '' } = {}) {
   const aiFlags = usable.filter((u) => u.analysis.sounds_like_ai).length;
   const partsTotal = results.length;
 
+  const deepRead = summaries.join('\n').slice(0, 12000);
+  const significance = usable
+    .map((u) => briefly(u.analysis.significance || '', summaryBudget))
+    .filter(Boolean)
+    .map((text, i) => usable.length > 1 ? `Part ${i + 1}: ${text}` : text)
+    .join('\n')
+    .slice(0, 9000);
+
   return {
-    overall_score: average('overall_score'),
-    specificity_score: average('specificity_score'),
-    rhythm_score: average('rhythm_score'),
-    voice_score: average('voice_score'),
-    sounds_like_ai: aiFlags > usable.length / 2,
+    analysis_role: analysisRole,
+    document_type: usable.map((u) => u.analysis.document_type).find(Boolean) || '',
+    deep_read: deepRead,
+    significance,
+    personal_signals: spread(usable.map((u) => u.analysis.personal_signals), 80),
+    overall_score: writing ? average('overall_score') : null,
+    specificity_score: writing ? average('specificity_score') : null,
+    rhythm_score: writing ? average('rhythm_score') : null,
+    voice_score: writing ? average('voice_score') : null,
+    sounds_like_ai: writing && aiFlags > usable.length / 2,
     word_count: textStats(fullText).words,
-    reading_level: usable.map((u) => u.analysis.reading_level).find(Boolean) || '',
+    reading_level: writing ? (usable.map((u) => u.analysis.reading_level).find(Boolean) || '') : '',
     thesis: usable.map((u) => u.analysis.thesis).find(Boolean) || '',
-    summary: summaries.join('\n').slice(0, 9000),
-    findings: numbered,
+    summary: deepRead,
+    findings: writing ? numbered : [],
     top_actions: spread(usable.map((u) => u.analysis.top_actions), 8),
     facts: spread(usable.map((u) => u.analysis.facts), 80),
+    guidance: spread(usable.map((u) => u.analysis.guidance), 60),
     craft_moves: spread(usable.map((u) => u.analysis.craft_moves), 40),
     coverage: {
       total_chars: fullText.length,
@@ -371,6 +448,7 @@ export function mergeAnalysisParts(results, { fullText = '' } = {}) {
 export async function analyzeDocument({
   title,
   kind = 'essay',
+  analysisRole = '',
   text,
   contextNotes = '',
   runAI,
@@ -379,6 +457,9 @@ export async function analyzeDocument({
   maxParts = ANALYSIS_MAX_PARTS,
 }) {
   const fullText = String(text || '');
+  const requestedRole = VALID_ANALYSIS_ROLES.includes(analysisRole)
+    ? analysisRole
+    : kind === 'sample_essay' ? 'sample_craft' : kind === 'essay' ? 'writing_draft' : 'auto';
   const { parts, total } = splitIntoParts(fullText, { partChars, maxParts });
   if (!parts.length) throw new Error('There is no text to analyze.');
 
@@ -390,6 +471,7 @@ export async function analyzeDocument({
       title,
       text: part.text,
       kind,
+      analysisRole: requestedRole,
       contextNotes,
       partIndex: part.index + 1,
       partCount: parts.length,
@@ -411,13 +493,13 @@ export async function analyzeDocument({
         lastError = outcome?.error || new Error('The model did not return an analysis.');
       }
     }
-    results.push({ index: part.index, start: part.start, end: part.end, text: part.text, raw });
+    results.push({ index: part.index, start: part.start, end: part.end, text: part.text, raw, analysisRole: requestedRole });
   }
 
   if (!results.some((r) => r.raw)) {
     throw lastError instanceof Error ? lastError : new Error(String(lastError?.message || lastError || 'The model did not return an analysis.'));
   }
-  const merged = mergeAnalysisParts(results, { fullText });
+  const merged = mergeAnalysisParts(results, { fullText, analysisRole: requestedRole });
   // Coverage is measured against the whole text. Parts beyond the cap were never
   // attempted (skipped); parts that were attempted and failed are counted apart.
   merged.coverage = {

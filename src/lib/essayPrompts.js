@@ -54,6 +54,17 @@ function applicantSection(applicantText) {
   return `APPLICANT KNOWLEDGE BASE (AI-built and applicant-edited. Keep the writing consistent with who this applicant is. Do not add facts beyond it and the materials):\n${text}\n\n`;
 }
 
+function rootBrief(essay) {
+  const root = String(essay?.draft_anchor || '').trim();
+  if (!root) {
+    return `APPLICANT'S REQUIRED ROOT / DIRECTION:\nNo root has been entered yet. Do not silently select a random activity just because it appears in the materials. Use only details that clearly serve this prompt, and put any missing personal decision or detail in gaps_for_applicant.`;
+  }
+  return `APPLICANT'S REQUIRED ROOT / DIRECTION (hard constraint):
+${root}
+
+Start from this direction. Do not swap in a different activity, hobby, or achievement merely because it is more convenient in the materials. Use the profile, deep material readings, guidance, and craft patterns to expand, verify, complicate, and structure this root. If a necessary concrete detail is not available, leave a clear gap for the applicant rather than inventing one.`;
+}
+
 function lengthBrief(essay, allEssays) {
   if (isUcasQuestion(essay)) {
     const budget = ucasCharacterBudget(allEssays?.length ? allEssays : [essay]);
@@ -95,10 +106,11 @@ ${materialsText}
 
 ${applicantSection(applicantText)}
 CRITICAL RULES FOR USING MATERIALS:
-- OWN MATERIALS (resume, past essays, personal notes, transcripts) are FACTS ABOUT THIS STUDENT. USE THEM HEAVILY. Pull specific names, numbers, roles, outcomes, dates, places, and distinctive phrasing that only this applicant could claim. The more you use their real context, the better the draft.
-- SAMPLE / SUCCESSFUL ESSAYS are NOT this student's life. Study them for CRAFT ONLY: how they open, how they structure evidence, how they reflect, what tone they use, how they show emotion with specific words. NEVER copy a person, place, event, or achievement from a sample into this draft.
+- APPLICANT-OWNED MATERIALS are evidence, but each has an analysis lens. Use a writing draft, personal reflection, resume, or applicant note for concrete experiences only when its text supports them. An academic assessment can reveal intellectual questions, methods, standards, and habits without becoming a college-essay score; do not invent biography from it. Keep direct facts separate from cautious interpretation.
+- TIPS, GUIDES, AND APPLICATION REFERENCES are rules and constraints, not the applicant's experiences or personality. Apply their useful guidance without turning examples, statistics, or advice into life facts.
+- SAMPLE / SUCCESSFUL ESSAYS are NOT this student's life. Study them for CRAFT ONLY: how they open, how they structure evidence, how they reflect, what tone they use, and how they show emotion with specific words. NEVER copy a person, place, event, or achievement from a sample into this draft.
 - PLATFORM DISTINCTION: Some samples are US (Common App 650w, UC PIQ 350w) and some are UK (UCAS 4000 chars across 3 Qs). When writing for ${platform === 'ucas' ? 'UCAS (UK)' : 'US platforms (Common App, UC, Coalition, Direct)'}, prioritize samples from the SAME system for structural guidance. You may learn voice/tone from any sample, but NEVER apply UK UCAS structure (3 questions sharing 4000 chars, 80% academic) to a US essay, and NEVER apply US Common App structure to a UCAS answer. This is obvious and you must distinguish.
-- If a material has an attached word-by-word analysis, use its findings: keep its strengths, fix its issues, and reuse its specific details.
+- If a material has an attached deep analysis, use the section appropriate to its lens: facts/evidence for applicant-owned sources, intellectual signals for academic work, guidance for references, and craft moves for samples. Do not treat every analysis as a writing score.
 
 UNIVERSITY RESEARCH (from University Research; if empty, use well-established knowledge and say nothing specific you are unsure of):
 ${knowledgeText}
@@ -110,13 +122,16 @@ THE ESSAY TO WRITE:
 - Prompt: ${essay?.prompt || 'No prompt supplied — write a personal statement that reveals who the applicant is.'}
 - ${isUcasQuestion(essay) ? lengthBrief(essay, allEssays) : `Limit: ${limit.toLocaleString()} ${formatLimit(unit)}${unit === 'characters' ? ' (counted in characters INCLUDING spaces)' : ''}`}
 
+${rootBrief(essay)}
+
 ${HUMAN_VOICE_RULES}
 
 HOW TO WORK:
-1. Decide what this prompt is really asking before writing a word, and make a specific choice about what story serves it.
-2. Find two or three concrete details in the profile and materials that only this applicant could claim. If there are not enough, build the draft around the ones that exist and leave clearly marked space for the rest.
-3. Write the draft. Then read it back as an admissions officer and cut anything that is doing decorative rather than evidential work.
-4. Do not open with a general statement about yourself. Do not close with a moral.
+1. Decide what this prompt is really asking before writing a word, and make a specific choice about how the required root serves it.
+2. Treat the required root as the starting point, not an optional suggestion. Find two or three concrete details in the profile and materials that deepen that root; do not replace it with a different activity. If a needed detail is missing, leave a clearly named gap.
+3. Apply guidance and craft patterns as methods, not as content. Never turn a tips document or sample biography into the applicant's life.
+4. Write the draft. Then read it back as an admissions officer and cut anything that is doing decorative rather than evidential work.
+5. Do not open with a general statement about yourself. Do not close with a moral.
 
 Return the essay text only in "essay", and a short explanation in "essay_analysis" of the role this essay plays in the holistic application and how this draft serves that role.`;
 }
@@ -141,6 +156,8 @@ ${essayRoleBrief(essay)}
 
 ${platformBrief(university, platform)}
 
+${rootBrief(essay)}
+
 THE PROMPT: ${essay?.prompt || 'Personal statement'}
 THE ESSAY:
 <<<ESSAY
@@ -152,7 +169,7 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH AND IDEAL STUDENT:
 ${knowledgeText || 'No research cached. Judge on the quality of the writing itself.'}
 
-${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials are facts about this student; samples are craft examples only — never treat a sample's life as this student's life. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
+${profileText ? `APPLICANT PROFILE (use to check if essay uses their real context):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${reviewNotes ? `PREVIOUS REVIEW FINDINGS TO RE-CHECK (did this draft actually fix them?):\n${reviewNotes}\n` : ''}
 Evaluate on exactly these dimensions, each scored 1-10 where 5 is average for this admissions pool:
 1. prompt_alignment — does it answer THIS prompt, serving ITS role, without stealing another essay's material?
 2. authenticity — could a specific person have written this, or is it generically well-written? Check against profile and own materials — does it sound like THIS applicant?
@@ -164,6 +181,7 @@ Evaluate on exactly these dimensions, each scored 1-10 where 5 is average for th
 
 Be concrete: quote the exact phrases you are objecting to. "Feels AI-generated" is not a finding; "\"In the end, this experience taught me that…" appears in the third paragraph" is.
 
+If the essay fails to honor the applicant's required root, call that out as a weakness even if the prose is polished. If no root was supplied, say that the drafting direction is underspecified rather than penalizing the essay for not guessing it.
 If the essay fails to use available personal context from materials, call that out as a weakness.
 
 Return JSON only.`;
@@ -198,6 +216,8 @@ ${essayRoleBrief(essay)}
 
 ${platformBrief(university, platform)}
 
+${rootBrief(essay)}
+
 ${HUMAN_VOICE_RULES}
 
 ${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check):
@@ -212,14 +232,15 @@ ${lengthBrief(essay, allEssays)}
 UNIVERSITY RESEARCH:
 ${knowledgeText || 'None cached.'}
 
-${profileText ? `APPLICANT PROFILE (use concrete details from here when possible):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (own materials = facts about this student, USE THEM; samples = craft only, never borrow life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT:
+${profileText ? `APPLICANT PROFILE (use concrete details from here when possible):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use applicant-owned evidence according to its lens; academic work informs thinking, guidance supplies rules, samples supply craft only and never borrowed life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT:
 <<<ESSAY
 ${essay?.content || ''}
 ESSAY>>>
 
 Rules:
 - Do not invent experiences, names, numbers, or outcomes. If a change needs a fact you do not have, leave the sentence out rather than guessing.
-- USE personal context from own materials as much as possible — names, numbers, specific roles, outcomes. If the draft is generic, inject their real details.
+- Preserve and strengthen the applicant's required root. Never replace it with a more convenient activity or a sample writer's story.
+- Use concrete evidence from the appropriate applicant-owned sources — names, numbers, roles, outcomes, or intellectual questions — when the draft needs it. Do not turn an academic assessment, guidance source, or cautious interpretation into a claimed personal experience.
 - For craft, you may borrow technique from samples that match this platform (US samples for US essays, UK samples for UCAS), but never borrow a life event.
 - Cut, do not pad. If the draft is at its limit, every addition must be paid for by a deletion.
 ${limitUnitFor(essay) === 'characters' ? '- This limit is in CHARACTERS including spaces. Check your output length before returning it.' : '- Stay inside the word limit.'}

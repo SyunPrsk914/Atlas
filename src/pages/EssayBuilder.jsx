@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
@@ -39,6 +40,28 @@ import {
 } from '@/lib/persist';
 
 const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label: s }).label;
+const DRAFT_ANCHOR_KEY = 'atlas_draft_anchor_';
+
+function localDraftAnchor(id) {
+  if (!id || typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(`${DRAFT_ANCHOR_KEY}${id}`) || '';
+  } catch {
+    return '';
+  }
+}
+
+function rememberDraftAnchor(id, value) {
+  if (!id || typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`${DRAFT_ANCHOR_KEY}${id}`, String(value || ''));
+  } catch { /* the database remains the source of truth when storage is blocked */ }
+}
+
+function hydrateEssay(essay) {
+  if (!essay || Object.prototype.hasOwnProperty.call(essay, 'draft_anchor')) return essay;
+  return { ...essay, draft_anchor: localDraftAnchor(essay.id) };
+}
 
 export default function EssayBuilder() {
   const [searchParams] = useSearchParams();
@@ -60,16 +83,30 @@ export default function EssayBuilder() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [metaExpanded, setMetaExpanded] = useState(true);
-  const [newEssay, setNewEssay] = useState({ title: '', type: 'supplemental', prompt: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
+  const [missingEssayColumns, setMissingEssayColumns] = useState([]);
+  const [newEssay, setNewEssay] = useState({ title: '', type: 'supplemental', prompt: '', draft_anchor: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
   const autosaveRef = useRef(null);
 
   const platform = useMemo(() => getUniversityPlatform(selectedUni), [selectedUni]);
   const platformInfo = PLATFORMS[platform];
 
   const loadEssays = useCallback(async () => {
-    const ess = await base44.entities.Essay.list();
+    const ess = (await base44.entities.Essay.list()).map(hydrateEssay);
     setEssays(ess);
     return ess;
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const missing = typeof base44.capabilities?.probe === 'function'
+          ? await base44.capabilities.probe()
+          : (base44.capabilities?.missingOptionalColumns?.() || []);
+        if (active) setMissingEssayColumns(missing.filter((column) => column === 'draft_anchor'));
+      } catch { /* the normal save path still reports database errors */ }
+    })();
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -205,14 +242,18 @@ export default function EssayBuilder() {
   // --- persistence --------------------------------------------------------
   const persist = async (fields) => {
     if (!selectedEssay) return null;
+    if (Object.prototype.hasOwnProperty.call(fields, 'draft_anchor')) {
+      rememberDraftAnchor(selectedEssay.id, fields.draft_anchor);
+    }
     const updated = await base44.entities.Essay.update(selectedEssay.id, fields);
-    setEssays((prev) => prev.map((e) => (e.id === updated.id ? { ...e, ...updated } : e)));
-    setSelectedEssay((prev) => (prev ? { ...prev, ...fields } : prev));
+    setEssays((prev) => prev.map((e) => (e.id === updated.id ? { ...e, ...updated, ...fields } : e)));
+    setSelectedEssay((prev) => (prev ? { ...prev, ...updated, ...fields } : prev));
     setDirty(false);
     return updated;
   };
 
   const handleFieldChange = (field, value) => {
+    if (field === 'draft_anchor') rememberDraftAnchor(selectedEssay?.id, value);
     setSelectedEssay((prev) => ({ ...prev, [field]: value }));
     setDirty(true);
   };
@@ -244,6 +285,7 @@ export default function EssayBuilder() {
             content: essay.content,
             prompt: essay.prompt,
             title: essay.title,
+            draft_anchor: essay.draft_anchor || '',
             word_limit: resolvedEssayLimit(essay),
             status: essay.status,
             type: essay.type,
@@ -255,6 +297,7 @@ export default function EssayBuilder() {
         await persist({
           title: selectedEssay.title,
           prompt: selectedEssay.prompt,
+          draft_anchor: selectedEssay.draft_anchor || '',
           word_limit: selectedEssay.word_limit,
           content: selectedEssay.content,
           type: selectedEssay.type,
@@ -285,6 +328,7 @@ export default function EssayBuilder() {
               content: essay.content,
               prompt: essay.prompt,
               title: essay.title,
+              draft_anchor: essay.draft_anchor || '',
               word_limit: resolvedEssayLimit(essay),
               status: essay.status,
               type: essay.type,
@@ -297,6 +341,7 @@ export default function EssayBuilder() {
             content: selectedEssay.content,
             prompt: selectedEssay.prompt,
             title: selectedEssay.title,
+            draft_anchor: selectedEssay.draft_anchor || '',
             word_limit: selectedEssay.word_limit,
             status: selectedEssay.status,
             type: selectedEssay.type,
@@ -306,7 +351,7 @@ export default function EssayBuilder() {
       } catch { /* autosave failures must not interrupt typing */ }
     }, 2500);
     return () => clearTimeout(autosaveRef.current);
-  }, [dirty, essays, selectedEssay, selectedEssay?.id, selectedEssay?.content, selectedEssay?.prompt, selectedEssay?.title, selectedEssay?.word_limit, selectedEssay?.status, selectedEssay?.type]);
+  }, [dirty, essays, selectedEssay, selectedEssay?.id, selectedEssay?.content, selectedEssay?.prompt, selectedEssay?.title, selectedEssay?.draft_anchor, selectedEssay?.word_limit, selectedEssay?.status, selectedEssay?.type]);
 
   // --- context ------------------------------------------------------------
   const gatherContext = async () => {
@@ -525,6 +570,7 @@ export default function EssayBuilder() {
         title: d.title,
         type: d.type || 'supplemental',
         prompt: d.prompt || '',
+        draft_anchor: d.draft_anchor || '',
         word_limit: resolvedEssayLimit(d),
         content: '',
         status: 'not_started',
@@ -535,7 +581,8 @@ export default function EssayBuilder() {
           ? { university_id: selectedUni.id, university_name: selectedUni.name }
           : {}),
       });
-      created.push(row);
+      rememberDraftAnchor(row.id, d.draft_anchor || '');
+      created.push(hydrateEssay(row));
     }
     await loadEssays();
     if (created[0]) setSelectedEssay(created[0]);
@@ -561,7 +608,7 @@ export default function EssayBuilder() {
         ? `Shared with every ${platformInfo?.short || ''} university on your list.`
         : 'Written only for this university.');
       setDialogOpen(false);
-      setNewEssay({ title: '', type: 'supplemental', prompt: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
+      setNewEssay({ title: '', type: 'supplemental', prompt: '', draft_anchor: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
     } catch (e) {
       console.error(e);
       toast.error('Could not create that essay', { description: e.message });
@@ -892,6 +939,29 @@ export default function EssayBuilder() {
                 )}
               </div>
 
+              <div className="bg-accent/5 border border-accent/20 rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <label htmlFor="essay-root" className="text-sm font-medium text-foreground/70">What must this essay be rooted in?</label>
+                  <span className="text-[11px] text-accent/80">Your direction is a hard constraint</span>
+                </div>
+                <Textarea
+                  id="essay-root"
+                  value={selectedEssay.draft_anchor || ''}
+                  onChange={(e) => handleFieldChange('draft_anchor', e.target.value)}
+                  placeholder="Add the moments, interests, questions, relationships, or qualities you want the draft to grow from."
+                  rows={4}
+                  className="bg-background/70"
+                />
+                <p className="text-[11px] text-foreground/45 leading-relaxed">
+                  Atlas will use the profile, materials, guidance, and sample craft to deepen this direction. It must not replace your roots with a random activity; if something is missing, it will leave a gap for you.
+                </p>
+                {missingEssayColumns.includes('draft_anchor') && (
+                  <p className="text-[11px] text-amber-700 leading-relaxed">
+                    Your database is missing the root field. Atlas is keeping this direction in this browser for now; run <span className="font-mono">supabase/schema.sql</span> to persist it across devices.
+                  </p>
+                )}
+              </div>
+
               <div className="flex items-center gap-2 flex-wrap">
                 <Button onClick={handleGenerate} disabled={busy !== null}>
                   {busy === 'generate' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
@@ -1109,6 +1179,19 @@ export default function EssayBuilder() {
                   type: choice.type || prev.type,
                 }))}
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-foreground/50 mb-1.5">What should this essay be rooted in?</label>
+              <Textarea
+                value={newEssay.draft_anchor}
+                onChange={(e) => setNewEssay({ ...newEssay, draft_anchor: e.target.value })}
+                placeholder="Write the moments, interests, questions, relationships, or qualities that must guide this essay."
+                rows={4}
+              />
+              <p className="text-[11px] text-foreground/40 mt-1.5 leading-relaxed">
+                This is your direction, not document text. Atlas will treat it as a hard constraint and use the materials to deepen it rather than choosing a random activity.
+              </p>
             </div>
 
             <div className="flex items-center gap-2">

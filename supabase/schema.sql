@@ -58,6 +58,7 @@ create table if not exists public.essays (
   university_name text,
   title text not null,
   prompt text,
+  draft_anchor text,
   word_limit numeric,
   content text,
   status text not null default 'not_started'
@@ -85,7 +86,8 @@ create table if not exists public.materials (
   content text,
   file_url text,
   link_url text,
-  notes text
+  notes text,
+  analysis_role text not null default 'auto'
 );
 
 -- ---------------------------------------------------------------------------
@@ -172,7 +174,7 @@ create table if not exists public.applicant_knowledge (
   created_by_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  kind text not null check (kind in ('brief', 'evidence', 'pattern')),
+  kind text not null check (kind in ('brief', 'evidence', 'pattern', 'guidance')),
   category text not null default 'other',
   text text not null,
   origin text not null default 'manual' check (origin in ('ai', 'manual')),
@@ -228,8 +230,12 @@ $$;
 --                                          UCAS is character-counted; without
 --                                          the column Atlas still counts UCAS
 --                                          essays in characters.
---   materials.analysis                -> the saved AI analysis of the document
+--   materials.analysis                -> the saved deep analysis of the document
 --                                          (read from the uploaded file or link).
+--   materials.analysis_role           -> the applicant's chosen interpretation
+--                                          lens; auto means Atlas classifies it.
+--   essays.draft_anchor               -> applicant-provided roots/non-negotiables
+--                                          the drafter must honor.
 --   profiles.*                        -> the extra applicant context that makes
 --                                          a review accurate for international
 --                                          applicants (citizenship status,
@@ -239,8 +245,10 @@ $$;
 alter table public.universities add column if not exists application_platform text;
 
 alter table public.essays add column if not exists limit_unit text;
+alter table public.essays add column if not exists draft_anchor text;
 
 alter table public.materials add column if not exists analysis jsonb;
+alter table public.materials add column if not exists analysis_role text not null default 'auto';
 
 -- Knowledge Base source and provider provenance; safe to apply repeatedly.
 alter table public.college_knowledge add column if not exists source_url text;
@@ -280,6 +288,25 @@ end $$;
 alter table public.materials
   add constraint materials_type_check
   check (type in ('document', 'link', 'essay', 'sample_essay', 'resume', 'transcript', 'award', 'note', 'other'));
+
+-- The guidance layer was added after the first Knowledge Base release.
+do $$
+declare cname text;
+begin
+  for cname in
+    select con.conname
+    from pg_constraint con
+    where con.conrelid = 'public.applicant_knowledge'::regclass
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) ilike '%kind%'
+  loop
+    execute format('alter table public.applicant_knowledge drop constraint %I', cname);
+  end loop;
+end $$;
+
+alter table public.applicant_knowledge
+  add constraint applicant_knowledge_kind_check
+  check (kind in ('brief', 'evidence', 'pattern', 'guidance'));
 
 -- ---------------------------------------------------------------------------
 -- Storage: public "uploads" bucket (replaces Base44 UploadPublicFile)
