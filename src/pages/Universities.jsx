@@ -6,9 +6,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger, DialogDescription } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Plus, Trash2, ArrowRight, GraduationCap, Calendar, Globe, Search, Info } from 'lucide-react';
+import { Plus, Trash2, ArrowRight, ArrowUp, ArrowDown, GraduationCap, Calendar, Globe, Search, Info } from 'lucide-react';
 import { roadmapTemplates } from '@/lib/roadmapTemplate';
-import { clearEssayArtifacts } from '@/lib/persist';
+import { clearEssayArtifacts, getStored, setStored, removeStored } from '@/lib/persist';
 import { daysUntil, startOfLocalDay } from '@/lib/dates';
 import {
   PLATFORMS, PLATFORM_VALUES, US_ROUNDS, UK_ROUNDS,
@@ -26,12 +26,14 @@ const statusColors = {
 // UCAS allows five course choices. The list is only bounded so the board stays
 // readable, not to model the actual rules.
 const LIST_LIMITS = { US: 40, UK: 12 };
+const UNIVERSITY_ORDER_KEY = 'universityCardOrder';
 
 export default function Universities() {
   const [universities, setUniversities] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [essays, setEssays] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [reordering, setReordering] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({
@@ -43,12 +45,58 @@ export default function Universities() {
 
   const loadData = async () => {
     try {
+      if (typeof base44.capabilities?.probe === 'function') {
+        try { await base44.capabilities.probe(); } catch { /* reordering falls back to this browser on older schemas */ }
+      }
       const [unis, tsk, ess] = await Promise.all([
         base44.entities.University.list(),
         base44.entities.RoadmapTask.list(),
         base44.entities.Essay.list(),
       ]);
-      setUniversities(unis);
+      let localOrder = getStored(UNIVERSITY_ORDER_KEY, []);
+      if (!Array.isArray(localOrder)) localOrder = [];
+      const localRank = new Map(localOrder.map((id, index) => [id, index]));
+      let orderSource = unis;
+      const missingColumns = base44.capabilities?.missingOptionalColumns?.() || [];
+      if (localOrder.length && !missingColumns.includes('sort_order')) {
+        const presentIds = new Set(unis.map((uni) => uni.id));
+        const orderIds = [
+          ...localOrder.filter((id) => presentIds.has(id)),
+          ...unis.filter((uni) => !localRank.has(uni.id)).map((uni) => uni.id),
+        ];
+        const rank = new Map(orderIds.map((id, index) => [id, index]));
+        try {
+          const updates = await Promise.all(orderIds.map((id, sort_order) =>
+            base44.entities.University.update(id, { sort_order }),
+          ));
+          if (updates.every(Boolean)) {
+            removeStored(UNIVERSITY_ORDER_KEY);
+            localOrder = [];
+            orderSource = unis.map((uni) => ({ ...uni, sort_order: rank.get(uni.id) }));
+          }
+        } catch { /* keep the local order until the schema or connection can sync it */ }
+      }
+      const syncedLocalRank = new Map(localOrder.map((id, index) => [id, index]));
+      const ordered = orderSource
+        .map((uni, index) => ({
+          ...uni,
+          sort_order: uni.sort_order !== undefined && uni.sort_order !== null && Number.isFinite(Number(uni.sort_order))
+            ? Number(uni.sort_order)
+            : index,
+          _loadedOrder: index,
+        }))
+        .sort((a, b) => {
+          const aLocal = syncedLocalRank.get(a.id);
+          const bLocal = syncedLocalRank.get(b.id);
+          if (aLocal !== undefined || bLocal !== undefined) {
+            if (aLocal === undefined) return 1;
+            if (bLocal === undefined) return -1;
+            if (aLocal !== bLocal) return aLocal - bLocal;
+          }
+          return (a.sort_order - b.sort_order) || (a._loadedOrder - b._loadedOrder);
+        })
+        .map(({ _loadedOrder, ...uni }) => uni);
+      setUniversities(ordered);
       setTasks(tsk);
       setEssays(ess);
     } catch (e) {
@@ -112,6 +160,7 @@ export default function Universities() {
       return;
     }
     setAdding(true);
+    let createdUniversity = null;
     try {
       const uni = await base44.entities.University.create({
         name: form.name.trim(),
@@ -121,7 +170,13 @@ export default function Universities() {
         deadline: form.deadline || null,
         notes: form.notes,
         application_platform: form.country === 'UK' ? 'ucas' : form.application_platform,
+        sort_order: universities.reduce((max, uni) => Math.max(max, Number(uni.sort_order) || 0), -1) + 1,
       });
+      if (!uni) {
+        await loadData();
+        throw new Error('Atlas could not confirm whether this university was added. Check the list before retrying to avoid a duplicate.');
+      }
+      createdUniversity = uni;
 
       const template = roadmapTemplates[form.country] || roadmapTemplates.US;
       await base44.entities.RoadmapTask.bulkCreate(
@@ -147,7 +202,14 @@ export default function Universities() {
       });
     } catch (e) {
       console.error(e);
-      toast.error('Could not add this university', { description: e.message });
+      if (createdUniversity) {
+        await loadData();
+        toast.warning(`${createdUniversity.name} was added, but roadmap setup did not finish`, {
+          description: `The university is on your list. Check its roadmap before retrying. ${e.message}`,
+        });
+      } else {
+        toast.error('Could not add or confirm this university', { description: e.message });
+      }
     } finally {
       setAdding(false);
     }
@@ -173,6 +235,43 @@ export default function Universities() {
       toast.success(`${uni.name} removed`);
     } catch (e) {
       toast.error('Could not remove this university', { description: e.message });
+    }
+  };
+
+  const moveUniversity = async (fromIndex, offset) => {
+    const toIndex = fromIndex + offset;
+    if (reordering || toIndex < 0 || toIndex >= universities.length) return;
+    const next = [...universities];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    const ordered = next.map((uni, index) => ({ ...uni, sort_order: index }));
+    setUniversities(ordered);
+    const savedIds = ordered.map((uni) => uni.id);
+    setStored(UNIVERSITY_ORDER_KEY, savedIds);
+    setReordering(true);
+    try {
+      const missingColumns = base44.capabilities?.missingOptionalColumns?.() || [];
+      if (!missingColumns.includes('sort_order')) {
+        const updates = await Promise.all(ordered.map((uni) =>
+          base44.entities.University.update(uni.id, { sort_order: uni.sort_order }),
+        ));
+        if (updates.some((row) => !row)) throw new Error('One or more university records could not be updated.');
+      }
+      const missingAfterSave = base44.capabilities?.missingOptionalColumns?.() || [];
+      if (missingAfterSave.includes('sort_order')) {
+        toast.message('Order saved in this browser', {
+          description: 'Run supabase/schema.sql to sync your card order across devices.',
+        });
+      } else {
+        removeStored(UNIVERSITY_ORDER_KEY);
+        toast.success('University order saved');
+      }
+    } catch (error) {
+      toast.warning('Order kept in this browser', {
+        description: `The database could not sync the new order. It will remain on this device. ${error.message}`,
+      });
+    } finally {
+      setReordering(false);
     }
   };
 
@@ -385,19 +484,44 @@ export default function Universities() {
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {universities.map((uni) => {
+          {universities.map((uni, cardIndex) => {
             const progress = getProgress(uni.id);
             const platform = getUniversityPlatform(uni);
             const hasShared = essays.some((e) => e.scope === 'common' && (e.application_platform || 'common_app') === platform);
             const daysLeft = daysUntil(uni.deadline);
             return (
               <div key={uni.id} className="group bg-card border border-border rounded-xl p-5 hover:border-foreground/20 transition-all relative">
-                <button
-                  onClick={() => handleRemove(uni)}
-                  className="absolute top-3 right-3 p-1.5 rounded-md text-foreground/20 hover:text-destructive hover:bg-destructive/5 opacity-0 group-hover:opacity-100 transition"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                <div className="absolute top-3 right-3 flex items-center gap-0.5 opacity-70 group-hover:opacity-100 transition">
+                  <button
+                    type="button"
+                    onClick={() => moveUniversity(cardIndex, -1)}
+                    disabled={reordering || cardIndex === 0}
+                    aria-label={`Move ${uni.name} up`}
+                    title="Move university up"
+                    className="p-1.5 rounded-md text-foreground/35 hover:text-foreground hover:bg-muted disabled:opacity-25 disabled:cursor-not-allowed"
+                  >
+                    <ArrowUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveUniversity(cardIndex, 1)}
+                    disabled={reordering || cardIndex === universities.length - 1}
+                    aria-label={`Move ${uni.name} down`}
+                    title="Move university down"
+                    className="p-1.5 rounded-md text-foreground/35 hover:text-foreground hover:bg-muted disabled:opacity-25 disabled:cursor-not-allowed"
+                  >
+                    <ArrowDown className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(uni)}
+                    aria-label={`Remove ${uni.name}`}
+                    title="Remove university"
+                    className="p-1.5 rounded-md text-foreground/20 hover:text-destructive hover:bg-destructive/5"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
                 <Link to={`/universities/${uni.id}`} className="block">
                   <div className="flex items-center gap-2 mb-3 flex-wrap pr-6">
                     <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${statusColors[uni.status] || statusColors.researching}`}>
@@ -423,7 +547,7 @@ export default function Universities() {
                     <div className="flex items-center gap-1.5 text-xs text-foreground/40 mb-3">
                       <Calendar className="w-3 h-3" />
                       {startOfLocalDay(uni.deadline)?.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                      {daysLeft !== null && daysLeft >= 0 && (
+                      {progress < 100 && daysLeft !== null && daysLeft >= 0 && (
                         <span className={daysLeft < 30 ? 'text-destructive' : 'text-foreground/30'}>· {daysLeft}d left</span>
                       )}
                     </div>

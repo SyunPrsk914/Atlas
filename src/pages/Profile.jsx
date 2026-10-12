@@ -221,12 +221,12 @@ export default function Profile() {
         console.warn('[atlas] materials are unavailable for activity suggestions:', e?.message || e);
       }
       try {
-        applicantText = await loadApplicantKnowledgeText({ platform: 'common_app' });
+        applicantText = await loadApplicantKnowledgeText({ platform: 'common_app', task: 'activity' });
       } catch (e) {
         console.warn('[atlas] applicant knowledge is unavailable:', e?.message || e);
       }
       activityContextRef.current = {
-        materialsText: formatMaterialsForAI(materials, { platform: 'common_app' }),
+        materialsText: formatMaterialsForAI(materials, { platform: 'common_app', task: 'activity' }),
         applicantText,
       };
     }

@@ -8,7 +8,7 @@ import LengthMeter from '@/components/essay/LengthMeter';
  * The real UCAS form: three fixed questions, three answer boxes, one shared
  * 4,000-character budget (spaces included), 350 minimum each.
  */
-export default function UcasStatementEditor({ essays, focusId, onChange, onFocus }) {
+export default function UcasStatementEditor({ essays, focusId, onChange, onFocus, disabled = false }) {
   const rows = ucasQuestionsFrom(essays);
   const budget = ucasCharacterBudget(essays);
 
@@ -75,6 +75,7 @@ export default function UcasStatementEditor({ essays, focusId, onChange, onFocus
             {essay ? (
               <Textarea
                 value={text}
+                disabled={disabled}
                 onChange={(e) => onChange(essay, e.target.value)}
                 onFocus={() => onFocus?.(essay)}
                 rows={question.number === 1 ? 8 : 6}

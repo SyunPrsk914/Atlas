@@ -23,6 +23,7 @@ import { loadApplicantKnowledgeText } from '@/lib/applicantKnowledgeService';
 import { startOfLocalDay } from '@/lib/dates';
 import { APPLICATION_REVIEW_SCHEMA, APPLICATION_REVIEW_DIMENSIONS } from '@/lib/essayPrompts';
 import { assessLength } from '@/lib/essayLength';
+import { contextTargetLabel, filterByContextTarget } from '@/lib/contextTargeting';
 import { SCORE_ANCHORS } from '@/lib/essayCraft';
 import ReviewResults from '@/components/review/ReviewResults';
 import { getCachedReview, setCachedReview, clearCachedReview } from '@/lib/persist';
@@ -118,7 +119,8 @@ export default function ApplicationReview() {
       // The AI knowledge base is optional: a missing table just means "not built yet".
       const applicantRows = await base44.entities.ApplicantKnowledge.list().catch(() => []);
       setProfile(profiles[0] || null);
-      setEssays(essaysApplicableToUniversity(allEssays, uni));
+      const applicableEssays = essaysApplicableToUniversity(allEssays, uni);
+      setEssays(applicableEssays);
       // Raw rows: the review formats them itself, so they are not presented twice.
       setMaterials(mats);
       setApplicantRows(applicantRows);
@@ -156,9 +158,17 @@ export default function ApplicationReview() {
     try {
       const p = profile || {};
       const platform = getUniversityPlatform(university);
+      const contextTargeting = {
+        universityId: university.id || '',
+        universityName: university.name || '',
+        platform,
+        task: 'application',
+        essays,
+        essayIds: essays.map((essay) => essay.id),
+      };
       const knowledgeText = knowledge?.knowledge
         || 'No university research is cached for this university. Use your own knowledge, and say explicitly where you are estimating.';
-      const applicantText = await loadApplicantKnowledgeText({ platform });
+      const applicantText = await loadApplicantKnowledgeText(contextTargeting);
       const completedTasks = tasks.filter((t) => t.completed).length;
       const profileText = buildProfileContext(p, { includeLeadershipBrief: true }) || 'No profile data saved.';
       // A count of lines is not a count of subjects: the IB report includes the
@@ -202,7 +212,7 @@ ${ib.count || ibLines.length ? `\nIB SUBJECT WORKLOAD (${ib.count} of 6 diploma 
 ${formatEssays(essays)}
 
 --- SUPPORTING MATERIALS (own = facts about student, use heavily; samples = craft only, never borrow life; distinguish US vs UK) ---
-${formatMaterialsForAI(materials, { platform })}
+${formatMaterialsForAI(materials, contextTargeting)}
 
 --- READINESS ---
 - Roadmap tasks completed: ${completedTasks}/${tasks.length}
@@ -264,10 +274,19 @@ Return JSON only.`;
   const ibSummary = ibSubjectSummary(p);
   const platform = getUniversityPlatform(university);
   const completedTasks = tasks.filter((t) => t.completed).length;
-  const shownMaterials = materials.map(presentMaterial);
+  const applicationContext = {
+    universityId: university.id || '',
+    universityName: university.name || '',
+    platform,
+    task: 'application',
+    essays,
+    essayIds: essays.map((essay) => essay.id),
+  };
+  const shownMaterials = filterByContextTarget(materials, applicationContext).map(presentMaterial);
   const unreadMaterials = shownMaterials.filter((m) => m.document_state !== 'none'
     && (m.document_state !== 'ready' || m.analysis?.status !== 'ready')).length;
-  const applicantKnown = applicantRows.some((r) => String(r.text || '').trim());
+  const applicantKnown = filterByContextTarget(applicantRows, applicationContext)
+    .some((r) => String(r.text || '').trim());
   const modelReady = hasLiveModel();
   const sharedCount = essays.filter(isSharedEssay).length;
   const unwritten = essays.filter((e) => !e.content || !e.content.trim()).length;
@@ -495,9 +514,14 @@ Return JSON only.`;
             {shownMaterials.length > 0 ? (
               <ul className="space-y-1">
                 {shownMaterials.map((m) => (
-                  <li key={m.id} className="text-sm text-foreground/60 flex items-center justify-between gap-2">
+                  <li key={m.id} className="text-sm text-foreground/60 flex items-center justify-between gap-2 flex-wrap">
                     <span className="truncate">{m.title}{isSampleMaterial(m) ? ' (sample, not your writing)' : ''}</span>
                     <span className="text-[11px] text-foreground/40 shrink-0">{materialReadState(m)}</span>
+                    {(m.target_university_id || m.target_essay_id || m.target_platform || m.target_task) && (
+                      <span className="w-full text-[10px] text-accent/80">
+                        {contextTargetLabel(m, { universities: [university], essays })}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

@@ -232,7 +232,7 @@ export default function UniversityDetail() {
                 <span className="flex items-center gap-1.5">
                   <Calendar className="w-3.5 h-3.5" />
                   {startOfLocalDay(university.deadline)?.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
-                  {daysLeft !== null && daysLeft >= 0 && (
+                  {progress < 100 && daysLeft !== null && daysLeft >= 0 && (
                     <span className={daysLeft < 30 ? 'text-destructive' : 'text-foreground/30'}>· {daysLeft} days left</span>
                   )}
                 </span>

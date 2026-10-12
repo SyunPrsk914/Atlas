@@ -15,6 +15,10 @@
 import { createClient } from '@supabase/supabase-js';
 import { makeError } from '@/lib/aiError';
 import { invokeLLM, invokeLLMDetailed } from './llmClient';
+import {
+  CONTEXT_TARGET_COLUMNS, mergeContextTargetFallbacks, pendingContextTargetFallbacks,
+  removeContextTargetFallback, saveContextTargetFallback,
+} from '@/lib/contextTargeting';
 
 // ---------------------------------------------------------------------------
 // Table definitions (column allow-lists taken from the old Base44 entity JSON)
@@ -43,10 +47,11 @@ const TABLES = {
 // functional against an older database — you simply re-run `supabase/schema.sql`
 // (idempotent) to turn the extra persistence on.
 const OPTIONAL_COLUMNS = {
-  materials: ['analysis', 'analysis_role'],
+  materials: ['analysis', 'analysis_role', 'target_university_id', 'target_essay_id', 'target_platform', 'target_task'],
   essays: ['limit_unit', 'draft_anchor'],
-  universities: ['application_platform'],
+  universities: ['application_platform', 'sort_order'],
   college_knowledge: ['source_url', 'source_text', 'research_provider', 'research_model', 'grounded'],
+  applicant_knowledge: ['target_university_id', 'target_essay_id', 'target_platform', 'target_task'],
   profiles: [
     'full_name', 'citizenship_status', 'curriculum', 'first_generation', 'rank',
     'act_score', 'toefl_total', 'duolingo_english', 'test_policy', 'funding_source',
@@ -57,7 +62,7 @@ const COLUMNS = {
   universities: {
     name: 'text', country: 'text', major: 'text', application_type: 'text',
     deadline: 'date', status: 'text', notes: 'text', color: 'text',
-    application_platform: 'text',
+    application_platform: 'text', sort_order: 'number',
   },
   essays: {
     university_id: 'text', university_name: 'text', title: 'text', prompt: 'text',
@@ -68,6 +73,7 @@ const COLUMNS = {
   materials: {
     title: 'text', type: 'text', content: 'text', file_url: 'text', link_url: 'text', notes: 'text',
     analysis: 'json', analysis_role: 'text',
+    target_university_id: 'text', target_essay_id: 'text', target_platform: 'text', target_task: 'text',
   },
   profiles: {
     nationality: 'text', school_system: 'text', graduation_year: 'text', background_summary: 'text',
@@ -93,6 +99,7 @@ const COLUMNS = {
   applicant_knowledge: {
     kind: 'text', category: 'text', text: 'text', origin: 'text', source_label: 'text',
     source_id: 'text', platform: 'text', sort_order: 'number', data: 'json',
+    target_university_id: 'text', target_essay_id: 'text', target_platform: 'text', target_task: 'text',
   },
 };
 
@@ -180,12 +187,70 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
     return data?.session?.access_token || null;
   };
 
+  const contextTargetEntity = (table) => ({
+    materials: 'Material',
+    applicant_knowledge: 'ApplicantKnowledge',
+  }[table] || '');
+  const missingTargetColumns = (table) => (OPTIONAL_COLUMNS[table] || [])
+    .filter((column) => CONTEXT_TARGET_COLUMNS.includes(column) && !(column in (COLUMNS[table] || {})));
+  const mergeTargetRows = async (table, rows) => {
+    const entity = contextTargetEntity(table);
+    if (!entity) return rows;
+    const missing = missingTargetColumns(table);
+    let merged = mergeContextTargetFallbacks(entity, rows, missing);
+    // A target saved while this database lacked additive columns lives in the
+    // browser fallback. Once the migration is present, restore it to Postgres
+    // before discarding that local copy; this keeps old drafts from going blank
+    // after a schema upgrade.
+    if (!missing.length) {
+      const pending = new Map(pendingContextTargetFallbacks(entity).map(({ id, fields }) => [id, fields]));
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        const saved = pending.get(row.id);
+        if (!saved) continue;
+        const fields = {};
+        for (const column of CONTEXT_TARGET_COLUMNS) {
+          if (!Object.prototype.hasOwnProperty.call(saved, column)) continue;
+          const value = row[column];
+          if (value === null || value === undefined || value === '') fields[column] = saved[column];
+        }
+        if (!Object.keys(fields).length) {
+          removeContextTargetFallback(entity, row.id);
+          continue;
+        }
+        try {
+          const { data, error } = await supabase.from(table).update(sanitize(table, fields)).eq('id', row.id).select();
+          if (!error && data?.[0]) {
+            merged[index] = { ...merged[index], ...data[0], ...fields };
+            removeContextTargetFallback(entity, row.id);
+          }
+        } catch { /* the merged local copy remains available when sync is offline */ }
+      }
+      // Keep the fallback overlay when a migration write failed or was blocked.
+      merged = mergeContextTargetFallbacks(entity, merged, missing);
+    }
+    return merged;
+  };
+  const rememberTargetFallback = (table, id, fields) => {
+    const entity = contextTargetEntity(table);
+    if (!entity || !id) return;
+    const missing = missingTargetColumns(table);
+    if (missing.length) {
+      saveContextTargetFallback(entity, id, fields, missing);
+    } else if (CONTEXT_TARGET_COLUMNS.some((column) => Object.prototype.hasOwnProperty.call(fields || {}, column))) {
+      // Explicit target edits are authoritative on the migrated database. Keep
+      // pending fallbacks across unrelated saves until mergeTargetRows confirms
+      // they have been copied successfully.
+      removeContextTargetFallback(entity, id);
+    }
+  };
+
   // ----- entity factory -----------------------------------------------------
   const makeEntity = (table) => ({
-    list: async () => unwrap(
+    list: async () => mergeTargetRows(table, unwrap(
       await supabase.from(table).select('*').order('created_at', { ascending: true }),
       [],
-    ),
+    )),
 
     filter: withOptionalColumnFallback(table, OPTIONAL_COLUMNS[table], async (query = {}) => {
       const safe = {};
@@ -194,17 +259,22 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
       }
       let q = supabase.from(table).select('*');
       for (const [k, v] of Object.entries(safe)) q = q.eq(k, v);
-      return unwrap(await q.order('created_at', { ascending: true }), []);
+      return mergeTargetRows(table, unwrap(await q.order('created_at', { ascending: true }), []));
     }),
 
     get: async (id) => {
       const rows = unwrap(await supabase.from(table).select('*').eq('id', id).limit(1), []);
-      return rows[0] ?? null;
+      const merged = await mergeTargetRows(table, rows);
+      return merged[0] ?? null;
     },
 
     create: withOptionalColumnFallback(table, OPTIONAL_COLUMNS[table], async (data) => {
       const rows = unwrap(await supabase.from(table).insert(sanitize(table, data)).select(), []);
-      return rows[0];
+      const row = rows[0];
+      if (!row) return row;
+      rememberTargetFallback(table, row.id, data);
+      const merged = await mergeTargetRows(table, [row]);
+      return merged[0];
     }),
 
     update: withOptionalColumnFallback(table, OPTIONAL_COLUMNS[table], async (id, data) => {
@@ -212,18 +282,27 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
         await supabase.from(table).update(sanitize(table, data)).eq('id', id).select(),
         [],
       );
-      return rows[0] ?? null;
+      const row = rows[0] ?? null;
+      if (!row) return null;
+      rememberTargetFallback(table, row.id, data);
+      const merged = await mergeTargetRows(table, [row]);
+      return merged[0];
     }),
 
     delete: async (id) => {
       unwrap(await supabase.from(table).delete().eq('id', id));
+      const entity = contextTargetEntity(table);
+      if (entity) removeContextTargetFallback(entity, id);
       return { success: true };
     },
 
     deleteMany: async (query = {}) => {
+      const entity = contextTargetEntity(table);
+      const before = entity ? await makeEntity(table).filter(query).catch(() => []) : [];
       let q = supabase.from(table).delete();
       for (const [k, v] of Object.entries(query)) q = q.eq(k, v);
       unwrap(await q);
+      if (entity) before.forEach((row) => removeContextTargetFallback(entity, row.id));
       return { success: true };
     },
 
@@ -233,7 +312,8 @@ export function createSupabaseBackend(supabaseUrl, supabaseAnonKey) {
         await supabase.from(table).insert(items.map((i) => sanitize(table, i))).select(),
         [],
       );
-      return rows;
+      rows.forEach((row, index) => rememberTargetFallback(table, row.id, items[index] || {}));
+      return mergeTargetRows(table, rows);
     }),
   });
 

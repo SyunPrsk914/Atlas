@@ -106,7 +106,12 @@ export function rootBrief(essay) {
   return `APPLICANT'S REQUIRED ROOT / DIRECTION (hard constraint):
 ${root}
 
-Start from this direction. Do not swap in a different activity, hobby, or achievement merely because it is more convenient in the materials. Use the profile, deep material readings, guidance, and craft patterns to expand, verify, complicate, and structure this root. If a necessary concrete detail is not available, leave a clear gap for the applicant rather than inventing one.`;
+Start from this direction. Do not swap in a different activity, hobby, or achievement merely because it is more convenient in the materials. Use the profile, deep material readings, guidance, and craft patterns to expand, verify, complicate, and structure this root. If a necessary concrete detail is not available, leave a clear gap for the applicant rather than inventing one.
+
+INTERPRET THE APPLICANT'S INSTRUCTIONS, DO NOT TURN THEM INTO A CHECKLIST:
+- Read the meaning of the direction. Separate hard constraints ("must", "only", "never", "choose one") from examples, brainstormed options, and possible angles.
+- If the applicant says to choose one idea, choose ONE. If they list alternatives or several possible ideas without asking to include each, select the single idea that best answers this prompt and gives the essay one clear through-line; do not cram all of them into the draft.
+- Include multiple items only when the applicant explicitly makes each one a requirement and they genuinely fit the prompt. If the direction is contradictory or impossible to honor, do not guess: explain the conflict and leave a question in gaps_for_applicant.`;
 }
 
 /**
@@ -167,7 +172,7 @@ CRITICAL RULES FOR USING MATERIALS:
 - PLATFORM DISTINCTION: Some samples are US (Common App 650w, UC PIQ 350w) and some are UK (UCAS 4000 chars across 3 Qs). When writing for ${platform === 'ucas' ? 'UCAS (UK)' : 'US platforms (Common App, UC, Coalition, Direct)'}, prioritize samples from the SAME system for structural guidance. You may learn voice/tone from any sample, but NEVER apply UK UCAS structure (3 questions sharing 4000 chars, 80% academic) to a US essay, and NEVER apply US Common App structure to a UCAS answer. This is obvious and you must distinguish.
 - If a material has an attached deep analysis, use the section appropriate to its lens: facts/evidence for applicant-owned sources, intellectual signals for academic work, guidance for references, and craft moves for samples. Do not treat every analysis as a writing score.
 
-${buildFitBrief(knowledgeText, { kind: 'draft' }) || `UNIVERSITY RESEARCH: none cached for this school. Write from the applicant's own material only — do not invent anything about this university's programmes, buildings, clubs or traditions, and do not assert what it "values". Nothing in the essay may rest on a fact about the school that Atlas does not have.`}
+${buildFitBrief(knowledgeText, { kind: 'draft', essay }) || `UNIVERSITY RESEARCH: none cached for this school. Write from the applicant's own material only — do not invent anything about this university's programmes, buildings, clubs or traditions, and do not assert what it "values". Nothing in the essay may rest on a fact about the school that Atlas does not have.`}
 
 THE ESSAY TO WRITE:
 - University: ${university?.name || 'Unspecified'}
@@ -294,7 +299,7 @@ ESSAY>>>
 
 ${lengthBrief(essay, allEssays)}
 
-${buildFitBrief(knowledgeText, { kind: 'review' }) || 'UNIVERSITY RESEARCH: none cached for this school. Judge on the quality of the writing itself and on what this prompt asks — do not invent what this university "values", and do not deduct for it.'}
+${buildFitBrief(knowledgeText, { kind: 'review', essay }) || 'UNIVERSITY RESEARCH: none cached for this school. Judge on the quality of the writing itself and on what this prompt asks — do not invent what this university "values", and do not deduct for it.'}
 
 ${profileText ? `APPLICANT PROFILE — BACKGROUND YOU MAY NOT SCORE AGAINST. Use it only to spot an invented or inflated claim, and to form optional ideas. Never to list what the essay "should" have mentioned:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS — BACKGROUND YOU MAY NOT SCORE AGAINST (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${previousScores ? `${previousScores}\n` : ''}${reviewNotes ? `EARLIER FINDINGS SAVED WITH THIS ESSAY (re-check whether this draft fixed them):\n${reviewNotes}\n` : ''}
 Score these dimensions 1-10 and answer each one's question:
@@ -476,7 +481,7 @@ Fix every one of these that can be fixed by editing. If one genuinely cannot be 
 ${optionalAdditionBrief(reviewResult)}
 ` : 'No review has been run yet. Edit against the craft rules above and the length contract.'}
 
-${buildFitBrief(knowledgeText, { kind: 'polish' }) || 'UNIVERSITY RESEARCH: none cached. Edit for voice, structure and clarity only; add no facts about the school.'}
+${buildFitBrief(knowledgeText, { kind: 'polish', essay }) || 'UNIVERSITY RESEARCH: none cached. Edit for voice, structure and clarity only; add no facts about the school.'}
 
 ${profileText ? `APPLICANT PROFILE (use concrete details from here when the draft needs one):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (use applicant-owned evidence according to its lens; academic work informs thinking, guidance supplies rules, samples supply craft only and never borrowed life. Distinguish US vs UK):\n${materialsText}\n` : ''}${applicantSection(applicantText)}CURRENT DRAFT (this is the applicant's own writing — the thing you are conserving):
 <<<ESSAY
@@ -612,7 +617,7 @@ ${rootBrief(essay)}
 
 ${HUMAN_VOICE_RULES}
 
-${profileText ? `APPLICANT PROFILE:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (evidence for the applicant's own life only; samples are craft only):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${(() => { const brief = buildFitBrief(knowledgeText, { kind: 'polish' }); return brief ? `${brief}\n` : ''; })()}
+${profileText ? `APPLICANT PROFILE:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS (evidence for the applicant's own life only; samples are craft only):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${(() => { const brief = buildFitBrief(knowledgeText, { kind: 'polish', essay }); return brief ? `${brief}\n` : ''; })()}
 THE DRAFT TO FIX:
 <<<ESSAY
 ${text}

@@ -38,7 +38,11 @@
     },
     "data": {
       "type": "object"
-    }
+    },
+    "target_university_id": { "type": "string" },
+    "target_essay_id": { "type": "string" },
+    "target_platform": { "type": "string" },
+    "target_task": { "type": "string" }
   },
   "required": [
     "kind",

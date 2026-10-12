@@ -20,6 +20,7 @@ import {
   formatOwnMaterials, formatGuidanceMaterials, formatSampleMaterials, isGuidanceMaterial, isSampleMaterial, presentMaterial,
 } from './materialRole';
 import { sourceKey } from './materialDocument';
+import { contextTargetLabel, filterByContextTarget } from './contextTargeting';
 
 export const KNOWLEDGE_KINDS = {
   brief: { label: 'About you', hint: 'Who you are, from your profile, materials, and drafts.' },
@@ -64,7 +65,7 @@ export const GUIDANCE_CATEGORIES = {
 const LIMITS = { about: 14, points: 35, patterns: 20, guidance: 25 };
 const PROMPT_BUDGET = { profile: 10000, own: 30000, essays: 14000, samples: 14000, guidance: 14000 };
 
-const clean = (value, max = 600) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+const clean = (value, max = Infinity) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 /** Region a platform's samples belong to. */
 export function platformRegion(platform) {
@@ -80,12 +81,17 @@ function clip(text, max) {
 /** The inputs a rebuild reads, and a fingerprint that changes when any of them change. */
 export function buildKnowledgeInputs({ profile, materials = [], essays = [] }) {
   const profileRow = Array.isArray(profile) ? profile[0] : profile;
-  const presented = materials.map(presentMaterial);
+  // A global applicant portrait must not absorb a school-, essay-, platform-,
+  // or task-specific source and then leak that fact into every future prompt.
+  const globalMaterials = filterByContextTarget(materials, {});
+  const globalEssays = essays.filter((essay) => essay.scope === 'common'
+    || (!essay.scope && !essay.university_id));
+  const presented = globalMaterials.map(presentMaterial);
   const profileText = profileRow ? buildProfileContext(profileRow) : '';
-  const ownText = formatOwnMaterials(materials, { totalChars: PROMPT_BUDGET.own }).join('\n\n');
-  const guidanceText = formatGuidanceMaterials(materials, { totalChars: PROMPT_BUDGET.guidance }).join('\n\n');
-  const sampleText = formatSampleMaterials(materials, { totalChars: PROMPT_BUDGET.samples }).join('\n\n');
-  const essayText = essays
+  const ownText = formatOwnMaterials(globalMaterials, { totalChars: PROMPT_BUDGET.own }).join('\n\n');
+  const guidanceText = formatGuidanceMaterials(globalMaterials, { totalChars: PROMPT_BUDGET.guidance }).join('\n\n');
+  const sampleText = formatSampleMaterials(globalMaterials, { totalChars: PROMPT_BUDGET.samples }).join('\n\n');
+  const essayText = globalEssays
     .filter((essay) => String(essay.content || '').trim())
     .map((essay) => `--- Draft: ${essay.title || essay.university_name || 'Untitled'} (${essay.type || 'essay'}) ---\n${clip(essay.content, 3000)}`)
     .join('\n\n');
@@ -94,8 +100,8 @@ export function buildKnowledgeInputs({ profile, materials = [], essays = [] }) {
   const evidenceCount = presented.filter((m) => !isSampleMaterial(m) && !isGuidanceMaterial(m)).length;
   const fingerprintSource = JSON.stringify([
     profileRow ? [profileRow.id, profileRow.updated_at, profileRow.full_name, profileRow.background_summary, profileRow.ib_subjects] : null,
-    ...materials.map((m) => [m.id, m.updated_at, m.type, m.analysis_role, m.file_url, m.link_url, m.notes, m.analysis?.version || '', m.analysis?.analysis_role || '', m.analysis?.analyzed_at || '']),
-    ...essays.map((e) => [e.id, e.updated_at, String(e.content || '').length]),
+    ...globalMaterials.map((m) => [m.id, m.updated_at, m.type, m.analysis_role, m.file_url, m.link_url, m.notes, m.analysis?.version || '', m.analysis?.analysis_role || '', m.analysis?.analyzed_at || '', m.target_university_id || '', m.target_essay_id || '', m.target_platform || '', m.target_task || '']),
+    ...globalEssays.map((e) => [e.id, e.updated_at, String(e.content || '').length, e.scope || '', e.university_id || '']),
   ]);
   return {
     profileText: clip(profileText, PROMPT_BUDGET.profile),
@@ -109,7 +115,7 @@ export function buildKnowledgeInputs({ profile, materials = [], essays = [] }) {
       materials: evidenceCount,
       samples: sampleCount,
       guidance: guidanceCount,
-      essays: essays.filter((e) => String(e.content || '').trim()).length,
+      essays: globalEssays.filter((e) => String(e.content || '').trim()).length,
     },
     empty: !profileText && !ownText && !essayText && !sampleText && !guidanceText,
   };
@@ -303,11 +309,12 @@ export function knowledgeRowsFor({ about = [], points = [], patterns = [], guida
  */
 export function knowledgeStatus(rows, currentFingerprint) {
   const aiRows = (rows || []).filter((r) => r.origin === 'ai');
-  const stamp = aiRows.find((r) => r.data?.fingerprint)?.data || null;
+  const stamps = aiRows.map((row) => row.data).filter((data) => data?.fingerprint);
+  const latestStamp = stamps.sort((a, b) => String(b.built_at || '').localeCompare(String(a.built_at || '')))[0] || null;
   return {
     built: aiRows.length > 0,
-    builtAt: stamp?.built_at || null,
-    stale: aiRows.length > 0 && !!stamp && stamp.fingerprint !== currentFingerprint,
+    builtAt: latestStamp?.built_at || null,
+    stale: aiRows.length > 0 && stamps.some((data) => data.fingerprint !== currentFingerprint),
     counts: {
       brief: (rows || []).filter((r) => r.kind === 'brief').length,
       evidence: (rows || []).filter((r) => r.kind === 'evidence').length,
@@ -414,8 +421,17 @@ export async function rebuildApplicantKnowledge({ inputs, existingRows = [], run
  * The knowledge base as text for a prompt. Patterns are filtered to the
  * platform's region, plus General ones. Output is capped; About you comes first.
  */
-export function applicantKnowledgeForPrompt(rows, { platform = '', maxChars = 7000 } = {}) {
-  const usable = (rows || []).filter((r) => String(r.text || '').trim());
+function targetLabel(row, options) {
+  const label = contextTargetLabel(row, options);
+  return label === 'All applications and tasks' ? '' : ` · ${label}`;
+}
+
+export function applicantKnowledgeForPrompt(rows, {
+  platform = '', universityId = '', essayId = '', essayIds = [], task = '',
+  universities = [], essays = [], maxChars = 7000,
+} = {}) {
+  const usable = filterByContextTarget(rows, { universityId, essayId, essayIds, platform, task })
+    .filter((r) => String(r.text || '').trim());
   if (!usable.length) return '';
   const region = platform ? platformRegion(platform) : '';
   const about = usable.filter((r) => r.kind === 'brief');
@@ -433,22 +449,22 @@ export function applicantKnowledgeForPrompt(rows, { platform = '', maxChars = 70
   add(
     'ABOUT THE APPLICANT (AI-built and applicant-edited; consistent with the profile and materials):',
     about,
-    (r) => `- [${ABOUT_CATEGORIES[r.category] || 'About'}] ${r.text}`,
+    (r) => `- [${ABOUT_CATEGORIES[r.category] || 'About'}]${targetLabel(r, { universities, essays })} ${r.text}`,
   );
   add(
     'PERSONAL POINTS (facts the applicant can use. Use these, and never add experiences beyond them):',
     points,
-    (r) => `- [${POINT_CATEGORIES[r.category] || 'Fact'}] ${r.text}${r.source_label ? ` (source: ${r.source_label})` : ''}`,
+    (r) => `- [${POINT_CATEGORIES[r.category] || 'Fact'}]${targetLabel(r, { universities, essays })} ${r.text}${r.source_label ? ` (source: ${r.source_label})` : ''}`,
   );
   add(
     'SUCCESSFUL-APPLICATION PATTERNS (apply the technique to this applicant’s own life; never copy a sample’s life):',
     patterns,
-    (r) => `- [${r.platform || 'General'} · ${PATTERN_CATEGORIES[r.category] || 'Judgement'}] ${r.text}`,
+    (r) => `- [${r.platform || 'General'} · ${PATTERN_CATEGORIES[r.category] || 'Judgement'}]${targetLabel(r, { universities, essays })} ${r.text}`,
   );
   add(
     'TIPS AND APPLICATION GUIDANCE (rules and constraints, not facts about the applicant):',
     guidance,
-    (r) => `- [${GUIDANCE_CATEGORIES[r.category] || 'Guidance'}] ${r.text}`,
+    (r) => `- [${GUIDANCE_CATEGORIES[r.category] || 'Guidance'}]${targetLabel(r, { universities, essays })} ${r.text}`,
   );
   const text = lines.join('\n').trim();
   return clip(text, maxChars);

@@ -29,7 +29,7 @@ import { diffText, diffStats, isAggressiveRewrite } from '../src/lib/textDiff.js
 import {
   buildGeneratePrompt, buildReviewPrompt, buildPolishPrompt, buildLengthRepairPrompt,
   withMeasuredLength, reviewAverage, GENERATE_SCHEMA, REVIEW_SCHEMA, POLISH_SCHEMA,
-  LENGTH_REPAIR_SCHEMA, REVIEW_SCORE_FIELDS,
+  LENGTH_REPAIR_SCHEMA, REVIEW_SCORE_FIELDS, rootBrief,
 } from '../src/lib/essayPrompts.js';
 import {
   ESSAY_REVIEW_DIMENSIONS, schoolVoiceFor, detectSupplementShapes, SUPPLEMENT_SHAPES,
@@ -41,6 +41,13 @@ import {
   isUsableSuggestion, ACTIVITY_SUGGEST_SCHEMA,
 } from '../src/lib/activityPrompts.js';
 import { COMMON_APP_PERSONAL_STATEMENT, COMMON_APP_PROMPTS, UCAS_RULES } from '../src/lib/applicationData.js';
+import { buildFitBrief } from '../src/lib/schoolFit.js';
+import { applicantKnowledgeForPrompt, buildKnowledgeInputs, knowledgeStatus } from '../src/lib/applicantKnowledge.js';
+import { formatMaterialsForAI } from '../src/lib/materialRole.js';
+import {
+  contextTargetFields, contextTargetLabel, filterByContextTarget, matchesContextTarget,
+  mergeContextTargetFallbacks, pendingContextTargetFallbacks, saveContextTargetFallback,
+} from '../src/lib/contextTargeting.js';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel) => readFileSync(join(root, rel), 'utf8');
@@ -469,6 +476,15 @@ const HARVARD = { name: 'Harvard University' };
   assert.match(builder, /meta\?\.truncated/, 'a truncated model answer is treated as unfinished');
   assert.match(builder, /AI_TEMPERATURES/, 'each action uses its own temperature');
   assert.match(builder, /isLiveOutcome/, 'demo output is never written to the essay');
+  assert.match(builder, /onClick=\{handleSaveRoot\}/, 'the applicant explicitly saves the essay root');
+  assert.match(builder, /prepareEssayRoot/, 'AI actions persist current edits and the latest root before proceeding');
+  assert.match(builder, /return \{ \.\.\.target, draft_anchor: String\(target\?\.draft_anchor/, 'the draft uses the latest root prepared for the current essay');
+  assert.match(builder, /persistUcasRows/, 'UCAS preparation saves all three answers, not just the focused box');
+  assert.match(builder, /preserveUnconfirmedSave/, 'an unconfirmed database save leaves the latest essay text visible and retryable');
+  assert.match(builder, /universityForEssay = \(essay\) => \(essay && isSharedEssay\(essay\) \? null : selectedUni\)/,
+    'a shared essay is not accidentally targeted to the currently selected university');
+  assert.match(builder, /if \(busy !== null \|\| saving \|\| rootSaving \|\| !dirtyFields\.length/,
+    'autosave does not race an active AI action or explicit save');
 
   const reviewPanel = src('src/components/essay/EssayReviewPanel.jsx');
   assert.match(reviewPanel, /ESSAY_REVIEW_DIMENSIONS/, 'the panel renders the same seven dimensions the prompt asks for');
@@ -506,6 +522,25 @@ const HARVARD = { name: 'Harvard University' };
 
   const universities = src('src/pages/Universities.jsx');
   assert.match(universities, /clearEssayArtifacts/, 'deleting a university clears the caches of the essays it takes with it');
+  assert.match(universities, /moveUniversity/, 'university cards can be reordered');
+  assert.match(universities, /ArrowUp/);
+  assert.match(universities, /ArrowDown/);
+  assert.match(universities, /progress < 100 && daysLeft/, 'completed roadmaps hide remaining-days information');
+
+  const dashboard = src('src/pages/Dashboard.jsx');
+  assert.match(dashboard, /roadmapComplete/);
+  assert.match(dashboard, /!roadmapComplete/, 'the dashboard also hides the countdown for a completed roadmap');
+
+  const knowledgePage = src('src/pages/AiKnowledge.jsx');
+  assert.match(knowledgePage, /collapsedSections/);
+  assert.match(knowledgePage, /ContextTargetFields/, 'knowledge entries can target university, essay, platform, and task');
+  const materialPage = src('src/pages/Materials.jsx');
+  assert.match(materialPage, /ContextTargetFields/, 'materials can target university, essay, platform, and task');
+  const reviewResults = src('src/components/review/ReviewResults.jsx');
+  assert.match(reviewResults, /ReviewSection/, 'full-application results collapse independently by section');
+  const reviewSection = src('src/components/review/ReviewSection.jsx');
+  assert.match(reviewSection, /aria-expanded/);
+  assert.match(reviewSection, /setOpen/);
 
   // The local-Ollama path is gone: one provider, one code path.
   assert.ok(!existsSync(join(root, 'src/api/ollamaClient.js')), 'the Ollama client is deleted');
@@ -551,9 +586,13 @@ const HARVARD = { name: 'Harvard University' };
   assert.ok(!/fails to use available personal context/.test(prompts),
     'the old instruction that penalized omitted profile facts is gone');
   assert.match(prompts, /optional_additions/, 'outside facts may only become optional ideas');
-  assert.match(prompts, /buildFitBrief\(knowledgeText, \{ kind: 'review' \}\)/, 'a review sees the reader lens');
-  assert.match(prompts, /buildFitBrief\(knowledgeText, \{ kind: 'draft' \}\)/, 'a draft sees values plus campus detail');
+  assert.match(prompts, /buildFitBrief\(knowledgeText, \{ kind: 'review', essay \}\)/, 'a review sees the reader lens for this essay');
+  assert.match(prompts, /buildFitBrief\(knowledgeText, \{ kind: 'draft', essay \}\)/, 'a draft sees values plus campus detail for this essay');
   assert.match(prompts, /optionalAdditionBrief/, 'the editor receives those ideas as options it may decline');
+  const direction = rootBrief({ draft_anchor: 'Choose one idea from robotics, music, or tutoring; do not include all three.' });
+  assert.match(direction, /choose ONE/i, 'directions that offer alternatives are interpreted as one choice, not a checklist');
+  assert.match(direction, /hard constraints/i, 'the prompt distinguishes constraints from brainstormed options');
+  assert.match(direction, /contradictory or impossible/i, 'conflicting directions are surfaced instead of guessed at');
 
   const panel = src('src/components/essay/EssayReviewPanel.jsx');
   assert.match(panel, /Ideas you could consider/, 'optional ideas are rendered apart from the findings');
@@ -577,6 +616,165 @@ const HARVARD = { name: 'Harvard University' };
 
   const models = src('api/models.js');
   assert.match(models, /listable/, 'a provider that cannot list models says so instead of failing');
+}
+
+// Context targeting: a saved source is filtered and labelled against one exact job.
+{
+  const context = {
+    universityId: 'uni-1',
+    universityName: 'Cornell University',
+    essayId: 'essay-1',
+    essayIds: ['essay-1'],
+    platform: 'common_app',
+    task: 'draft',
+    universities: [{ id: 'uni-1', name: 'Cornell University' }],
+    essays: [{ id: 'essay-1', title: 'Why Cornell?' }],
+  };
+  const selectedFields = contextTargetFields({
+    target_university_id: 'uni-1', target_essay_id: 'essay-1',
+    target_platform: 'common_app', target_task: 'draft',
+  });
+  assert.deepEqual(selectedFields, {
+    target_university_id: 'uni-1', target_essay_id: 'essay-1',
+    target_platform: 'common_app', target_task: 'draft',
+  });
+  assert.match(contextTargetLabel(selectedFields, context), /Cornell University/);
+  assert.match(contextTargetLabel(selectedFields, context), /Why Cornell/);
+
+  const targets = [
+    { id: 'global', text: 'global', kind: 'brief' },
+    { id: 'university', text: 'this school', kind: 'evidence', target_university_id: 'uni-1' },
+    { id: 'essay', text: 'this essay', kind: 'evidence', target_essay_id: 'essay-1' },
+    { id: 'other-school', text: 'other school', kind: 'evidence', target_university_id: 'uni-2' },
+    { id: 'other-task', text: 'review-only', kind: 'evidence', target_task: 'review' },
+    { id: 'other-platform', text: 'UCAS-only', kind: 'pattern', target_platform: 'ucas' },
+  ];
+  const selected = filterByContextTarget(targets, context);
+  assert.deepEqual(selected.map((item) => item.id), ['global', 'university', 'essay']);
+  assert.equal(matchesContextTarget(targets[2], context), true);
+  assert.equal(matchesContextTarget(targets[3], context), false);
+
+  const completeEntry = 'A'.repeat(720);
+  const knowledgeText = applicantKnowledgeForPrompt([
+    ...targets,
+    { id: 'long-entry', kind: 'evidence', category: 'fact', text: completeEntry, target_essay_id: 'essay-1' },
+  ], context);
+  assert.ok(knowledgeText.includes(completeEntry), 'a Knowledge Base item longer than 600 characters is not silently cut');
+  assert.ok(knowledgeText.includes('Only:'), 'target restrictions are visible to the model');
+  assert.ok(!knowledgeText.includes('other school') && !knowledgeText.includes('review-only') && !knowledgeText.includes('UCAS-only'));
+
+  const materialText = formatMaterialsForAI([
+    { id: 'general', title: 'General source', type: 'resume', notes: 'general evidence' },
+    { id: 'school', title: 'Other-school source', type: 'resume', notes: 'must not leak', target_university_id: 'uni-2' },
+    { id: 'task', title: 'Review-only source', type: 'resume', notes: 'wrong task', target_task: 'review' },
+  ], context);
+  assert.ok(materialText.includes('general evidence'));
+  assert.ok(!materialText.includes('must not leak') && !materialText.includes('wrong task'));
+
+  const globalInputs = buildKnowledgeInputs({
+    profile: null,
+    materials: [
+      { id: 'general', title: 'General evidence', type: 'resume', notes: 'general evidence' },
+      { id: 'scoped', title: 'School-only evidence', type: 'resume', notes: 'school-only secret', target_university_id: 'uni-1' },
+    ],
+    essays: [
+      { id: 'shared', title: 'Shared essay', scope: 'common', content: 'shared-essay-evidence' },
+      { id: 'specific', title: 'School essay', scope: 'university_specific', university_id: 'uni-1', content: 'school-essay-secret' },
+    ],
+  });
+  assert.equal(globalInputs.counts.materials, 1, 'the global portrait excludes school-specific sources');
+  assert.equal(globalInputs.counts.essays, 1, 'the global portrait counts only shared essays');
+  assert.ok(!globalInputs.essayText.includes('school-essay-secret'));
+  const scopedEdit = buildKnowledgeInputs({
+    profile: null,
+    materials: [
+      { id: 'general', title: 'General evidence', type: 'resume', notes: 'general evidence' },
+      { id: 'scoped', title: 'School-only evidence', type: 'resume', notes: 'updated school-only secret', target_university_id: 'uni-1', updated_at: 'later' },
+    ],
+    essays: [
+      { id: 'shared', title: 'Shared essay', scope: 'common', content: 'shared-essay-evidence' },
+      { id: 'specific', title: 'School essay', scope: 'university_specific', university_id: 'uni-1', content: 'updated school-essay-secret' },
+    ],
+  });
+  assert.equal(scopedEdit.fingerprint, globalInputs.fingerprint,
+    'editing school-specific material does not mark the global applicant portrait stale');
+  const status = knowledgeStatus([
+    { kind: 'brief', origin: 'ai', data: { fingerprint: 'old', built_at: '2026-01-01T00:00:00.000Z' } },
+    { kind: 'evidence', origin: 'ai', data: { fingerprint: 'current', built_at: '2026-02-01T00:00:00.000Z' } },
+  ], 'current');
+  assert.equal(status.builtAt, '2026-02-01T00:00:00.000Z');
+  assert.equal(status.stale, true, 'one stale AI-generated section keeps the knowledge status stale');
+
+  const originalStorage = globalThis.localStorage;
+  const values = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => values.has(key) ? values.get(key) : null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+  try {
+    saveContextTargetFallback('Material', 'material-1', { target_task: 'draft' }, ['target_task']);
+    assert.equal(pendingContextTargetFallbacks('Material')[0].fields.target_task, 'draft');
+    // A title-only edit must not erase the local target.
+    saveContextTargetFallback('Material', 'material-1', { title: 'Renamed' }, ['target_task']);
+    const fallback = mergeContextTargetFallbacks('Material', [{ id: 'material-1', title: 'Renamed' }], []);
+    assert.equal(fallback[0].target_task, 'draft');
+    // Once the missing column is available, the local fallback is retired.
+    saveContextTargetFallback('Material', 'material-1', {}, []);
+    assert.equal(pendingContextTargetFallbacks('Material').length, 0);
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalStorage;
+  }
+}
+
+// Essay-specific research: the selected prompt gets its own requirements and a shared essay gets no school research.
+{
+  const research = `## 1. ADMISSIONS OVERVIEW
+General application information.
+
+## 3. IDEAL STUDENT PROFILE
+Curiosity and sustained interest.
+
+## 4. ESSAY REQUIREMENTS
+1. Why do you want to study history at Cornell? Explain how the course fits your interests.
+2. Describe a community that shaped you and what you contributed.
+- Role in review: #1 assesses academic fit; #2 assesses community contribution.
+
+## 5. PROGRAMS AND MAJORS
+History courses and research opportunities.
+
+## 9. CAMPUS LIFE, TRADITIONS AND COMMUNITY
+Named history society and campus archive.
+
+## 10. WHAT THIS SCHOOL'S READERS REWARD IN WRITING
+Specific, evidence-based reflection.`;
+  const essay = {
+    id: 'essay-1', title: 'Why Cornell?', prompt: 'Why do you want to study history at Cornell?',
+    type: 'why_this_school', scope: 'university_specific', application_platform: 'common_app', word_limit: 650,
+  };
+  const brief = buildFitBrief(research, { kind: 'draft', essay });
+  assert.match(brief, /Why do you want to study history at Cornell/);
+  assert.match(brief, /#1 assesses academic fit/);
+  assert.doesNotMatch(brief, /Describe a community that shaped you/);
+  assert.doesNotMatch(brief, /#2 assesses community contribution/);
+  assert.doesNotMatch(brief, /ADMISSIONS OVERVIEW/);
+  assert.equal(buildFitBrief(research, { kind: 'draft', essay: { ...essay, scope: 'common' } }), '',
+    'a shared essay receives no university-specific research');
+
+  const combinedRequirements = `## 4. ESSAY REQUIREMENTS
+- Cornell supplements include why do you want to study engineering; why do you love Cornell; and what will you contribute.
+- Role in review: the fit essay tests academic match; the contribution answer tests community match.`;
+  const exactPromptBrief = buildFitBrief(combinedRequirements, {
+    kind: 'draft', essay: { ...essay, prompt: 'Why do you want to study engineering?' },
+  });
+  assert.match(exactPromptBrief, /Matched prompt: Why do you want to study engineering/);
+  assert.doesNotMatch(exactPromptBrief, /why do you love Cornell|what will you contribute/i,
+    'a legacy paragraph with multiple prompts does not turn them into a combined checklist');
+  const legacyBrief = buildFitBrief('Cornell requires a why-school essay and a contribution answer.', { kind: 'draft', essay });
+  assert.match(legacyBrief, /UNSTRUCTURED UNIVERSITY RESEARCH WITHHELD/);
+  assert.doesNotMatch(legacyBrief, /Cornell requires a why-school essay and a contribution answer/,
+    'unstructured legacy notes are withheld rather than leaking requirements across essays');
 }
 
 // The pack itself: every entry must be complete and attributed.
