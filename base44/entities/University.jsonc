@@ -38,6 +38,10 @@
     "color": {
       "type": "string",
       "default": "#1e293b"
+    },
+    "sort_order": {
+      "type": "number",
+      "description": "Applicant-defined card order"
     }
   },
   "required": [

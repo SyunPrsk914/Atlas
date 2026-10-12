@@ -29,6 +29,9 @@
 //      judge and what to aim at. They never become "you failed to mention X",
 //      because an admissions officer sees the page, not the school's website.
 
+import { detectSupplementShapes } from './essayCraft';
+import { isSharedEssay } from './applicationData';
+
 /**
  * The fixed section list of a university research record.
  *
@@ -221,48 +224,151 @@ const KIND_INSTRUCTIONS = {
   application: 'This is the institutional context for the whole file: what the school requires, what it says it values, and how its readers read. Judge the application as this committee would, against its own stated criteria.',
 };
 
+/** Significant prompt words for matching a saved research entry to one essay. */
+const STOP_WORDS = new Set([
+  'about', 'after', 'also', 'and', 'are', 'because', 'been', 'being', 'between',
+  'could', 'describe', 'does', 'each', 'from', 'have', 'into', 'more', 'most',
+  'other', 'please', 'that', 'their', 'them', 'there', 'these', 'they', 'this',
+  'those', 'through', 'time', 'what', 'when', 'where', 'which', 'while', 'will',
+  'with', 'would', 'your', 'you', 'ours', 'tell', 'share', 'write', 'essay',
+]);
+
+const promptWords = (value) => String(value || '').toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .split(/\s+/)
+  .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
+
+/** Return only the prompt and its numbered role from the research essay list. */
+function essayRequirementSlice(body, essay) {
+  const lines = String(body || '').split(/\r?\n/);
+  const prompt = String(essay?.prompt || '').trim();
+  const tokens = [...new Set(promptWords(`${essay?.title || ''} ${prompt}`))];
+  const isRoleLine = (line) => /^(?:[-*]\s*)?role in review\s*:/i.test(line.trim());
+  const promptLineIndexes = lines
+    .map((line, index) => ({ line: line.trim(), index }))
+    .filter(({ line }) => line && !isRoleLine(line));
+
+  let best = null;
+  for (const candidate of promptLineIndexes) {
+    const candidateTokens = new Set(promptWords(candidate.line));
+    const overlap = tokens.filter((word) => candidateTokens.has(word)).length;
+    const score = tokens.length ? overlap / tokens.length : 0;
+    if (!best || score > best.score) best = { ...candidate, score };
+  }
+
+  // Exact prompt inclusion always wins. Return the applicant's selected prompt,
+  // not the surrounding paragraph: older research records sometimes list
+  // several supplements in one bullet, and copying that whole bullet would
+  // accidentally turn alternatives into a checklist.
+  const normalizedPrompt = prompt.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  let exact = null;
+  if (normalizedPrompt) {
+    exact = promptLineIndexes.find(({ line }) =>
+      line.toLowerCase().replace(/[^a-z0-9]+/g, ' ').includes(normalizedPrompt));
+    if (exact) best = { ...exact, score: 1 };
+  }
+
+  const noMatch = () => {
+    const label = essay?.title || 'the selected essay';
+    return `No unambiguous matching entry for ${label} was found in the saved essay-requirements section. Current prompt: ${prompt || '(none saved)'}. Do not borrow a role or requirement from another essay.`;
+  };
+  if (!best || best.score < 0.28) return noMatch();
+
+  const number = best.line.match(/^\s*(?:[-*]\s*)?(\d+)[.)]/)?.[1];
+  const roleLine = lines.find(isRoleLine);
+  const selected = [];
+  if (exact) {
+    selected.push(number ? `${number}. ${prompt}` : `Matched prompt: ${prompt}`);
+  } else {
+    const questionWords = (best.line.match(/\b(?:why|what|how|describe|tell|share|list)\b/gi) || []).length;
+    const semicolonPrompts = /;\s*(?:why|what|how|describe|tell|share|list|which)\b/i.test(best.line);
+    if (!number && (semicolonPrompts || questionWords > 2)) return noMatch();
+    selected.push(best.line);
+  }
+  if (number && roleLine) {
+    const role = roleLine.split(/;\s*/).find((part) => part.includes(`#${number}`));
+    if (role) selected.push(role.trim());
+  }
+  return selected.join('\n');
+}
+
+function essayResearchSections(kind, essay) {
+  const text = `${essay?.title || ''} ${essay?.prompt || ''}`;
+  const shapes = detectSupplementShapes({
+    prompt: essay?.prompt || '',
+    limit: Number(essay?.word_limit) || 0,
+    unit: essay?.limit_unit || 'words',
+  }).map((shape) => shape.key);
+  const whySchool = essay?.type === 'why_this_school' || shapes.includes('why_school')
+    || /why (?:this|our|the) (?:school|university|college)|why are you interested in (?:studying|attending)|what attracts you to/i.test(text);
+  const community = shapes.includes('community') || shapes.includes('contribution')
+    || /roommate|community|campus|contribut(?:e|ion)|residential|neighbou?r/i.test(text);
+  const academic = shapes.includes('intellectual')
+    || /major|programme|program|course|department|academic|research opportunity/i.test(text);
+
+  const ids = ['ideal_student', 'essay_requirements', 'reader_lens'];
+  if (whySchool || academic) ids.push('programs_and_majors');
+  if (whySchool || community) ids.push('campus_life');
+  const permitted = new Set(RESEARCH_SECTIONS.filter((section) => section.kinds.includes(kind)).map((section) => section.id));
+  return ids.filter((id) => permitted.has(id));
+}
+
 /**
- * The slice of a research record one AI job should see.
+ * The slice of a research record one AI job should see. Essay jobs receive a
+ * prompt-specific slice rather than every essay requirement for the school.
  *
  * @param {string} knowledgeText the stored report
  * @param {object} [args]
  * @param {'draft'|'review'|'polish'|'application'} [args.kind] which job is asking
+ * @param {object} [args.essay] the selected essay, used to narrow school context
  * @param {number} [args.sectionBudget] per-section character cap
  * @param {number} [args.totalBudget] whole-brief character cap
  * @param {string[]} [args.extraSections] section ids to include beyond the kind's default
- * @returns {string} prompt-ready markdown, or '' when there is no research
+ * @returns {string} prompt-ready markdown, or '' when there is no relevant research
  */
 export function buildFitBrief(knowledgeText, {
   kind = 'draft',
+  essay = null,
   sectionBudget = FIT_SECTION_CHAR_BUDGET,
   totalBudget = FIT_BRIEF_CHAR_BUDGET,
   extraSections = [],
 } = {}) {
-  // Both callers pass a plain-English sentence when nothing is cached ("No
-  // university research is cached for this university yet…"). That sentence is a
-  // fallback for the prompt, not research: returning '' lets each prompt put its
-  // own, job-specific fallback in place instead of quoting ours back at itself.
   const stored = String(knowledgeText || '').trim();
   if (!stored || /^no (?:university )?research/i.test(stored)) return '';
+  // A shared essay must be identical wherever it is used. School-specific
+  // research therefore has no place in its draft, review, or polish context.
+  if (essay && isSharedEssay(essay) && ['draft', 'review', 'polish'].includes(kind)) return '';
 
   const parsed = parseSchoolKnowledge(stored);
-  const wanted = [...new Set([...RESEARCH_SECTIONS.filter((s) => s.kinds.includes(kind)).map((s) => s.id), ...extraSections])];
+  const wanted = essay && ['draft', 'review', 'polish'].includes(kind)
+    ? essayResearchSections(kind, essay)
+    : RESEARCH_SECTIONS.filter((section) => section.kinds.includes(kind)).map((section) => section.id);
+  const selectedIds = [...new Set([...wanted, ...extraSections])];
 
   if (!parsed.structured) {
+    if (essay && ['draft', 'review', 'polish'].includes(kind)) {
+      return `UNSTRUCTURED UNIVERSITY RESEARCH WITHHELD: Atlas could not safely match this legacy report to one essay, so it is not included. Current essay: ${essay.title || 'Untitled essay'} — ${essay.prompt || '(no prompt saved)'}. Do not import a requirement or school fact from another essay; use only the applicant's materials and facts supplied in a structured research section.`;
+    }
     return `UNIVERSITY RESEARCH (unstructured — no section headings, so treat it as background):\n${cap(stored, totalBudget)}`;
   }
 
   const blocks = [];
-  for (const id of wanted) {
+  for (const id of selectedIds) {
     const section = byId(id);
-    const body = parsed.sections[id];
+    let body = parsed.sections[id];
     if (!section || !body) continue;
+    if (id === 'essay_requirements' && essay) {
+      body = essayRequirementSlice(body, essay);
+    }
     blocks.push(`### ${section.n}. ${section.heading}\n${cap(body, sectionBudget)}`);
   }
-  if (parsed.preamble) blocks.unshift(`### BEFORE THE SECTIONS\n${cap(parsed.preamble, sectionBudget)}`);
+  if (parsed.preamble && !essay) blocks.unshift(`### BEFORE THE SECTIONS\n${cap(parsed.preamble, sectionBudget)}`);
   if (!blocks.length) return '';
 
-  let out = `WHAT THIS UNIVERSITY PUBLISHES ABOUT ITSELF (kind: ${kind}):\n${KIND_INSTRUCTIONS[kind] || KIND_INSTRUCTIONS.draft}\n\n${blocks.join('\n\n')}`;
+  const essayNote = essay
+    ? `\nCURRENT ESSAY TARGET: ${essay.title || 'Untitled essay'}\nExact prompt: ${essay.prompt || '(none saved)'}\nUse only the matching requirements above. Do not blend this prompt with another supplement or try to answer multiple prompts.`
+    : '';
+  let out = `WHAT THIS UNIVERSITY PUBLISHES ABOUT ITSELF (kind: ${kind}):\n${KIND_INSTRUCTIONS[kind] || KIND_INSTRUCTIONS.draft}${essayNote}\n\n${blocks.join('\n\n')}`;
   if (out.length > totalBudget) out = `${out.slice(0, totalBudget).trimEnd()}\n[brief trimmed to fit the prompt — the full record is stored with this university]`;
   return out;
 }

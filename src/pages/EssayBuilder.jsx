@@ -54,24 +54,37 @@ const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label
 const DRAFT_ANCHOR_KEY = 'atlas_draft_anchor_';
 
 function localDraftAnchor(id) {
-  if (!id || typeof window === 'undefined') return '';
+  if (!id || typeof window === 'undefined') return null;
   try {
-    return window.localStorage.getItem(`${DRAFT_ANCHOR_KEY}${id}`) || '';
+    return window.localStorage.getItem(`${DRAFT_ANCHOR_KEY}${id}`);
   } catch {
-    return '';
+    return null;
   }
 }
 
 function rememberDraftAnchor(id, value) {
+  if (!id || typeof window === 'undefined') return false;
+  const serialized = String(value ?? '');
+  try {
+    window.localStorage.setItem(`${DRAFT_ANCHOR_KEY}${id}`, serialized);
+    return window.localStorage.getItem(`${DRAFT_ANCHOR_KEY}${id}`) === serialized;
+  } catch { return false; }
+}
+
+function clearLocalDraftAnchor(id) {
   if (!id || typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(`${DRAFT_ANCHOR_KEY}${id}`, String(value || ''));
-  } catch { /* the database remains the source of truth when storage is blocked */ }
+    window.localStorage.removeItem(`${DRAFT_ANCHOR_KEY}${id}`);
+  } catch { /* a stale local fallback is still recoverable on this device */ }
 }
 
 function hydrateEssay(essay) {
-  if (!essay || Object.prototype.hasOwnProperty.call(essay, 'draft_anchor')) return essay;
-  return { ...essay, draft_anchor: localDraftAnchor(essay.id) };
+  if (!essay) return essay;
+  const local = localDraftAnchor(essay.id);
+  if (local !== null) return { ...essay, draft_anchor: local };
+  return Object.prototype.hasOwnProperty.call(essay, 'draft_anchor')
+    ? { ...essay, draft_anchor: essay.draft_anchor || '' }
+    : { ...essay, draft_anchor: '' };
 }
 
 export default function EssayBuilder() {
@@ -83,7 +96,8 @@ export default function EssayBuilder() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [dirtyFields, setDirtyFields] = useState([]);
+  const [rootSaving, setRootSaving] = useState(false);
   const [reviewResult, setReviewResult] = useState(null);
   const [reviewCachedAt, setReviewCachedAt] = useState(null);
   const [previousScore, setPreviousScore] = useState(null);
@@ -106,11 +120,26 @@ export default function EssayBuilder() {
   const [missingEssayColumns, setMissingEssayColumns] = useState([]);
   const [newEssay, setNewEssay] = useState({ title: '', type: 'supplemental', prompt: '', draft_anchor: '', word_limit: 650, scope: 'university_specific', limit_unit: 'words' });
   const autosaveRef = useRef(null);
+  const selectedEssayRef = useRef(null);
+  const dirtyFieldsRef = useRef([]);
+  const essayWriteRef = useRef(Promise.resolve());
+  const dirty = dirtyFields.length > 0;
+  const currentSelectedEssay = () => selectedEssayRef.current || selectedEssay;
+  const updateDirtyFields = (update) => {
+    const next = typeof update === 'function' ? update(dirtyFieldsRef.current) : update;
+    dirtyFieldsRef.current = next;
+    setDirtyFields(next);
+  };
+
+  useEffect(() => { selectedEssayRef.current = selectedEssay; }, [selectedEssay]);
 
   useEffect(() => { setAutoReview(getAutoReviewAfterEdit()); }, []);
 
   const platform = useMemo(() => getUniversityPlatform(selectedUni), [selectedUni]);
   const platformInfo = PLATFORMS[platform];
+  // A shared essay is identical across its platform's schools, so its prompts
+  // must not receive the currently selected university as an accidental target.
+  const universityForEssay = (essay) => (essay && isSharedEssay(essay) ? null : selectedUni);
 
   const loadEssays = useCallback(async () => {
     const ess = (await base44.entities.Essay.list()).map(hydrateEssay);
@@ -238,9 +267,15 @@ export default function EssayBuilder() {
   const sharedEssays = applicable.filter(isSharedEssay);
   const specificEssays = applicable.filter((e) => !isSharedEssay(e));
 
-  const pickEssay = (essay) => {
+  const pickEssay = async (essay) => {
+    if (busy !== null || saving || rootSaving) return;
     const stayingInUcas = isUcasQuestion(essay) && isUcasQuestion(selectedEssay);
-    if (dirty && !stayingInUcas && !window.confirm('You have unsaved changes on the current essay. Discard them?')) return;
+    if (dirty && !stayingInUcas) {
+      if (!window.confirm('Save the current essay before switching?')) return;
+      const saved = await handleSave();
+      if (!saved) return;
+    }
+    selectedEssayRef.current = essay;
     setSelectedEssay(essay);
     setLastEssayId(essay.id);
     // Restore cached results for this essay if we have them
@@ -263,14 +298,20 @@ export default function EssayBuilder() {
       setGenCachedAt(null);
     }
     loadEssayLocalState(essay);
-    if (!stayingInUcas) setDirty(false);
+    if (!stayingInUcas) updateDirtyFields([]);
   };
 
-  const handleSelectUni = (uniId) => {
-    if (dirty && !window.confirm('You have unsaved changes. Discard them?')) return;
+  const handleSelectUni = async (uniId) => {
+    if (busy !== null || saving || rootSaving) return;
+    if (dirty) {
+      if (!window.confirm('Save the current essay before switching universities?')) return;
+      const saved = await handleSave();
+      if (!saved) return;
+    }
     const uni = universities.find((u) => u.id === uniId);
     setSelectedUni(uni);
     if (uni) setLastUniversityId(uni.id);
+    selectedEssayRef.current = null;
     setSelectedEssay(null);
     setReviewResult(null);
     setReviewCachedAt(null);
@@ -278,36 +319,235 @@ export default function EssayBuilder() {
     setGenGaps([]);
     setGenCachedAt(null);
     loadEssayLocalState(null);
-    setDirty(false);
+    updateDirtyFields([]);
   };
 
   // --- persistence --------------------------------------------------------
-  const persist = async (fields) => {
-    if (!selectedEssay) return null;
-    if (Object.prototype.hasOwnProperty.call(fields, 'draft_anchor')) {
-      rememberDraftAnchor(selectedEssay.id, fields.draft_anchor);
+  const clearDirtyFields = (savedFields, essayId = selectedEssay?.id) => {
+    const fields = Array.isArray(savedFields) ? savedFields : Object.keys(savedFields || {});
+    const values = Array.isArray(savedFields) ? null : (savedFields || {});
+    updateDirtyFields((prev) => prev.filter((field) => {
+      if (!fields.includes(field)) return true;
+      const latest = selectedEssayRef.current;
+      if (!latest || latest.id !== essayId) return true;
+      return values ? latest[field] !== values[field] : false;
+    }));
+  };
+
+  const markDirty = (field) => updateDirtyFields((prev) => (prev.includes(field) ? prev : [...prev, field]));
+
+  // Serialize essay writes so an older debounced autosave cannot land after a
+  // newer manual or AI save and roll the database back to stale text.
+  const updateEssayInOrder = (id, fields) => {
+    const operation = essayWriteRef.current
+      .catch(() => undefined)
+      .then(() => base44.entities.Essay.update(id, fields));
+    essayWriteRef.current = operation.catch(() => undefined);
+    return operation;
+  };
+
+  const mergePersistedFields = (current, essayRow, fields, updated) => {
+    if (!current || current.id !== essayRow.id) return current;
+    const next = { ...current };
+    for (const [field, value] of Object.entries(fields)) {
+      if (Object.is(current[field], essayRow[field]) || Object.is(current[field], value)) {
+        next[field] = Object.prototype.hasOwnProperty.call(updated, field) ? updated[field] : value;
+      }
     }
-    const updated = await base44.entities.Essay.update(selectedEssay.id, fields);
-    setEssays((prev) => prev.map((e) => (e.id === updated.id ? { ...e, ...updated, ...fields } : e)));
-    setSelectedEssay((prev) => (prev ? { ...prev, ...updated, ...fields } : prev));
-    setDirty(false);
+    if (updated.updated_at) next.updated_at = updated.updated_at;
+    return next;
+  };
+
+  const preserveUnconfirmedSave = (essayRow, fields) => {
+    const applyUnchangedFields = (current) => {
+      if (!current || current.id !== essayRow.id) return current;
+      const patch = {};
+      for (const [field, value] of Object.entries(fields)) {
+        if ((Object.is(current[field], essayRow[field]) || Object.is(current[field], value))
+          && !Object.is(current[field], value)) patch[field] = value;
+      }
+      return Object.keys(patch).length ? { ...current, ...patch } : current;
+    };
+    setEssays((prev) => prev.map(applyUnchangedFields));
+    setSelectedEssay(applyUnchangedFields);
+    if (selectedEssayRef.current?.id === essayRow.id) {
+      const retryable = Object.keys(fields).filter((field) => [
+        'title', 'prompt', 'draft_anchor', 'word_limit', 'content', 'status', 'type', 'limit_unit', 'review_notes',
+      ].includes(field));
+      updateDirtyFields((prev) => {
+        const additions = retryable.filter((field) => !prev.includes(field));
+        return additions.length ? [...prev, ...additions] : prev;
+      });
+    }
+  };
+
+  const persist = async (fields, essayRow = selectedEssay) => {
+    if (!essayRow) return null;
+    const savesRoot = Object.prototype.hasOwnProperty.call(fields, 'draft_anchor');
+    if (savesRoot) rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+    let rootDurable = true;
+    let updated;
+    try {
+      updated = await updateEssayInOrder(essayRow.id, fields);
+    } catch (error) {
+      preserveUnconfirmedSave(essayRow, fields);
+      throw error;
+    }
+    if (!updated) {
+      preserveUnconfirmedSave(essayRow, fields);
+      throw new Error('Atlas could not confirm this essay save. Your changes remain in the editor; keep this page open and retry before switching devices.');
+    }
+    if (savesRoot) {
+      const missing = base44.capabilities?.missingOptionalColumns?.() || [];
+      const latestRoot = selectedEssayRef.current?.id === essayRow.id
+        ? String(selectedEssayRef.current.draft_anchor || '')
+        : String(essayRow.draft_anchor || '');
+      const localRoot = localDraftAnchor(essayRow.id);
+      const rootStillLatest = latestRoot === String(fields.draft_anchor || '')
+        && (localRoot === null || localRoot === String(fields.draft_anchor || ''));
+      const rootInDatabase = Object.prototype.hasOwnProperty.call(updated, 'draft_anchor')
+        && !missing.includes('draft_anchor');
+      if (rootInDatabase && rootStillLatest) {
+        clearLocalDraftAnchor(essayRow.id);
+      } else if (rootStillLatest) {
+        rootDurable = rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+      }
+    }
+    setEssays((prev) => prev.map((row) => mergePersistedFields(row, essayRow, fields, updated)));
+    setSelectedEssay((prev) => mergePersistedFields(prev, essayRow, fields, updated));
+    clearDirtyFields(rootDurable ? fields : Object.keys(fields).filter((field) => field !== 'draft_anchor'), essayRow.id);
     return updated;
   };
 
+  /** Save the latest direction independently from the rest of the essay. */
+  const saveRootForEssay = async (essayRow) => {
+    if (!essayRow?.id) return { ok: false, persisted: false };
+    const fields = { draft_anchor: String(essayRow.draft_anchor || '') };
+    const locallySaved = rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+    setRootSaving(true);
+    try {
+      if (missingEssayColumns.includes('draft_anchor')) {
+        if (!locallySaved) throw new Error('This browser could not store the root, and the database is missing the draft_anchor column. Run supabase/schema.sql and keep this page open.');
+        clearDirtyFields(fields, essayRow.id);
+        return { ok: true, persisted: false };
+      }
+      const updated = await updateEssayInOrder(essayRow.id, fields);
+      if (!updated) throw new Error('Atlas could not confirm the database save. The root remains in the editor; keep this page open and retry.');
+      const missing = base44.capabilities?.missingOptionalColumns?.() || [];
+      const persisted = Object.prototype.hasOwnProperty.call(updated, 'draft_anchor') && !missing.includes('draft_anchor');
+      const latestRoot = selectedEssayRef.current?.id === essayRow.id
+        ? String(selectedEssayRef.current.draft_anchor || '')
+        : String(essayRow.draft_anchor || '');
+      const rootUnchanged = latestRoot === fields.draft_anchor;
+      if (rootUnchanged) {
+        setEssays((prev) => prev.map((row) => row.id === essayRow.id
+          ? { ...row, draft_anchor: fields.draft_anchor, ...(updated.updated_at ? { updated_at: updated.updated_at } : {}) }
+          : row));
+        setSelectedEssay((prev) => prev?.id === essayRow.id
+          ? { ...prev, draft_anchor: fields.draft_anchor, ...(updated.updated_at ? { updated_at: updated.updated_at } : {}) }
+          : prev);
+      }
+      let localSaved = locallySaved;
+      if (!persisted) {
+        if (rootUnchanged) localSaved = rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+        setMissingEssayColumns((prev) => (prev.includes('draft_anchor') ? prev : [...prev, 'draft_anchor']));
+      } else {
+        if (rootUnchanged) clearLocalDraftAnchor(essayRow.id);
+        setMissingEssayColumns((prev) => prev.filter((column) => column !== 'draft_anchor'));
+      }
+      const savedSomewhere = persisted || localSaved;
+      clearDirtyFields(savedSomewhere ? fields : [], essayRow.id);
+      if (!savedSomewhere && rootUnchanged) {
+        throw new Error('Neither the database nor this browser could store the essay root. Run supabase/schema.sql and keep this page open.');
+      }
+      return { ok: savedSomewhere, persisted, error: persisted ? null : undefined };
+    } catch (error) {
+      return { ok: locallySaved, persisted: false, error };
+    } finally {
+      setRootSaving(false);
+    }
+  };
+
+  const prepareEssayRoot = async (essayRow) => {
+    const latest = selectedEssayRef.current?.id === essayRow?.id ? selectedEssayRef.current : essayRow;
+    const target = { ...latest };
+    const pendingFields = dirtyFieldsRef.current
+      .filter((field) => field !== 'draft_anchor' && Object.prototype.hasOwnProperty.call(target, field));
+    if (pendingFields.length) {
+      if (isUcasQuestion(target)) {
+        const rows = essays
+          .filter(isUcasQuestion)
+          .map((essay) => (essay.id === target.id ? { ...essay, ...target } : essay));
+        await persistUcasRows(rows, target.id);
+      } else {
+        const fields = Object.fromEntries(pendingFields.map((field) => [field, target[field]]));
+        await persist(fields, target);
+      }
+    }
+    const result = await saveRootForEssay(target);
+    if (!result.ok) {
+      const error = result.error || new Error('The essay root could not be saved.');
+      toast.error('Essay root was not saved', { description: `${error.message} This draft was not started.` });
+      throw error;
+    }
+    if (result.error) {
+      toast.warning('Root saved in this browser; database sync failed', {
+        description: `${result.error.message} The AI will use this root for this draft. Check the connection before switching devices.`,
+      });
+    } else if (!result.persisted) {
+      toast.message('Root saved in this browser', {
+        description: 'Run supabase/schema.sql to sync this direction across devices. The AI will use this saved root now.',
+      });
+    }
+    return { ...target, draft_anchor: String(target?.draft_anchor || '') };
+  };
+
+  const handleSaveRoot = async () => {
+    const target = currentSelectedEssay();
+    if (!target) return;
+    const result = await saveRootForEssay(target);
+    if (!result.ok) {
+      toast.error('Could not save essay root', {
+        description: `${result.error?.message || 'The save could not be confirmed.'} The root remains in the editor; keep this page open and retry.`,
+      });
+      return;
+    }
+    if (result.error) {
+      toast.warning('Essay root saved in this browser', {
+        description: `Database sync failed: ${result.error.message} The AI can use this root on this device.`,
+      });
+      return;
+    }
+    toast.success(result.persisted ? 'Essay root saved' : 'Essay root saved in this browser', {
+      description: result.persisted
+        ? 'This is the direction future drafts will start from.'
+        : 'The AI will use this root here. Run supabase/schema.sql to sync it across devices.',
+    });
+  };
+
   const handleFieldChange = (field, value) => {
-    if (field === 'draft_anchor') rememberDraftAnchor(selectedEssay?.id, value);
+    const essayId = selectedEssay?.id;
+    if (field === 'draft_anchor') rememberDraftAnchor(essayId, value);
+    if (selectedEssayRef.current?.id === essayId) {
+      selectedEssayRef.current = { ...selectedEssayRef.current, [field]: value };
+    }
+    setEssays((prev) => prev.map((item) => (item.id === essayId ? { ...item, [field]: value } : item)));
     setSelectedEssay((prev) => ({ ...prev, [field]: value }));
-    setDirty(true);
+    markDirty(field);
   };
 
   const onUcasChange = (essay, content) => {
     setEssays((prev) => prev.map((item) => (item.id === essay.id ? { ...item, content } : item)));
+    if (selectedEssayRef.current?.id === essay.id) {
+      selectedEssayRef.current = { ...selectedEssayRef.current, content };
+    }
     setSelectedEssay((prev) => (prev?.id === essay.id ? { ...prev, content } : prev));
-    setDirty(true);
+    markDirty('content');
   };
 
   const onUcasFocus = (essay) => {
     if (!essay || selectedEssay?.id === essay.id) return;
+    selectedEssayRef.current = essay;
     setSelectedEssay(essay);
     setReviewResult(null);
     setGenAnalysis(null);
@@ -315,101 +555,138 @@ export default function EssayBuilder() {
     loadEssayLocalState(essay);
   };
 
+  const essaySaveFields = (essay) => ({
+    title: essay.title,
+    prompt: essay.prompt,
+    draft_anchor: essay.draft_anchor || '',
+    word_limit: resolvedEssayLimit(essay),
+    content: essay.content,
+    status: essay.status,
+    review_notes: essay.review_notes || '',
+    type: essay.type,
+    limit_unit: limitUnitFor(essay),
+  });
+
+  const persistUcasRows = async (rows, activeEssayId) => {
+    for (const essay of rows) {
+      const fields = {
+        content: essay.content,
+        prompt: essay.prompt,
+        title: essay.title,
+        draft_anchor: essay.draft_anchor || '',
+        word_limit: resolvedEssayLimit(essay),
+        status: essay.status,
+        review_notes: essay.review_notes || '',
+        type: essay.type,
+        limit_unit: 'characters',
+      };
+      await persist(fields, essay);
+      const rootColumnMissing = (base44.capabilities?.missingOptionalColumns?.() || []).includes('draft_anchor');
+      if (rootColumnMissing && essay.draft_anchor
+        && localDraftAnchor(essay.id) !== String(essay.draft_anchor)) {
+        throw new Error('This browser could not store a UCAS essay root while the database is missing draft_anchor. Run supabase/schema.sql and keep this page open.');
+      }
+      if (essay.id === activeEssayId) clearDirtyFields(fields, essay.id);
+    }
+  };
+
   const handleSave = async () => {
-    if (!selectedEssay) return;
+    const current = currentSelectedEssay();
+    if (!current) return false;
+    const target = { ...current };
     setSaving(true);
     try {
-      if (isUcasQuestion(selectedEssay)) {
+      if (isUcasQuestion(target)) {
         const rows = essays
           .filter(isUcasQuestion)
-          .map((essay) => (essay.id === selectedEssay.id ? { ...essay, ...selectedEssay } : essay));
-        for (const essay of rows) {
-          await base44.entities.Essay.update(essay.id, {
-            content: essay.content,
-            prompt: essay.prompt,
-            title: essay.title,
-            draft_anchor: essay.draft_anchor || '',
-            word_limit: resolvedEssayLimit(essay),
-            status: essay.status,
-            type: essay.type,
-            limit_unit: 'characters',
-          });
-        }
-        setDirty(false);
+          .map((essay) => (essay.id === target.id ? { ...essay, ...target } : essay));
+        await persistUcasRows(rows, target.id);
       } else {
-        await persist({
-          title: selectedEssay.title,
-          prompt: selectedEssay.prompt,
-          draft_anchor: selectedEssay.draft_anchor || '',
-          word_limit: selectedEssay.word_limit,
-          content: selectedEssay.content,
-          type: selectedEssay.type,
-          status: selectedEssay.status,
-          limit_unit: limitUnitFor(selectedEssay),
+        await persist(essaySaveFields(target), target);
+      }
+      if (dirtyFieldsRef.current.length) {
+        toast.warning('Some essay changes are still not confirmed', {
+          description: 'The latest root or text remains in the editor. Check the save status and retry before switching essays or universities.',
         });
+        return false;
       }
       toast.success('Essay saved');
+      return true;
     } catch (e) {
       toast.error('Could not save this essay', { description: e.message });
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
-  // Debounced autosave so nothing is ever lost to a stray click.
+  // Debounced autosave so nothing is ever lost to a stray click. A save clears
+  // only fields whose current value still matches the snapshot sent to storage.
   useEffect(() => {
-    if (!dirty || !selectedEssay) return undefined;
+    if (busy !== null || saving || rootSaving || !dirtyFields.length || !selectedEssay) return undefined;
+    const missingRootColumn = missingEssayColumns.includes('draft_anchor')
+      || (base44.capabilities?.missingOptionalColumns?.() || []).includes('draft_anchor');
+    const rootUnavailable = missingRootColumn
+      && dirtyFieldsRef.current.every((field) => field === 'draft_anchor')
+      && dirtyFieldsRef.current.includes('draft_anchor')
+      && localDraftAnchor(selectedEssay.id) !== String(selectedEssay.draft_anchor || '');
+    if (rootUnavailable) return undefined;
     clearTimeout(autosaveRef.current);
+    const target = { ...selectedEssay };
     autosaveRef.current = setTimeout(async () => {
       try {
-        if (isUcasQuestion(selectedEssay)) {
+        if (isUcasQuestion(target)) {
           const rows = essays
             .filter(isUcasQuestion)
-            .map((essay) => (essay.id === selectedEssay.id ? { ...essay, ...selectedEssay } : essay));
-          for (const essay of rows) {
-            await base44.entities.Essay.update(essay.id, {
-              content: essay.content,
-              prompt: essay.prompt,
-              title: essay.title,
-              draft_anchor: essay.draft_anchor || '',
-              word_limit: resolvedEssayLimit(essay),
-              status: essay.status,
-              type: essay.type,
-              limit_unit: 'characters',
-            });
-          }
-          setDirty(false);
+            .map((essay) => (essay.id === target.id ? { ...essay, ...target } : essay));
+          await persistUcasRows(rows, target.id);
         } else {
           await persist({
-            content: selectedEssay.content,
-            prompt: selectedEssay.prompt,
-            title: selectedEssay.title,
-            draft_anchor: selectedEssay.draft_anchor || '',
-            word_limit: selectedEssay.word_limit,
-            status: selectedEssay.status,
-            type: selectedEssay.type,
-            limit_unit: limitUnitFor(selectedEssay),
-          });
+            content: target.content,
+            prompt: target.prompt,
+            title: target.title,
+            draft_anchor: target.draft_anchor || '',
+            word_limit: target.word_limit,
+            status: target.status,
+            review_notes: target.review_notes || '',
+            type: target.type,
+            limit_unit: limitUnitFor(target),
+          }, target);
         }
-      } catch { /* autosave failures must not interrupt typing */ }
+      } catch { /* autosave failures must not interrupt typing; dirty remains visible */ }
     }, 2500);
     return () => clearTimeout(autosaveRef.current);
-  }, [dirty, essays, selectedEssay, selectedEssay?.id, selectedEssay?.content, selectedEssay?.prompt, selectedEssay?.title, selectedEssay?.draft_anchor, selectedEssay?.word_limit, selectedEssay?.status, selectedEssay?.type]);
+  }, [busy, dirtyFields, essays, selectedEssay, saving, rootSaving, missingEssayColumns]);
 
   // --- context ------------------------------------------------------------
-  const gatherContext = async () => {
+  const gatherContext = async (essayRow = selectedEssay, task = 'draft') => {
     const [profiles, materials] = await Promise.all([
       base44.entities.Profile.list(),
       base44.entities.Material.list(),
     ]);
     const profileText = buildProfileContext(profiles[0] || {}, { includeLeadershipBrief: true });
-    // Platform-aware materials formatting so US/UK samples are distinguished
-    const materialsText = formatMaterialsForAI(materials, { platform });
+    const contextUniversity = essayRow && isSharedEssay(essayRow) ? null : selectedUni;
+    const contextPlatform = essayRow?.application_platform || platform;
+    const targeting = {
+      platform: contextPlatform,
+      universityId: contextUniversity?.id || '',
+      universityName: contextUniversity?.name || '',
+      essayId: essayRow?.id || '',
+      essay: essayRow || null,
+      task,
+      universities,
+      essays,
+    };
+    const materialsText = formatMaterialsForAI(materials, targeting);
     const knowledgeRows = await base44.entities.CollegeKnowledge.list();
-    const knowledge = findKnowledgeRecord(knowledgeRows, selectedUni?.name || '');
+    const knowledge = contextUniversity
+      ? findKnowledgeRecord(knowledgeRows, contextUniversity.name || '')
+      : null;
     const knowledgeText = knowledge?.knowledge
-      || 'No university research is cached for this university yet. Research it in University Research for a far more specific essay — this draft will rely on general knowledge only.';
-    const applicantText = await loadApplicantKnowledgeText({ platform });
+      || (contextUniversity
+        ? 'No university research is cached for this university yet. Research it in University Research for a far more specific essay — this draft will rely on general knowledge only.'
+        : 'No university research applies to a shared essay.');
+    const applicantText = await loadApplicantKnowledgeText(targeting);
     return { profileText, materialsText, knowledgeText, applicantText };
   };
 
@@ -436,13 +713,14 @@ export default function EssayBuilder() {
   };
 
   const undoLastChange = async () => {
-    if (!undoStep) return;
+    if (!undoStep || busy !== null || saving || rootSaving) return;
     const { essayId, fields, label } = undoStep;
+    const target = selectedEssay?.id === essayId ? selectedEssay : essays.find((essay) => essay.id === essayId);
+    if (!target) return;
+    setSaving(true);
     try {
-      await base44.entities.Essay.update(essayId, fields);
-      setEssays((prev) => prev.map((e) => (e.id === essayId ? { ...e, ...fields } : e)));
+      await persist(fields, target);
       if (selectedEssay?.id === essayId) {
-        setSelectedEssay((prev) => (prev ? { ...prev, ...fields } : prev));
         if ('review_notes' in fields) {
           let previous = null;
           try {
@@ -455,6 +733,8 @@ export default function EssayBuilder() {
       toast.success('Restored', { description: `Undid: ${label}.` });
     } catch (e) {
       toast.error('Could not undo this change', { description: e.message });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -477,7 +757,7 @@ export default function EssayBuilder() {
   const repairLength = async ({ essay, context, text, assessment, mode, originalText = '', preservedRatio = null }) => {
     const outcome = await runAI({
       prompt: buildLengthRepairPrompt({
-        essay, university: selectedUni, platform, mode, text, assessment,
+        essay, university: universityForEssay(essay), platform, mode, text, assessment,
         originalText, preservedRatio, allEssays: essays,
         knowledgeText: context.knowledgeText, materialsText: context.materialsText,
         profileText: context.profileText, applicantText: context.applicantText,
@@ -507,32 +787,35 @@ export default function EssayBuilder() {
   };
 
   const handleGenerate = async () => {
-    if (!selectedEssay) return;
+    const current = currentSelectedEssay();
+    if (!current) return;
     if (!guardLive('Generate a draft')) return;
-    if (!confirmReplace(selectedEssay, 'the draft is written')) return;
-    if (isCommonAppPersonalStatement(selectedEssay) && !chosenCommonAppPrompt(selectedEssay)) {
+    const essayTarget = { ...current };
+    if (!confirmReplace(essayTarget, 'the draft is written')) return;
+    if (isCommonAppPersonalStatement(essayTarget) && !chosenCommonAppPrompt(essayTarget)) {
       toast.error('Choose one Common App prompt first', {
         description: 'The personal statement answers one of the seven prompts. Leaving all of them in the box makes the draft try to answer every prompt.',
       });
       return;
     }
-    if (isAmbiguousCommonAppPrompt(selectedEssay.prompt)) {
+    if (isAmbiguousCommonAppPrompt(essayTarget.prompt)) {
       toast.error('This essay has more than one official prompt in it', {
         description: 'Choose the single prompt you are answering before generating a draft.',
       });
       return;
     }
-    const before = selectedEssay.content || '';
+    const before = essayTarget.content || '';
     setBusy('generate');
     setReviewResult(null);
     setGenAnalysis(null);
     setRevision(null);
     setLengthIssue(null);
     try {
-      const context = await gatherContext();
+      const essayForAction = await prepareEssayRoot(essayTarget);
+      const context = await gatherContext(essayForAction, 'draft');
       const outcome = await runAI({
         prompt: buildGeneratePrompt({
-          essay: selectedEssay, university: selectedUni, platform,
+          essay: essayForAction, university: universityForEssay(essayForAction), platform,
           profileText: context.profileText, knowledgeText: context.knowledgeText,
           materialsText: context.materialsText, applicantText: context.applicantText,
           allEssays: essays,
@@ -548,12 +831,12 @@ export default function EssayBuilder() {
         toast.error('The AI returned an empty draft', { description: 'Try again, or lower the length you asked for.' });
         return;
       }
-      let assessment = assessLength(text, selectedEssay, essays);
+      let assessment = assessLength(text, essayForAction, essays);
       let repaired = false;
       let repairNotes = '';
       if (assessment.needsWork || outcome.meta?.truncated) {
         setBusy('repair');
-        const fix = await repairLength({ essay: selectedEssay, context, text, assessment, mode: 'generate' });
+        const fix = await repairLength({ essay: essayForAction, context, text, assessment, mode: 'generate' });
         if (fix) {
           repairNotes = `The first answer came back at ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}${outcome.meta?.truncated ? ' and was cut off by the model' : ''}; Atlas sent it back and the model returned ${fix.assessment.count.toLocaleString()}.`;
           text = fix.text;
@@ -570,20 +853,19 @@ export default function EssayBuilder() {
       setGenAnalysis(analysis);
       setGenGaps(gaps);
       setGenCachedAt(new Date().toISOString());
-      // Persist generation analysis so it survives navigation
-      setCachedEssayGen(selectedEssay.id, { analysis, gaps });
+      setCachedEssayGen(essayForAction.id, { analysis, gaps });
 
       if (before.trim()) {
-        setEssaySnapshot(selectedEssay.id, { content: before, label: 'the text before this draft', review: reviewResult });
-        setSnapshot(getEssaySnapshot(selectedEssay.id));
+        setEssaySnapshot(essayForAction.id, { content: before, label: 'the text before this draft', review: reviewResult });
+        setSnapshot(getEssaySnapshot(essayForAction.id));
       }
-      rememberForUndo(selectedEssay, { content: before, status: selectedEssay.status }, 'draft written');
-      await persist({ content: text, status: 'drafting' });
+      rememberForUndo(essayForAction, { content: before, status: essayForAction.status }, 'draft written');
+      await persist({ content: text, status: 'drafting' }, essayForAction);
 
-      recordProgress(selectedEssay.id, {
+      recordProgress(essayForAction.id, {
         action: 'generate',
         unit: assessment.unit,
-        wordsBefore: assessLength(before, selectedEssay, essays).count,
+        wordsBefore: assessLength(before, essayForAction, essays).count,
         wordsAfter: assessment.count,
         scoreBefore: reviewResult?.overall_score ?? null,
         scoreAfter: null,
@@ -615,14 +897,15 @@ export default function EssayBuilder() {
    * automatic re-review after an edit can score the text that was just saved
    * rather than the copy still held in this render's state.
    */
-  const runReview = async (essayRow, previousReview = null) => {
-    const target = essayRow || selectedEssay;
+  const runReview = async (essayRow, previousReview = null, task = 'review') => {
+    let target = essayRow || selectedEssay;
     if (!target?.content?.trim()) return null;
-    const context = await gatherContext();
+    target = await prepareEssayRoot({ ...target });
+    const context = await gatherContext(target, task);
     const rows = essays.map((row) => (row.id === target.id ? { ...row, content: target.content } : row));
     const outcome = await runAI({
       prompt: buildReviewPrompt({
-        essay: target, university: selectedUni, platform,
+        essay: target, university: universityForEssay(target), platform,
         knowledgeText: context.knowledgeText, reviewNotes: target.review_notes,
         allEssays: rows, materialsText: context.materialsText,
         profileText: context.profileText, applicantText: context.applicantText,
@@ -633,8 +916,6 @@ export default function EssayBuilder() {
     }, { fallbackTitle: 'The review could not be completed' });
 
     if (!isLiveOutcome(outcome)) return null;
-    // Atlas measures the length itself: a model's own word count disagrees with
-    // the editor often enough that it cannot be shown to the applicant.
     const measured = withMeasuredLength(outcome.result, target, rows);
     setReviewResult(measured);
     setReviewCachedAt(new Date().toISOString());
@@ -643,22 +924,23 @@ export default function EssayBuilder() {
   };
 
   const handleReview = async () => {
-    if (!selectedEssay?.content) return;
+    const current = currentSelectedEssay();
+    if (!current?.content) return;
     if (!guardLive('The admissions review')) return;
+    const target = { ...current };
     const prior = reviewResult;
     setBusy('review');
     setReviewResult(null);
     try {
-      const measured = await runReview(selectedEssay, prior);
+      const measured = await runReview(target, prior, 'review');
       if (!measured) {
-        // A review that produced nothing must not leave the panel empty.
         if (prior) setReviewResult(prior);
         return;
       }
       setPreviousScore(prior?.overall_score ?? null);
-      rememberForUndo(selectedEssay, { status: selectedEssay.status, review_notes: selectedEssay.review_notes || '' }, 'review saved');
-      await persist({ status: 'in_review', review_notes: JSON.stringify(measured, null, 2) });
-      recordProgress(selectedEssay.id, {
+      rememberForUndo(target, { status: target.status, review_notes: target.review_notes || '' }, 'review saved');
+      await persist({ status: 'in_review', review_notes: JSON.stringify(measured, null, 2) }, target);
+      recordProgress(target.id, {
         action: 'review',
         unit: measured.unit,
         wordsBefore: measured.word_count,
@@ -672,7 +954,6 @@ export default function EssayBuilder() {
       });
     } catch (e) {
       console.error(e);
-      // A failed re-review must not cost the applicant the review they had.
       if (prior) setReviewResult(prior);
     } finally {
       setBusy(null);
@@ -680,18 +961,21 @@ export default function EssayBuilder() {
   };
 
   const handlePolish = async () => {
-    if (!selectedEssay?.content?.trim()) return;
+    const current = currentSelectedEssay();
+    if (!current?.content?.trim()) return;
     if (!guardLive('Apply edits')) return;
-    if (!confirmReplace(selectedEssay, 'the edits are applied')) return;
-    const before = selectedEssay.content || '';
+    const essayTarget = { ...current };
+    if (!confirmReplace(essayTarget, 'the edits are applied')) return;
+    const before = essayTarget.content || '';
     const priorReview = reviewResult;
     setBusy('polish');
     setLengthIssue(null);
     try {
-      const context = await gatherContext();
+      const essayForAction = await prepareEssayRoot(essayTarget);
+      const context = await gatherContext(essayForAction, 'polish');
       const outcome = await runAI({
         prompt: buildPolishPrompt({
-          essay: selectedEssay, university: selectedUni, platform,
+          essay: essayForAction, university: universityForEssay(essayForAction), platform,
           reviewResult: priorReview, knowledgeText: context.knowledgeText, allEssays: essays,
           materialsText: context.materialsText, profileText: context.profileText,
           applicantText: context.applicantText,
@@ -707,7 +991,7 @@ export default function EssayBuilder() {
         toast.error('The AI returned an empty revision', { description: 'Your draft was left untouched.' });
         return;
       }
-      let assessment = assessLength(text, selectedEssay, essays);
+      let assessment = assessLength(text, essayForAction, essays);
       let repaired = false;
       if (assessment.needsWork || outcome.meta?.truncated) {
         // An edit that shrinks the essay below its target band is the exact
@@ -716,7 +1000,7 @@ export default function EssayBuilder() {
         setBusy('repair');
         const firstStats = diffStats(diffText(before, text).ops);
         const fix = await repairLength({
-          essay: selectedEssay, context, text, assessment, mode: 'edit',
+          essay: essayForAction, context, text, assessment, mode: 'edit',
           originalText: before, preservedRatio: firstStats.preservedRatio,
         });
         if (fix) {
@@ -730,10 +1014,10 @@ export default function EssayBuilder() {
       const stats = diffStats(ops);
       const rewritten = isAggressiveRewrite(stats);
 
-      setEssaySnapshot(selectedEssay.id, { content: before, label: 'your version before this edit', review: priorReview });
-      setSnapshot(getEssaySnapshot(selectedEssay.id));
-      rememberForUndo(selectedEssay, { content: before, status: selectedEssay.status }, 'edits applied');
-      await persist({ content: text, status: 'polishing' });
+      setEssaySnapshot(essayForAction.id, { content: before, label: 'your version before this edit', review: priorReview });
+      setSnapshot(getEssaySnapshot(essayForAction.id));
+      rememberForUndo(essayForAction, { content: before, status: essayForAction.status }, 'edits applied');
+      await persist({ content: text, status: 'polishing' }, essayForAction);
 
       setRevision({
         before,
@@ -765,15 +1049,15 @@ export default function EssayBuilder() {
 
       // The whole point of an edit is a better essay, so measure it on the same
       // rubric instead of leaving the applicant to guess.
-      const updatedEssay = { ...selectedEssay, content: text, status: 'polishing' };
+      const updatedEssay = { ...essayForAction, content: text, status: 'polishing' };
       let nextReview = null;
       if (autoReview && hasLiveModel()) {
         setBusy('re_review');
         try {
-          nextReview = await runReview(updatedEssay, priorReview);
+          nextReview = await runReview(updatedEssay, priorReview, 'review');
           if (nextReview) {
             setPreviousScore(priorReview?.overall_score ?? null);
-            await persist({ status: 'in_review', review_notes: JSON.stringify(nextReview, null, 2) });
+            await persist({ status: 'in_review', review_notes: JSON.stringify(nextReview, null, 2) }, updatedEssay);
           } else if (priorReview) {
             setReviewResult(priorReview);
           }
@@ -789,10 +1073,10 @@ export default function EssayBuilder() {
         }
       }
 
-      recordProgress(selectedEssay.id, {
+      recordProgress(essayForAction.id, {
         action: 'edit',
         unit: assessment.unit,
-        wordsBefore: assessLength(before, selectedEssay, essays).count,
+        wordsBefore: assessLength(before, essayForAction, essays).count,
         wordsAfter: assessment.count,
         scoreBefore: priorReview?.overall_score ?? null,
         scoreAfter: nextReview?.overall_score ?? null,
@@ -826,10 +1110,12 @@ export default function EssayBuilder() {
 
   /** Brings the current text to its length contract on demand. */
   const handleFixLength = async () => {
-    if (!selectedEssay?.content?.trim()) return;
+    const current = currentSelectedEssay();
+    if (!current?.content?.trim()) return;
     if (!guardLive('The length fix')) return;
-    const before = selectedEssay.content;
-    const assessment = assessLength(before, selectedEssay, essays);
+    const essayTarget = { ...current };
+    const before = essayTarget.content;
+    const assessment = assessLength(before, essayTarget, essays);
     if (assessment.ok) {
       toast.success('This draft is already inside its target band', { description: assessment.message });
       setLengthIssue(null);
@@ -837,8 +1123,9 @@ export default function EssayBuilder() {
     }
     setBusy('repair');
     try {
-      const context = await gatherContext();
-      const fix = await repairLength({ essay: selectedEssay, context, text: before, assessment, mode: 'fix' });
+      const essayForAction = await prepareEssayRoot(essayTarget);
+      const context = await gatherContext(essayForAction, 'length');
+      const fix = await repairLength({ essay: essayForAction, context, text: before, assessment, mode: 'fix' });
       if (!fix) {
         toast.error('The model could not bring this to length', {
           description: 'Its second answer was not closer to the target band, so Atlas changed nothing. Try again, or add the missing detail yourself.',
@@ -848,16 +1135,16 @@ export default function EssayBuilder() {
       }
       const { ops } = diffText(before, fix.text);
       const stats = diffStats(ops);
-      setEssaySnapshot(selectedEssay.id, { content: before, label: 'before the length fix', review: reviewResult });
-      setSnapshot(getEssaySnapshot(selectedEssay.id));
-      rememberForUndo(selectedEssay, { content: before, status: selectedEssay.status }, 'length fixed');
-      await persist({ content: fix.text, status: selectedEssay.status === 'not_started' ? 'drafting' : selectedEssay.status });
+      setEssaySnapshot(essayForAction.id, { content: before, label: 'before the length fix', review: reviewResult });
+      setSnapshot(getEssaySnapshot(essayForAction.id));
+      rememberForUndo(essayForAction, { content: before, status: essayForAction.status }, 'length fixed');
+      await persist({ content: fix.text, status: essayForAction.status === 'not_started' ? 'drafting' : essayForAction.status }, essayForAction);
       setRevision({
         before, after: fix.text, ops, stats, unit: fix.assessment.unit,
         changes: [], why: fix.notes || '', gaps: fix.gaps || [], at: new Date().toISOString(),
       });
       setLengthIssue(fix.assessment.ok ? null : fix.assessment);
-      recordProgress(selectedEssay.id, {
+      recordProgress(essayForAction.id, {
         action: 'repair',
         unit: fix.assessment.unit,
         wordsBefore: assessment.count,
@@ -878,29 +1165,31 @@ export default function EssayBuilder() {
 
   /** Puts the applicant's own pre-edit text back, and the review that went with it. */
   const handleRestoreSnapshot = async () => {
-    if (!selectedEssay || !snapshot?.content) return;
+    const current = currentSelectedEssay();
+    if (!current || !snapshot?.content || busy !== null || saving || rootSaving) return;
     if (!window.confirm('Put your own version back? The AI revision will be replaced in the editor.')) return;
-    const replaced = selectedEssay.content || '';
+    const target = { ...current };
+    const replaced = target.content || '';
     const restored = snapshot.content;
     setBusy('restore');
     try {
-      rememberForUndo(selectedEssay, { content: replaced, status: selectedEssay.status }, 'AI revision re-applied');
-      await persist({ content: restored, status: 'polishing' });
-      const assessment = assessLength(restored, selectedEssay, essays);
+      rememberForUndo(target, { content: replaced, status: target.status }, 'AI revision re-applied');
+      await persist({ content: restored, status: 'polishing' }, target);
+      const assessment = assessLength(restored, target, essays);
       if (snapshot.review) {
-        const measured = withMeasuredLength(snapshot.review, { ...selectedEssay, content: restored }, essays);
+        const measured = withMeasuredLength(snapshot.review, { ...target, content: restored }, essays);
         setReviewResult(measured);
-        setCachedEssayReview(selectedEssay.id, measured);
+        setCachedEssayReview(target.id, measured);
         setPreviousScore(null);
       }
-      clearEssaySnapshot(selectedEssay.id);
+      clearEssaySnapshot(target.id);
       setSnapshot(null);
       setRevision(null);
       setLengthIssue(assessment.ok ? null : assessment);
-      recordProgress(selectedEssay.id, {
+      recordProgress(target.id, {
         action: 'restore',
         unit: assessment.unit,
-        wordsBefore: assessLength(replaced, selectedEssay, essays).count,
+        wordsBefore: assessLength(replaced, target, essays).count,
         wordsAfter: assessment.count,
         scoreBefore: reviewResult?.overall_score ?? null,
         scoreAfter: snapshot.review?.overall_score ?? null,
@@ -932,8 +1221,10 @@ export default function EssayBuilder() {
   };
 
   const handleDeleteEssay = async (essay) => {
+    if (busy !== null || saving || rootSaving) return;
     if (!window.confirm(`Delete "${essay.title}"? This cannot be undone.`)) return;
     try {
+      await essayWriteRef.current.catch(() => undefined);
       await base44.entities.Essay.delete(essay.id);
       setEssays((prev) => prev.filter((e) => e.id !== essay.id));
       // Nothing cached for a deleted essay should outlive it in this browser.
@@ -941,8 +1232,11 @@ export default function EssayBuilder() {
       clearEssayProgress(essay.id);
       clearCachedEssayReview(essay.id);
       clearCachedEssayGen(essay.id);
+      clearLocalDraftAnchor(essay.id);
       if (selectedEssay?.id === essay.id) {
+        selectedEssayRef.current = null;
         setSelectedEssay(null);
+        updateDirtyFields([]);
         setReviewResult(null);
         setGenAnalysis(null);
         loadEssayLocalState(null);
@@ -955,6 +1249,11 @@ export default function EssayBuilder() {
 
   // --- creation -----------------------------------------------------------
   const createEssays = async (drafts, label) => {
+    if (busy !== null || saving || rootSaving) throw new Error('Wait for the current essay action to finish before creating another essay.');
+    if (dirty && selectedEssay) {
+      const saved = await handleSave();
+      if (!saved) throw new Error('The current essay was not confirmed as saved, so no new essay was created. Your changes remain in the editor.');
+    }
     const created = [];
     for (const d of drafts) {
       const row = await base44.entities.Essay.create({
@@ -972,11 +1271,23 @@ export default function EssayBuilder() {
           ? { university_id: selectedUni.id, university_name: selectedUni.name }
           : {}),
       });
-      rememberDraftAnchor(row.id, d.draft_anchor || '');
+      if (!row) {
+        await loadEssays().catch(() => []);
+        throw new Error('Atlas could not confirm whether this essay was created. Check the list before retrying to avoid a duplicate; the form is still open.');
+      }
+      const missing = base44.capabilities?.missingOptionalColumns?.() || [];
+      if (Object.prototype.hasOwnProperty.call(row, 'draft_anchor') && !missing.includes('draft_anchor')) {
+        clearLocalDraftAnchor(row.id);
+      } else {
+        rememberDraftAnchor(row.id, d.draft_anchor || '');
+      }
       created.push(hydrateEssay(row));
     }
     await loadEssays();
-    if (created[0]) setSelectedEssay(created[0]);
+    if (created[0]) {
+      selectedEssayRef.current = created[0];
+      setSelectedEssay(created[0]);
+    }
     toast.success(`${created.length} essay${created.length > 1 ? 's' : ''} created`, { description: label });
     return created;
   };
@@ -1059,6 +1370,7 @@ export default function EssayBuilder() {
       <div key={essay.id} className="group relative">
         <button
           onClick={() => pickEssay(essay)}
+          disabled={busy !== null || saving || rootSaving}
           className={`w-full text-left p-3 rounded-xl border transition-all pr-8 ${
             selectedEssay?.id === essay.id
               ? 'border-foreground/20 bg-card shadow-sm'
@@ -1083,6 +1395,7 @@ export default function EssayBuilder() {
         </button>
         <button
           onClick={() => handleDeleteEssay(essay)}
+          disabled={busy !== null || saving || rootSaving}
           className="absolute top-2.5 right-2 p-1 rounded text-foreground/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
         >
           <Trash2 className="w-3.5 h-3.5" />
@@ -1103,7 +1416,7 @@ export default function EssayBuilder() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={selectedUni?.id} onValueChange={handleSelectUni}>
+          <Select value={selectedUni?.id} onValueChange={handleSelectUni} disabled={rootSaving || saving || busy !== null}>
             <SelectTrigger className="w-64"><SelectValue placeholder="Select university..." /></SelectTrigger>
             <SelectContent>
               {universities.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
@@ -1261,7 +1574,7 @@ export default function EssayBuilder() {
                 </button>
 
                 {metaExpanded && (
-                  <div className="px-5 pb-5 space-y-3 border-t border-border pt-4">
+                  <fieldset disabled={busy !== null || saving || rootSaving} className="px-5 pb-5 space-y-3 border-t border-border pt-4">
                     <input
                       value={selectedEssay.title || ''}
                       onChange={(e) => handleFieldChange('title', e.target.value)}
@@ -1329,18 +1642,25 @@ export default function EssayBuilder() {
                         />
                       )}
                     </div>
-                  </div>
+                  </fieldset>
                 )}
               </div>
 
               <div className="bg-accent/5 border border-accent/20 rounded-xl p-4 space-y-2">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <label htmlFor="essay-root" className="text-sm font-medium text-foreground/70">What must this essay be rooted in?</label>
-                  <span className="text-[11px] text-accent/80">Your direction is a hard constraint</span>
+                  <div>
+                    <label htmlFor="essay-root" className="text-sm font-medium text-foreground/70">What must this essay be rooted in?</label>
+                    <p className="text-[11px] text-accent/80 mt-0.5">Your direction is a hard constraint and the starting point for future drafts.</p>
+                  </div>
+                  <Button onClick={handleSaveRoot} variant="outline" size="sm" disabled={rootSaving || saving || busy !== null}>
+                    {rootSaving ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1.5" />}
+                    {rootSaving ? 'Saving root…' : 'Save root'}
+                  </Button>
                 </div>
                 <Textarea
                   id="essay-root"
                   value={selectedEssay.draft_anchor || ''}
+                  disabled={rootSaving || saving || busy !== null}
                   onChange={(e) => handleFieldChange('draft_anchor', e.target.value)}
                   placeholder="Add the moments, interests, questions, relationships, or qualities you want the draft to grow from."
                   rows={4}
@@ -1357,15 +1677,15 @@ export default function EssayBuilder() {
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                <Button onClick={handleGenerate} disabled={busy !== null}>
+                <Button onClick={handleGenerate} disabled={busy !== null || saving || rootSaving}>
                   {busy === 'generate' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
                   {busy === 'generate' ? 'Writing…' : 'Generate draft'}
                 </Button>
-                <Button onClick={handleReview} disabled={busy !== null || !selectedEssay.content} variant="outline">
+                <Button onClick={handleReview} disabled={busy !== null || saving || rootSaving || !selectedEssay.content} variant="outline">
                   {busy === 'review' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ClipboardCheck className="w-4 h-4 mr-2" />}
                   {busy === 'review' ? 'Reviewing…' : 'Admissions review'}
                 </Button>
-                <Button onClick={handlePolish} disabled={busy !== null || !selectedEssay.content} variant="outline">
+                <Button onClick={handlePolish} disabled={busy !== null || saving || rootSaving || !selectedEssay.content} variant="outline">
                   {editing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
                   {busy === 'polish' ? 'Editing…'
                     : busy === 'repair' ? 'Finishing the length…'
@@ -1375,7 +1695,7 @@ export default function EssayBuilder() {
                 {lengthState?.needsWork && (
                   <Button
                     onClick={handleFixLength}
-                    disabled={busy !== null}
+                    disabled={busy !== null || saving || rootSaving}
                     variant="outline"
                     className="border-amber-300 text-amber-800 hover:bg-amber-50 hover:text-amber-900"
                   >
@@ -1385,11 +1705,11 @@ export default function EssayBuilder() {
                 )}
                 <div className="flex items-center gap-2 ml-auto">
                   {dirty && <span className="text-[11px] text-foreground/35">Unsaved — autosaving…</span>}
-                  <Button onClick={handleSave} disabled={saving || !dirty} variant="ghost" size="sm">
+                  <Button onClick={handleSave} disabled={saving || rootSaving || !dirty} variant="ghost" size="sm">
                     <Save className="w-4 h-4 mr-1.5" />
                     {saving ? 'Saving…' : 'Save'}
                   </Button>
-                  <Button onClick={() => handleDeleteEssay(selectedEssay)} disabled={busy !== null} variant="ghost" size="sm" className="text-destructive hover:text-destructive">
+                  <Button onClick={() => handleDeleteEssay(selectedEssay)} disabled={busy !== null || saving || rootSaving} variant="ghost" size="sm" className="text-destructive hover:text-destructive">
                     <Trash2 className="w-4 h-4 mr-1.5" /> Delete
                   </Button>
                 </div>
@@ -1400,7 +1720,7 @@ export default function EssayBuilder() {
                   <Switch
                     checked={autoReview}
                     onCheckedChange={(value) => { setAutoReview(value); setAutoReviewAfterEdit(value); }}
-                    disabled={busy !== null}
+                    disabled={busy !== null || saving || rootSaving}
                   />
                   <span className="text-foreground/55">Re-score automatically after an edit</span>
                 </label>
@@ -1413,7 +1733,7 @@ export default function EssayBuilder() {
                       <FileDiff className="w-3.5 h-3.5" />
                       Compare with {snapshot.label || 'the previous version'}
                     </button>
-                    <button onClick={handleRestoreSnapshot} disabled={busy !== null} className="inline-flex items-center gap-1.5 text-foreground/45 hover:text-foreground hover:underline">
+                    <button onClick={handleRestoreSnapshot} disabled={busy !== null || saving || rootSaving} className="inline-flex items-center gap-1.5 text-foreground/45 hover:text-foreground hover:underline">
                       <RotateCcw className="w-3.5 h-3.5" />
                       Restore it
                     </button>
@@ -1423,7 +1743,7 @@ export default function EssayBuilder() {
               {(undoStep?.essayId === selectedEssay.id || actionHintFor(selectedEssay)) && (
                 <div className="flex items-center gap-3 flex-wrap text-xs">
                   {undoStep?.essayId === selectedEssay.id && (
-                    <button onClick={undoLastChange} className="inline-flex items-center gap-1.5 text-accent hover:underline">
+                    <button onClick={undoLastChange} disabled={busy !== null || saving || rootSaving} className="inline-flex items-center gap-1.5 text-accent hover:underline">
                       <Undo2 className="w-3.5 h-3.5" />
                       Undo: {undoStep.label}
                     </button>
@@ -1480,6 +1800,7 @@ export default function EssayBuilder() {
                     focusId={selectedEssay.id}
                     onChange={onUcasChange}
                     onFocus={onUcasFocus}
+                    disabled={busy !== null || saving || rootSaving}
                   />
                 </div>
               ) : (
@@ -1502,6 +1823,7 @@ export default function EssayBuilder() {
                 )}
                 <textarea
                   value={selectedEssay.content || ''}
+                  disabled={busy !== null || saving || rootSaving}
                   onChange={(e) => handleFieldChange('content', e.target.value)}
                   placeholder="Write here, or let the AI draft from your profile, materials, and university research…"
                   rows={26}
@@ -1518,7 +1840,7 @@ export default function EssayBuilder() {
                       </p>
                       <button
                         onClick={handleFixLength}
-                        disabled={busy !== null}
+                        disabled={busy !== null || saving || rootSaving}
                         className="mt-1.5 text-xs font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700 disabled:opacity-50"
                       >
                         {busy === 'repair' ? 'Working…' : lengthState.state === 'over' ? 'Trim it to the limit' : 'Ask the AI to finish the length'}

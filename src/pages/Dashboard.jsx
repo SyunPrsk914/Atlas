@@ -365,6 +365,8 @@ export default function Dashboard() {
             <div className="space-y-1.5">
               {upcomingDeadlines.map((uni) => {
                 const daysLeft = daysUntil(uni.deadline) ?? 0;
+                const universityTasks = data.tasks.filter((task) => task.university_id === uni.id);
+                const roadmapComplete = universityTasks.length > 0 && universityTasks.every((task) => task.completed);
                 return (
                   <Link key={uni.id} to={`/universities/${uni.id}`} className="flex items-center justify-between p-3 rounded-lg hover:bg-muted transition group">
                     <div className="min-w-0">
@@ -373,9 +375,11 @@ export default function Dashboard() {
                     </div>
                     <div className="text-right shrink-0 ml-3">
                       <div className="text-sm font-medium">{startOfLocalDay(uni.deadline)?.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
-                      <div className={`text-xs ${daysLeft < 0 ? 'text-foreground/30' : daysLeft < 30 ? 'text-destructive' : 'text-foreground/40'}`}>
-                        {daysLeft < 0 ? 'Passed' : `${daysLeft} days left`}
-                      </div>
+                      {!roadmapComplete && (
+                        <div className={`text-xs ${daysLeft < 0 ? 'text-foreground/30' : daysLeft < 30 ? 'text-destructive' : 'text-foreground/40'}`}>
+                          {daysLeft < 0 ? 'Passed' : `${daysLeft} days left`}
+                        </div>
+                      )}
                     </div>
                   </Link>
                 );

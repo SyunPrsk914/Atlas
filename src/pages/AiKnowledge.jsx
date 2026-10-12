@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
+import ContextTargetFields from '@/components/ContextTargetFields';
+import { contextTargetFields, contextTargetLabel } from '@/lib/contextTargeting';
 import { getModelOverride } from '@/api/aiProvider';
 import { peekAIStatus } from '@/lib/ai';
 import { runAI, notifyAIError } from '@/lib/ai';
@@ -11,7 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
-  Brain, Loader2, Pencil, Trash2, Plus, RotateCw, TriangleAlert, Info, X, Check,
+  Brain, Loader2, Pencil, Trash2, Plus, RotateCw, TriangleAlert, Info, X, Check, ChevronDown,
 } from 'lucide-react';
 import {
   KNOWLEDGE_KINDS, ABOUT_CATEGORIES, POINT_CATEGORIES, PATTERN_CATEGORIES, PATTERN_PLATFORMS,
@@ -25,7 +27,10 @@ const CATEGORIES = {
   guidance: GUIDANCE_CATEGORIES,
 };
 
-const EMPTY_DRAFT = { kind: 'brief', category: 'personality', text: '', source_label: '', platform: 'General' };
+const EMPTY_DRAFT = {
+  kind: 'brief', category: 'personality', text: '', source_label: '', platform: 'General',
+  target_university_id: '', target_essay_id: '', target_platform: '', target_task: '',
+};
 
 const MISSING_TABLE = /applicant_knowledge|ApplicantKnowledge|relation .* does not exist|Could not find the table/i;
 
@@ -37,7 +42,7 @@ const formatDate = (iso) => {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onCancel, showPlatform }) {
+function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onCancel, showPlatform, universities, essays }) {
   const categoryLabel = CATEGORIES[item.kind]?.[item.category] || item.category;
   if (editing) {
     return (
@@ -66,6 +71,12 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
         {(item.kind === 'evidence' || item.kind === 'guidance') && (
           <Input value={draft.source_label} onChange={(e) => setDraft({ ...draft, source_label: e.target.value })} placeholder={item.kind === 'guidance' ? 'Which guide or reference this comes from' : 'Where this comes from, e.g. Robotics material'} />
         )}
+        <ContextTargetFields
+          value={draft}
+          universities={universities}
+          essays={essays}
+          onChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
+        />
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={onSave} disabled={!draft.text.trim()}>
             <Check className="w-3.5 h-3.5 mr-1.5" /> Save
@@ -87,6 +98,12 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
           <span className={`text-[10px] uppercase tracking-wide ${item.origin === 'manual' ? 'text-accent' : 'text-foreground/35'}`}>
             {item.origin === 'manual' ? 'You wrote this' : 'Built by AI'}
           </span>
+          {(() => {
+            const target = contextTargetLabel(item, { universities, essays });
+            return target !== 'All applications and tasks' ? (
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-accent border-accent/25 bg-accent/5">{target}</Badge>
+            ) : null;
+          })()}
         </div>
         <p className="text-sm text-foreground/75 leading-relaxed">{item.text}</p>
         {(item.kind === 'evidence' || item.kind === 'guidance') && item.source_label && (
@@ -108,6 +125,10 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
 export default function AiKnowledge() {
   const [rows, setRows] = useState([]);
   const [inputs, setInputs] = useState(null);
+  const [universities, setUniversities] = useState([]);
+  const [essays, setEssays] = useState([]);
+  const [targetScopeLocalOnly, setTargetScopeLocalOnly] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState({});
   const [loading, setLoading] = useState(true);
   const [tableMissing, setTableMissing] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
@@ -119,10 +140,15 @@ export default function AiKnowledge() {
 
   /** Reads the applicant's sources (profile, materials, drafts) and the saved items. */
   const readSources = useCallback(async () => {
-    const [profiles, materials, essays] = await Promise.all([
+    let missingColumns = base44.capabilities?.missingOptionalColumns?.() || [];
+    if (typeof base44.capabilities?.probe === 'function') {
+      try { missingColumns = await base44.capabilities.probe(); } catch { /* scope fallbacks remain local if the schema is old */ }
+    }
+    const [profiles, materials, essays, universities] = await Promise.all([
       base44.entities.Profile.list(),
       base44.entities.Material.list(),
       base44.entities.Essay.list(),
+      base44.entities.University.list().catch(() => []),
     ]);
     let items = [];
     let missing = false;
@@ -132,15 +158,29 @@ export default function AiKnowledge() {
       if (!MISSING_TABLE.test(String(error?.message || error))) throw error;
       missing = true;
     }
-    return { inputs: buildKnowledgeInputs({ profile: profiles, materials, essays }), items, missing };
+    return {
+      inputs: buildKnowledgeInputs({ profile: profiles, materials, essays }),
+      items,
+      missing,
+      universities,
+      essays,
+      targetScopeLocalOnly: missingColumns.some((column) => [
+        'target_university_id', 'target_essay_id', 'target_platform', 'target_task',
+      ].includes(column)),
+    };
   }, []);
 
   const load = useCallback(async () => {
     try {
-      const { inputs: sources, items, missing } = await readSources();
+      const {
+        inputs: sources, items, missing, universities: universityRows, essays: essayRows, targetScopeLocalOnly: localScope,
+      } = await readSources();
       setInputs(sources);
       setRows(items);
+      setUniversities(universityRows);
+      setEssays(essayRows);
       setTableMissing(missing);
+      setTargetScopeLocalOnly(localScope);
     } catch (e) {
       console.error(e);
       toast.error('Could not load the AI Knowledge Base', { description: e.message });
@@ -199,6 +239,10 @@ export default function AiKnowledge() {
       text: item.text,
       source_label: item.source_label || '',
       platform: item.platform || 'General',
+      target_university_id: item.target_university_id || '',
+      target_essay_id: item.target_essay_id || '',
+      target_platform: item.target_platform || '',
+      target_task: item.target_task || '',
     });
   };
 
@@ -224,14 +268,25 @@ export default function AiKnowledge() {
       origin: 'manual',
       source_label: draft.source_label.trim() || 'Added by you',
       platform: draft.kind === 'pattern' ? draft.platform : 'General',
+      ...contextTargetFields(draft),
     };
     try {
       if (editingId) {
         const saved = await base44.entities.ApplicantKnowledge.update(editingId, fields);
-        setRows((prev) => prev.map((r) => (r.id === editingId ? { ...r, ...(saved || fields) } : r)));
+        if (!saved) {
+          const refreshed = await base44.entities.ApplicantKnowledge.list().catch(() => null);
+          if (refreshed) setRows(refreshed);
+          throw new Error('Atlas could not confirm the update. Check the refreshed list before retrying.');
+        }
+        setRows((prev) => prev.map((r) => (r.id === editingId ? { ...r, ...saved } : r)));
         toast.success('Saved');
       } else {
         const saved = await base44.entities.ApplicantKnowledge.create({ ...fields, sort_order: rows.length });
+        if (!saved) {
+          const refreshed = await base44.entities.ApplicantKnowledge.list().catch(() => null);
+          if (refreshed) setRows(refreshed);
+          throw new Error('Atlas could not confirm whether this entry was added. Check the list before retrying to avoid a duplicate.');
+        }
         setRows((prev) => [...prev, saved]);
         toast.success('Added');
       }
@@ -263,35 +318,53 @@ export default function AiKnowledge() {
   const patterns = byKind('pattern').filter((r) => patternFilter === 'all' || r.platform === patternFilter);
   const sourceCounts = inputs?.counts || { profile: 0, materials: 0, samples: 0, guidance: 0, essays: 0 };
 
-  const renderSection = (kind, items, extra = null) => (
-    <section className="space-y-3">
-      <div>
-        <h2 className="font-display text-lg font-semibold">{KNOWLEDGE_KINDS[kind].label}</h2>
-        <p className="text-xs text-foreground/40">{KNOWLEDGE_KINDS[kind].hint}</p>
-      </div>
-      {extra}
-      {items.length === 0 ? (
-        <p className="text-sm text-foreground/35 bg-card border border-dashed border-border rounded-xl p-4">Nothing here yet.</p>
-      ) : (
-        <ul className="space-y-2">
-          {items.map((item) => (
-            <ItemRow
-              key={item.id}
-              item={item}
-              showPlatform={kind === 'pattern'}
-              editing={editingId === item.id}
-              draft={draft}
-              setDraft={setDraft}
-              onEdit={() => startEdit(item)}
-              onDelete={() => removeItem(item)}
-              onSave={saveItem}
-              onCancel={cancelEdit}
-            />
-          ))}
-        </ul>
-      )}
-    </section>
-  );
+  const renderSection = (kind, items, extra = null) => {
+    const collapsed = !!collapsedSections[kind];
+    return (
+      <section className="rounded-xl border border-border bg-card overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setCollapsedSections((prev) => ({ ...prev, [kind]: !prev[kind] }))}
+          className="w-full flex items-center gap-3 p-4 text-left hover:bg-muted/30 transition"
+          aria-expanded={!collapsed}
+        >
+          <div className="flex-1 min-w-0">
+            <h2 className="font-display text-lg font-semibold">{KNOWLEDGE_KINDS[kind].label}</h2>
+            <p className="text-xs text-foreground/40">{KNOWLEDGE_KINDS[kind].hint}</p>
+          </div>
+          <Badge variant="outline" className="shrink-0">{items.length} {items.length === 1 ? 'entry' : 'entries'}</Badge>
+          <ChevronDown className={`w-4 h-4 text-foreground/45 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+        </button>
+        {!collapsed && (
+          <div className="border-t border-border p-4 pt-3 space-y-3">
+            {extra}
+            {items.length === 0 ? (
+              <p className="text-sm text-foreground/35 border border-dashed border-border rounded-xl p-4">Nothing here yet.</p>
+            ) : (
+              <ul className="space-y-2">
+                {items.map((item) => (
+                  <ItemRow
+                    key={item.id}
+                    item={item}
+                    universities={universities}
+                    essays={essays}
+                    showPlatform={kind === 'pattern'}
+                    editing={editingId === item.id}
+                    draft={draft}
+                    setDraft={setDraft}
+                    onEdit={() => startEdit(item)}
+                    onDelete={() => removeItem(item)}
+                    onSave={saveItem}
+                    onCancel={cancelEdit}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
+    );
+  };
 
   return (
     <div className="space-y-8">
@@ -305,6 +378,15 @@ export default function AiKnowledge() {
           <span className="text-foreground/65"> University Research</span>, which is about schools.
         </p>
       </div>
+
+      {targetScopeLocalOnly && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-amber-50 border border-amber-200">
+          <TriangleAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-800 leading-relaxed">
+            This Supabase schema is missing context-target columns. Atlas keeps university, essay, platform, and task scopes in this browser until you run <span className="font-mono">supabase/schema.sql</span>.
+          </p>
+        </div>
+      )}
 
       {tableMissing && (
         <div className="flex items-start gap-3 p-4 rounded-xl bg-amber-50 border border-amber-200">
@@ -423,6 +505,12 @@ export default function AiKnowledge() {
             {draft.kind !== 'pattern' && (
               <Input value={draft.source_label} onChange={(e) => setDraft({ ...draft, source_label: e.target.value })} placeholder="Where this comes from (optional)" />
             )}
+            <ContextTargetFields
+              value={draft}
+              universities={universities}
+              essays={essays}
+              onChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
+            />
             <div className="flex items-center gap-2">
               <Button size="sm" onClick={saveItem} disabled={!draft.text.trim()}>
                 <Plus className="w-3.5 h-3.5 mr-1.5" /> Add item

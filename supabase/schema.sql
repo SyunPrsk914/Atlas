@@ -43,7 +43,8 @@ create table if not exists public.universities (
   status text not null default 'researching'
     check (status in ('researching', 'in_progress', 'submitted', 'decided')),
   notes text,
-  color text not null default '#1e293b'
+  color text not null default '#1e293b',
+  sort_order integer not null default 0
 );
 
 -- ---------------------------------------------------------------------------
@@ -87,7 +88,11 @@ create table if not exists public.materials (
   file_url text,
   link_url text,
   notes text,
-  analysis_role text not null default 'auto'
+  analysis_role text not null default 'auto',
+  target_university_id text,
+  target_essay_id text,
+  target_platform text,
+  target_task text
 );
 
 -- ---------------------------------------------------------------------------
@@ -182,7 +187,11 @@ create table if not exists public.applicant_knowledge (
   source_id text,
   platform text not null default 'General',
   sort_order integer not null default 0,
-  data jsonb
+  data jsonb,
+  target_university_id text,
+  target_essay_id text,
+  target_platform text,
+  target_task text
 );
 
 create index if not exists applicant_knowledge_owner_idx
@@ -234,6 +243,10 @@ $$;
 --                                          (read from the uploaded file or link).
 --   materials.analysis_role           -> the applicant's chosen interpretation
 --                                          lens; auto means Atlas classifies it.
+--   materials.target_*                -> when a material belongs to a school, essay,
+--                                          platform, or AI task rather than every prompt.
+--   applicant_knowledge.target_*       -> the same optional context scope for a note.
+--   universities.sort_order           -> applicant-defined ordering of university cards.
 --   essays.draft_anchor               -> applicant-provided roots/non-negotiables
 --                                          the drafter must honor.
 --   profiles.*                        -> the extra applicant context that makes
@@ -243,12 +256,19 @@ $$;
 --                                          Duolingo, first-generation, funding).
 
 alter table public.universities add column if not exists application_platform text;
+alter table public.universities add column if not exists sort_order integer not null default 0;
+create index if not exists universities_sort_order_idx
+  on public.universities (created_by_id, sort_order);
 
 alter table public.essays add column if not exists limit_unit text;
 alter table public.essays add column if not exists draft_anchor text;
 
 alter table public.materials add column if not exists analysis jsonb;
 alter table public.materials add column if not exists analysis_role text not null default 'auto';
+alter table public.materials add column if not exists target_university_id text;
+alter table public.materials add column if not exists target_essay_id text;
+alter table public.materials add column if not exists target_platform text;
+alter table public.materials add column if not exists target_task text;
 
 -- Knowledge Base source and provider provenance; safe to apply repeatedly.
 alter table public.college_knowledge add column if not exists source_url text;
@@ -256,6 +276,16 @@ alter table public.college_knowledge add column if not exists source_text text;
 alter table public.college_knowledge add column if not exists research_provider text;
 alter table public.college_knowledge add column if not exists research_model text;
 alter table public.college_knowledge add column if not exists grounded boolean not null default false;
+
+alter table public.applicant_knowledge add column if not exists target_university_id text;
+alter table public.applicant_knowledge add column if not exists target_essay_id text;
+alter table public.applicant_knowledge add column if not exists target_platform text;
+alter table public.applicant_knowledge add column if not exists target_task text;
+
+create index if not exists materials_context_target_idx
+  on public.materials (created_by_id, target_university_id, target_essay_id, target_task);
+create index if not exists applicant_knowledge_context_target_idx
+  on public.applicant_knowledge (created_by_id, target_university_id, target_essay_id, target_task);
 
 alter table public.profiles add column if not exists full_name text;
 alter table public.profiles add column if not exists citizenship_status text;

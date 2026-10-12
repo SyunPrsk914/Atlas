@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { ESSAY_REVIEW_DIMENSIONS } from '@/lib/essayCraft';
 import { formatLimit } from '@/lib/essayScope';
+import ReviewSection from '@/components/review/ReviewSection';
 
 const tone = (score) => (score >= 9 ? 'text-green-700' : score >= 7 ? 'text-green-600' : score >= 5 ? 'text-accent' : 'text-destructive');
 
@@ -76,95 +77,101 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing, ca
       </div>
 
       {reviewResult.sounds_like_ai && (
-        <div className="bg-destructive/5 border border-destructive/20 rounded-lg p-3.5 flex items-start gap-2.5">
-          <Bot className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-medium text-destructive">This reads as AI-written</p>
-            {reviewResult.ai_patterns_detected?.length > 0 && (
-              <ul className="text-xs text-destructive/80 mt-1.5 space-y-0.5">
-                {reviewResult.ai_patterns_detected.map((p, i) => <li key={i}>• {p}</li>)}
-              </ul>
-            )}
+        <ReviewSection title="Writing-pattern signals" detail="Review the flagged patterns" leading={<Bot className="w-4 h-4 text-destructive" />} defaultOpen={false}>
+          <div className="bg-destructive/5 border border-destructive/20 rounded-lg p-3.5 flex items-start gap-2.5">
+            <Bot className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-destructive">This reads as AI-written</p>
+              {reviewResult.ai_patterns_detected?.length > 0 && (
+                <ul className="text-xs text-destructive/80 mt-1.5 space-y-0.5">
+                  {reviewResult.ai_patterns_detected.map((p, i) => <li key={i}>• {p}</li>)}
+                </ul>
+              )}
+            </div>
           </div>
-        </div>
+        </ReviewSection>
       )}
 
       {reviewResult.over_limit && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3.5 flex items-start gap-2.5">
-          <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-          <p className="text-xs text-red-700">
-            {Number(reviewResult.word_count).toLocaleString()} against a limit of {Number(reviewResult.limit).toLocaleString()} {formatLimit(unit)}. The portal will reject this — cut it
-            before submitting.
-          </p>
-        </div>
+        <ReviewSection title="Length warning" detail="Over the submission limit">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3.5 flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+            <p className="text-xs text-red-700">
+              {Number(reviewResult.word_count).toLocaleString()} against a limit of {Number(reviewResult.limit).toLocaleString()} {formatLimit(unit)}. The portal will reject this — cut it
+              before submitting.
+            </p>
+          </div>
+        </ReviewSection>
       )}
 
       {reviewResult.under_target && !reviewResult.over_limit && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3.5 flex items-start gap-2.5">
-          <Ruler className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-          <p className="text-xs text-amber-800">
-            {reviewResult.length_message
-              || `${Number(reviewResult.word_count).toLocaleString()} of ${Number(reviewResult.limit).toLocaleString()} ${formatLimit(unit)} — under the target band. A reader treats unused space as an unfinished draft.`}
-          </p>
-        </div>
+        <ReviewSection title="Length warning" detail="Below the target band">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3.5 flex items-start gap-2.5">
+            <Ruler className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <p className="text-xs text-amber-800">
+              {reviewResult.length_message
+                || `${Number(reviewResult.word_count).toLocaleString()} of ${Number(reviewResult.limit).toLocaleString()} ${formatLimit(unit)} — under the target band. A reader treats unused space as an unfinished draft.`}
+            </p>
+          </div>
+        </ReviewSection>
       )}
 
-      <div className="grid sm:grid-cols-2 gap-2">
-        {ESSAY_REVIEW_DIMENSIONS.map((dimension) => (
-          <MiniScore
-            key={dimension.key}
-            label={dimension.label}
-            score={reviewResult[dimension.field]}
-            hint={dimension.question}
-          />
-        ))}
-      </div>
+      <ReviewSection title="Rubric scores" detail={`${ESSAY_REVIEW_DIMENSIONS.length} dimensions`} defaultOpen={false}>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {ESSAY_REVIEW_DIMENSIONS.map((dimension) => (
+            <MiniScore
+              key={dimension.key}
+              label={dimension.label}
+              score={reviewResult[dimension.field]}
+              hint={dimension.question}
+            />
+          ))}
+        </div>
+      </ReviewSection>
 
       {perDimension.length > 0 && (
-        <div className="bg-accent/5 border border-accent/20 rounded-lg p-4">
-          <h4 className="text-sm font-medium mb-2.5 text-accent inline-flex items-center gap-1.5">
-            <Target className="w-4 h-4" /> What would make each one a 10
-          </h4>
-          <ul className="space-y-2.5">
-            {perDimension
-              .filter((item) => item && (item.how_to_reach_ten || item.evidence))
-              .map((item, i) => {
-                const known = ESSAY_REVIEW_DIMENSIONS.find(
-                  (d) => d.key === String(item.dimension || '').toLowerCase().replace(/\s+/g, '_') || d.label.toLowerCase() === String(item.dimension || '').toLowerCase(),
-                );
-                return (
-                  <li key={i} className="text-sm">
-                    <span className="font-medium text-foreground/70">{known?.label || item.dimension || 'Dimension'}:</span>{' '}
-                    <span className="text-foreground/60">{item.how_to_reach_ten || item.evidence}</span>
-                  </li>
-                );
-              })}
-          </ul>
-        </div>
+        <ReviewSection title="How to improve each score" detail="Guidance for each rubric dimension">
+          <div className="bg-accent/5 border border-accent/20 rounded-lg p-4">
+            <h4 className="text-sm font-medium mb-2.5 text-accent inline-flex items-center gap-1.5">
+              <Target className="w-4 h-4" /> What would make each one a 10
+            </h4>
+            <ul className="space-y-2.5">
+              {perDimension
+                .filter((item) => item && (item.how_to_reach_ten || item.evidence))
+                .map((item, i) => {
+                  const known = ESSAY_REVIEW_DIMENSIONS.find(
+                    (d) => d.key === String(item.dimension || '').toLowerCase().replace(/\s+/g, '_') || d.label.toLowerCase() === String(item.dimension || '').toLowerCase(),
+                  );
+                  return (
+                    <li key={i} className="text-sm">
+                      <span className="font-medium text-foreground/70">{known?.label || item.dimension || 'Dimension'}:</span>{' '}
+                      <span className="text-foreground/60">{item.how_to_reach_ten || item.evidence}</span>
+                    </li>
+                  );
+                })}
+            </ul>
+          </div>
+        </ReviewSection>
       )}
 
       {reviewResult.quoted_evidence?.length > 0 && (
-        <div>
-          <h4 className="text-sm font-medium flex items-center gap-1.5 mb-2 text-foreground/60">
-            <Quote className="w-3.5 h-3.5" /> Exact phrases flagged
-          </h4>
+        <ReviewSection title="Exact phrases flagged" detail="Quotes from the essay" leading={<Quote className="w-4 h-4 text-foreground/45" />} defaultOpen={false}>
           <ul className="space-y-1">
             {reviewResult.quoted_evidence.map((q, i) => (
               <li key={i} className="text-xs text-foreground/55 font-mono bg-muted/50 rounded px-2 py-1">{q}</li>
             ))}
           </ul>
-        </div>
+        </ReviewSection>
       )}
 
       {reviewResult.summary && (
-        <p className="text-sm text-foreground/60 leading-relaxed italic">“{reviewResult.summary}”</p>
+        <ReviewSection title="Review summary">
+          <p className="text-sm text-foreground/60 leading-relaxed italic">“{reviewResult.summary}”</p>
+        </ReviewSection>
       )}
 
       {reviewResult.strengths?.length > 0 && (
-        <div>
-          <h4 className="text-sm font-medium flex items-center gap-1.5 mb-2 text-green-600">
-            <CheckCircle2 className="w-4 h-4" /> What works — protect this
-          </h4>
+        <ReviewSection title="What works — protect this" leading={<CheckCircle2 className="w-4 h-4 text-green-600" />}>
           <ul className="space-y-1.5">
             {reviewResult.strengths.map((s, i) => (
               <li key={i} className="text-sm text-foreground/60 flex gap-2">
@@ -172,14 +179,11 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing, ca
               </li>
             ))}
           </ul>
-        </div>
+        </ReviewSection>
       )}
 
       {reviewResult.weaknesses?.length > 0 && (
-        <div>
-          <h4 className="text-sm font-medium flex items-center gap-1.5 mb-2 text-destructive">
-            <AlertCircle className="w-4 h-4" /> Weaknesses
-          </h4>
+        <ReviewSection title="Weaknesses" leading={<AlertCircle className="w-4 h-4 text-destructive" />}>
           <ul className="space-y-1.5">
             {reviewResult.weaknesses.map((w, i) => (
               <li key={i} className="text-sm text-foreground/60 flex gap-2">
@@ -187,12 +191,11 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing, ca
               </li>
             ))}
           </ul>
-        </div>
+        </ReviewSection>
       )}
 
       {reviewResult.priority_improvements?.length > 0 && (
-        <div className="bg-accent/5 border border-accent/20 rounded-lg p-4">
-          <h4 className="text-sm font-medium mb-2 text-accent">Do these first</h4>
+        <ReviewSection title="Do these first" leading={<Target className="w-4 h-4 text-accent" />}>
           <ol className="space-y-1.5">
             {reviewResult.priority_improvements.map((p, i) => (
               <li key={i} className="text-sm text-foreground/60 flex gap-2">
@@ -200,30 +203,31 @@ export default function EssayReviewPanel({ reviewResult, onPolish, polishing, ca
               </li>
             ))}
           </ol>
-        </div>
+        </ReviewSection>
       )}
 
       {optionalAdditions.length > 0 && (
-        <div className="bg-muted/30 border border-border/60 rounded-lg p-4">
-          <h4 className="text-sm font-medium mb-1">Ideas you could consider</h4>
-          <p className="text-xs text-foreground/40 mb-2.5">
-            These changed no score above, and skipping every one is a fine outcome.
-            An admissions officer never sees your profile or your documents — they
-            see this page — so nothing here is something you were expected to include.
-          </p>
-          <ul className="space-y-2">
-            {optionalAdditions.map((item, i) => (
-              <li key={i} className="text-sm text-foreground/60">
-                <span className="block">{item.suggestion}</span>
-                {(item.where || item.why_it_might_help) && (
-                  <span className="block text-xs text-foreground/35 mt-0.5">
-                    {[item.where ? `where: ${item.where}` : '', item.why_it_might_help || ''].filter(Boolean).join(' · ')}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <ReviewSection title="Ideas you could consider" detail="Optional; these changed no score" defaultOpen={false}>
+          <div>
+            <p className="text-xs text-foreground/40 mb-2.5">
+              These changed no score above, and skipping every one is a fine outcome.
+              An admissions officer never sees your profile or your documents — they
+              see this page — so nothing here is something you were expected to include.
+            </p>
+            <ul className="space-y-2">
+              {optionalAdditions.map((item, i) => (
+                <li key={i} className="text-sm text-foreground/60">
+                  <span className="block">{item.suggestion}</span>
+                  {(item.where || item.why_it_might_help) && (
+                    <span className="block text-xs text-foreground/35 mt-0.5">
+                      {[item.where ? `where: ${item.where}` : '', item.why_it_might_help || ''].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </ReviewSection>
       )}
 
       <div className="flex items-center gap-2 flex-wrap pt-1">

@@ -14,6 +14,7 @@ import {
   analysisMatchesSource, decodeDocumentText, legacyTypedText, mergeLegacyIntoNotes,
   materialDisplayName, materialSource, sourceKey,
 } from './materialDocument';
+import { contextTargetLabel, filterByContextTarget } from './contextTargeting';
 
 export const SAMPLE_ESSAY_TYPE = 'sample_essay';
 export const SAMPLE_ROLE_TAG = '[[atlas-role:sample_essay]]';
@@ -333,7 +334,8 @@ function formatSingleMaterial(material, documentBudget) {
   const sample = isSampleMaterial(material);
   const role = materialAnalysisRole(material);
   const roleLabel = materialRoleLabel(role);
-  const lines = [`--- ${title} [${type}] [analysis lens: ${roleLabel}]${region !== 'unknown' ? ` [${region}]` : ''} ---`];
+  const target = material._atlasTargetLabel || '';
+  const lines = [`--- ${title} [${type}] [analysis lens: ${roleLabel}]${region !== 'unknown' ? ` [${region}]` : ''}${target ? ` [context: ${target}]` : ''} ---`];
   if (material.link_url) lines.push(`Website: ${material.link_url}`);
   if (material.file_url) lines.push(`Uploaded file: ${materialDisplayName(material)}`);
 
@@ -391,15 +393,24 @@ export function formatSampleMaterials(materials, { totalChars = SAMPLE_DOCUMENT_
  * @param {string} [opts.platform] current platform, to prioritise relevant samples
  */
 export function formatMaterialsForAI(materials, opts = {}) {
-  const own = formatOwnMaterials(materials);
-  const guidance = formatGuidanceMaterials(materials);
-  const samples = formatSampleMaterials(materials);
+  const applicable = filterByContextTarget(materials, opts).map((material) => {
+    const label = contextTargetLabel(material, opts);
+    return { ...material, _atlasTargetLabel: label === 'All applications and tasks' ? '' : label };
+  });
+  const own = formatOwnMaterials(applicable);
+  const guidance = formatGuidanceMaterials(applicable);
+  const samples = formatSampleMaterials(applicable);
   const parts = [];
   const platform = opts.platform || '';
+  const targetEssay = opts.essay?.title ? ` · essay: ${opts.essay.title}` : '';
+  const targetUniversity = opts.universityName ? ` · university: ${opts.universityName}` : '';
+  const targetTask = opts.task ? ` · task: ${opts.task}` : '';
+  const scopeNote = `CURRENT CONTEXT:${targetUniversity || ' general applicant context'}${targetEssay}${targetTask}. Only materials whose saved university, essay, platform, and task targets match this context are included.`;
   const platformNote = platform
     ? `CURRENT APPLICATION PLATFORM: ${platform}. Prioritize ${platform === 'ucas' ? 'UK UCAS' : 'US'} samples for structural guidance, but you may learn voice/tone from any. Never apply UK structure to US essays or vice versa.`
     : '';
 
+  parts.push(scopeNote);
   parts.push(
     own.length
       ? `APPLICANT'S OWN MATERIALS (primary evidence about this student — use deeply, but do not flatten every document into an essay or a score. Academic work can reveal intellectual habits; personal reflections can reveal values and tensions; a writing draft can receive line-level feedback):\n${platformNote ? `${platformNote}\n\n` : ''}${own.join('\n\n')}`

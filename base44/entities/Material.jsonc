@@ -35,7 +35,11 @@
     "analysis_role": {
       "type": "string",
       "description": "How Atlas should interpret this material"
-    }
+    },
+    "target_university_id": { "type": "string" },
+    "target_essay_id": { "type": "string" },
+    "target_platform": { "type": "string" },
+    "target_task": { "type": "string" }
   },
   "required": [
     "title",

@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
+import ContextTargetFields from '@/components/ContextTargetFields';
+import { contextTargetFields, contextTargetLabel } from '@/lib/contextTargeting';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -47,7 +49,10 @@ const typeIcon = (type) => materialTypes.find((t) => t.value === type)?.icon || 
 /** Files Atlas can read. Old .doc files and images are offered, and explained, when chosen. */
 const FILE_ACCEPT = '.pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.rtf,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/csv,text/html';
 
-const EMPTY_FORM = { title: '', type: 'document', analysis_role: 'auto', link_url: '', notes: '' };
+const EMPTY_FORM = {
+  title: '', type: 'document', analysis_role: 'auto', link_url: '', notes: '',
+  target_university_id: '', target_essay_id: '', target_platform: '', target_task: '',
+};
 
 const FINDING_ICON = {
   strength: CheckCircle2,
@@ -394,7 +399,7 @@ function DocumentText({ text, findings, reader, fromFile }) {
   );
 }
 
-function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit, onRemove, onRetry, onReread }) {
+function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit, onRemove, onRetry, onReread, targetLabel }) {
   const Icon = typeIcon(item.type);
   const status = describeMaterial(item, job, modelReady);
   const sample = isSampleMaterial(item);
@@ -433,6 +438,11 @@ function MaterialCard({ item, job, modelReady, expanded, busy, onToggle, onEdit,
             {sample && (
               <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-slate-700 border-slate-300 bg-slate-50">
                 sample — not the applicant&apos;s writing
+              </Badge>
+            )}
+            {targetLabel && targetLabel !== 'All applications and tasks' && (
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-accent border-accent/25 bg-accent/5">
+                {targetLabel}
               </Badge>
             )}
           </div>
@@ -535,9 +545,12 @@ export default function Materials() {
   // Raw database rows. Presentation (what is the document, what is context)
   // is derived from them, so a row is never presented twice.
   const [rows, setRows] = useState([]);
+  const [universities, setUniversities] = useState([]);
+  const [essays, setEssays] = useState([]);
   const [loading, setLoading] = useState(true);
   const [jobStatus, setJobStatus] = useState({});
   const [migration, setMigration] = useState(null);
+  const [targetScopeLocalOnly, setTargetScopeLocalOnly] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -563,7 +576,17 @@ export default function Materials() {
     let cancelled = false;
     (async () => {
       try {
-        const list = await base44.entities.Material.list();
+        let missingColumns = base44.capabilities?.missingOptionalColumns?.() || [];
+        if (typeof base44.capabilities?.probe === 'function') {
+          try { missingColumns = await base44.capabilities.probe(); } catch { /* target fallbacks remain local if the schema is old */ }
+        }
+        const [list, universityRows, essayRows] = await Promise.all([
+          base44.entities.Material.list(),
+          base44.entities.University.list().catch(() => []),
+          base44.entities.Essay.list().catch(() => []),
+        ]);
+        setUniversities(universityRows);
+        setEssays(essayRows);
         // Move old pasted text out of the Content box, and drop analyses made from it.
         const migrated = [];
         const counts = { moved: 0, cleared: 0 };
@@ -585,6 +608,9 @@ export default function Materials() {
           }
         }
         if (cancelled) return;
+        setTargetScopeLocalOnly(missingColumns.some((column) => [
+          'target_university_id', 'target_essay_id', 'target_platform', 'target_task',
+        ].includes(column)));
         setRows(migrated);
         if (counts.moved || counts.cleared) setMigration(counts);
         const ready = hasLiveModel();
@@ -637,6 +663,10 @@ export default function Materials() {
       analysis_role: materialAnalysisRoleChoice(row),
       link_url: row.link_url || '',
       notes: presentMaterial(row).notes || '',
+      target_university_id: row.target_university_id || '',
+      target_essay_id: row.target_essay_id || '',
+      target_platform: row.target_platform || '',
+      target_task: row.target_task || '',
     });
     setFile(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -678,6 +708,7 @@ export default function Materials() {
         link_url: linkUrl,
         file_url: fileUrl,
         notes: form.notes,
+        ...contextTargetFields(form),
         // Content and analysis are written only by the reader, never from this form.
       };
       const write = async (body) => (editing
@@ -693,7 +724,11 @@ export default function Materials() {
           description: 'This database still rejects the new type. Re-run supabase/schema.sql in the Supabase SQL editor so it is stored as its own type. Until then Atlas keeps a marker in the notes.',
         });
       }
-      if (!saved) throw new Error('The material could not be saved. It may have been removed in another window.');
+      if (!saved) {
+        const refreshed = await base44.entities.Material.list().catch(() => null);
+        if (refreshed) setRows(refreshed);
+        throw new Error('Atlas could not confirm whether this material was saved. Check the list before retrying to avoid a duplicate.');
+      }
 
       const nextSource = materialSource({ file_url: fileUrl, link_url: linkUrl });
       const documentChanged = !!file || nextSource !== previousSource;
@@ -782,7 +817,7 @@ export default function Materials() {
                   · {attentionCount} need{attentionCount === 1 ? 's' : ''} attention
                 </button>
               )}
-              <span className="text-foreground/30">· Used in every essay draft and holistic review.</span>
+              <span className="text-foreground/30">· Saved targets can limit where each source is used.</span>
             </p>
           )}
         </div>
@@ -804,6 +839,15 @@ export default function Materials() {
           </Button>
         </div>
       </div>
+
+      {targetScopeLocalOnly && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <p className="text-xs leading-relaxed text-amber-900">
+            This Supabase schema is missing context-target columns. Atlas keeps these scopes in this browser for now; run <span className="font-mono">supabase/schema.sql</span> to sync university, essay, platform, and task targets across devices.
+          </p>
+        </div>
+      )}
 
       {migration && (
         <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4">
@@ -866,6 +910,7 @@ export default function Materials() {
                     <MaterialCard
                       key={item.id}
                       item={item}
+                      targetLabel={contextTargetLabel(item, { universities, essays })}
                       job={job}
                       busy={busy}
                       modelReady={modelReady}
@@ -974,6 +1019,12 @@ export default function Materials() {
               />
               <p className="text-[11px] text-foreground/35 mt-1">Atlas uses this as context, not as document text. It will not treat a guide or reference as proof about you.</p>
             </div>
+            <ContextTargetFields
+              value={form}
+              universities={universities}
+              essays={essays}
+              onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>Cancel</Button>
