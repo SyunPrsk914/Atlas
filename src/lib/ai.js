@@ -217,8 +217,8 @@ export async function runAI(params, opts = {}) {
       // Translate so one call site serves both, and never lower a provider's own
       // generous default when the caller did not ask for a specific cap.
       const hostedParams = { ...params };
-      // The model chosen in AI setup, unless the caller pinned one for this
-      // specific request (the material analyzer asks for its strict model).
+      // The model chosen in AI setup applies to every feature: no caller pins a
+      // model for a single request, so changing it in AI setup changes the whole app.
       const chosen = getModelOverride();
       if (chosen && !hostedParams.model) hostedParams.model = chosen;
       if (!hostedParams.max_tokens && hostedParams.max_output_tokens) {

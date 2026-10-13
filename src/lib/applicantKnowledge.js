@@ -21,6 +21,7 @@ import {
 } from './materialRole';
 import { sourceKey } from './materialDocument';
 import { contextTargetLabel, filterByContextTarget } from './contextTargeting';
+import { clipToBoundary, packBlocks } from './textClip';
 
 export const KNOWLEDGE_KINDS = {
   brief: { label: 'About you', hint: 'Who you are, from your profile, materials, and drafts.' },
@@ -62,10 +63,51 @@ export const GUIDANCE_CATEGORIES = {
   process: 'Process',
 };
 
-const LIMITS = { about: 14, points: 35, patterns: 20, guidance: 25 };
-const PROMPT_BUDGET = { profile: 10000, own: 30000, essays: 14000, samples: 14000, guidance: 14000 };
+/**
+ * The floors and ceilings for one build.
+ *
+ * The caps exist so a build cannot stop at "1 personality item, 4 facts", which
+ * is what a fixed per-kind cap plus a truncated source list used to produce:
+ * 40+ materials were read as a handful of one-liners. Limits now scale with how
+ * many sources are actually in front of the model, and a minimum makes a thin
+ * answer visible instead of normal.
+ */
+export const KNOWLEDGE_BASE_LIMITS = { about: 14, points: 35, patterns: 20, guidance: 25 };
 
-const clean = (value, max = Infinity) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+/** Per-kind floor: what a build must at least attempt when the sources support it. */
+const MIN_PER_SOURCE = { about: 0.5, points: 1.2, patterns: 1.5, guidance: 1.2 };
+/** The ceiling per kind, however large the pile. Exported for the UI and tests. */
+export const MAX_LIMITS = { about: 56, points: 220, patterns: 90, guidance: 90 };
+
+/**
+ * @param {{ materials?: number, samples?: number, guidance?: number, essays?: number, profile?: number }} counts
+ * @returns {{about:{min:number,max:number},points:{min:number,max:number},patterns:{min:number,max:number},guidance:{min:number,max:number}}}
+ */
+export function knowledgeLimitsFor(counts = {}) {
+  const evidence = (counts.materials || 0) + (counts.essays || 0) + (counts.profile ? 1 : 0);
+  const samples = counts.samples || 0;
+  const guides = counts.guidance || 0;
+  const limit = (kind, sources) => {
+    const max = Math.max(KNOWLEDGE_BASE_LIMITS[kind], Math.min(MAX_LIMITS[kind], KNOWLEDGE_BASE_LIMITS[kind] + Math.round(sources * 1.5)));
+    const min = Math.min(max, Math.round(sources * MIN_PER_SOURCE[kind]));
+    return { min, max };
+  };
+  return {
+    about: limit('about', evidence),
+    points: limit('points', evidence),
+    patterns: limit('patterns', samples),
+    guidance: limit('guidance', guides),
+  };
+}
+
+const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+
+/** Drafts are corroborating evidence, so each gets its own cap and the rest wait. */
+const PROMPT_BUDGET = { profile: 12000, essays: 26000, draft: 4000 };
+/** Room kept for the line that says what did not fit, so the budget is honest. */
+const KNOWLEDGE_NOTE_CHARS = 210;
+/** Below this, a section gets no room at all rather than a broken sentence. */
+const MIN_KNOWLEDGE_LINE_CHARS = 200;
 
 /** Region a platform's samples belong to. */
 export function platformRegion(platform) {
@@ -73,9 +115,14 @@ export function platformRegion(platform) {
 }
 
 function clip(text, max) {
-  const value = String(text || '');
-  if (value.length <= max) return value;
-  return `${value.slice(0, max)}\n[… ${(value.length - max).toLocaleString()} more characters left out to fit the AI's context window.]`;
+  return clipToBoundary(text, max);
+}
+
+/** True when an item ends in the middle of a sentence, which the UI flags. */
+export function itemLooksCutOff(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  return !/[.!?:;"')\]]$/.test(value) && value.length > 40;
 }
 
 /** The inputs a rebuild reads, and a fingerprint that changes when any of them change. */
@@ -88,13 +135,18 @@ export function buildKnowledgeInputs({ profile, materials = [], essays = [] }) {
     || (!essay.scope && !essay.university_id));
   const presented = globalMaterials.map(presentMaterial);
   const profileText = profileRow ? buildProfileContext(profileRow) : '';
-  const ownText = formatOwnMaterials(globalMaterials, { totalChars: PROMPT_BUDGET.own }).join('\n\n');
-  const guidanceText = formatGuidanceMaterials(globalMaterials, { totalChars: PROMPT_BUDGET.guidance }).join('\n\n');
-  const sampleText = formatSampleMaterials(globalMaterials, { totalChars: PROMPT_BUDGET.samples }).join('\n\n');
-  const essayText = globalEssays
+  // Each group brings its whole sources and its own analysis. The formatter
+  // drops a source whole when the prompt cannot hold it, and names it — the
+  // portrait is never built from the first pages of the first three files.
+  const ownText = formatOwnMaterials(globalMaterials).join('\n\n');
+  const guidanceText = formatGuidanceMaterials(globalMaterials).join('\n\n');
+  const sampleText = formatSampleMaterials(globalMaterials).join('\n\n');
+  const draftBlocks = globalEssays
     .filter((essay) => String(essay.content || '').trim())
-    .map((essay) => `--- Draft: ${essay.title || essay.university_name || 'Untitled'} (${essay.type || 'essay'}) ---\n${clip(essay.content, 3000)}`)
-    .join('\n\n');
+    .map((essay) => `--- Draft: ${essay.title || essay.university_name || 'Untitled'} (${essay.type || 'essay'}) ---\n${clip(essay.content, PROMPT_BUDGET.draft)}`);
+  const essayPacked = packBlocks(draftBlocks, PROMPT_BUDGET.essays);
+  const essayText = essayPacked.kept.join('\n\n');
+  const omittedDrafts = globalEssays.length - essayPacked.kept.length;
   const sampleCount = presented.filter((m) => isSampleMaterial(m)).length;
   const guidanceCount = presented.filter((m) => isGuidanceMaterial(m)).length;
   const evidenceCount = presented.filter((m) => !isSampleMaterial(m) && !isGuidanceMaterial(m)).length;
@@ -105,9 +157,11 @@ export function buildKnowledgeInputs({ profile, materials = [], essays = [] }) {
   ]);
   return {
     profileText: clip(profileText, PROMPT_BUDGET.profile),
-    ownText: clip(ownText, PROMPT_BUDGET.own),
-    guidanceText: clip(guidanceText, PROMPT_BUDGET.guidance),
-    essayText: clip(essayText, PROMPT_BUDGET.essays),
+    ownText,
+    guidanceText,
+    essayText: omittedDrafts > 0
+      ? `${essayText}\n\n[${omittedDrafts} older draft${omittedDrafts === 1 ? '' : 's'} left out to fit the prompt — the newest drafts were read.]`
+      : essayText,
     sampleText,
     fingerprint: sourceKey(fingerprintSource),
     counts: {
@@ -178,18 +232,24 @@ export const GUIDANCE_SCHEMA = {
   },
 };
 
-export function buildAboutAndPointsPrompt({ profileText, ownText, essayText }) {
+export function buildAboutAndPointsPrompt({ profileText, ownText, essayText, limits = null }) {
+  const cap = limits || knowledgeLimitsFor({ materials: 1, essays: 1, profile: 1 });
   return `You are building a private, editable, evidence-grounded portrait of one college applicant. Essay drafting and holistic review will use it, so depth and accuracy matter more than flattering slogans.
+
+WHAT "DEEP" MEANS HERE
+A literal inventory ("did physics IA on aerodynamics; joined three clubs") is worthless to a drafter — it already has those words. The portrait has to say what the choices imply: why this question rather than another, what the applicant returns to, what they do when the plan fails, how they treat other people's time, what they notice. Read a document the way a literature teacher reads it: the selection, the ordering, the omissions, and the emotional distance are all information.
 
 RULES FOR A NON-SHALLOW READ
 - Use only what the profile and own material state or strongly support. Never invent an experience, number, relationship, result, diagnosis, or motive. When an interpretation is uncertain, label it as "suggests", "may indicate", or "the materials do not establish".
 - Read across documents, not just within one paragraph. Look for repeated choices, what the applicant notices, what they spend time on, how they respond when a plan fails, the kinds of questions they ask, how they work with people, and the tension between what they say and what they do.
-- ABOUT YOU is not a collection of one-line compliments. Each item should be a dense, specific paragraph of 2–4 sentences: interpretation first, then the evidence and why that pattern matters. Categories: "personality" (how they come across), "actions" (what they repeatedly do), "mindset" (how they think, learn, handle uncertainty, and treat others), "goals" (what they are moving towards).
-- PERSONAL POINTS are separate and concrete: achievements with numbers, roles, places, dates, outcomes, responsibilities, and values shown in actions. Do not repeat an About item as a fact. Each point needs a source_label naming the material or profile section it came from.
+- ABOUT YOU is not a collection of one-line compliments. Each item is a dense, specific paragraph of 3-5 sentences (60-140 words): the interpretation first, then the evidence in the applicant's own terms, then why that pattern matters for an application. A one-line item is a failed item.
+- Cover every category the sources can support — "personality" (how they come across), "actions" (what they repeatedly do), "mindset" (how they think, learn, handle uncertainty, and treat others), "goals" (what they are moving towards). Do not return one item for the whole set when ${cap.about.min}+ are supported: aim for at least ${Math.max(2, Math.ceil(cap.about.min / 4))} in each category the evidence reaches.
+- PERSONAL POINTS are separate and concrete: achievements with numbers, roles, places, dates, outcomes, responsibilities, and values shown in actions. Do not repeat an About item as a fact. Each point needs a source_label naming the material or profile section it came from. Aim for ${cap.points.min}+ points; every material listed below should contribute at least one, or you must say in a point that it holds nothing usable.
 - Academic work and internal assessments are not college essays. Do not rate their prose or give sentence-level writing advice; use them to understand intellectual curiosity, method, standards, persistence, and the applicant's approach to evidence.
 - A past essay can provide both concrete events and a voice pattern, but a claim in an AI draft is not confirmed unless the profile or own materials support it. Do not use sample essays, tips, guides, or college references as evidence about the applicant.
 - Do not judge the applicant's chances and do not compare them with other people.
-- Return at most ${LIMITS.about} ABOUT YOU items and ${LIMITS.points} personal points. Prefer fewer well-supported, dense items to padded generalities.
+- Write in complete sentences and finish every one of them. Never stop mid-word, never write "someone who de", never leave a clause hanging: an item that is cut off is worse than no item, because the drafter will quote from it.
+- Return at most ${cap.about.max} ABOUT YOU items and ${cap.points.max} personal points. Density means substance per item, not padding: two 120-word items beat eight one-liners.
 
 STUDENT PROFILE (form data)
 ${profileText || '(no profile saved)'}
@@ -200,18 +260,21 @@ ${ownText || '(none added)'}
 ESSAY DRAFTS (may include AI-written drafts that the applicant edited. Use them only as corroborated evidence of voice or experience.)
 ${essayText || '(none)'}
 
-Return JSON only: {"about": [{"category": "personality|actions|mindset|goals", "text": "2–4 dense sentences"}], "points": [{"category": "achievement|experience|value|fact", "text": "...", "source_label": "..."}]}`;
+Return JSON only: {"about": [{"category": "personality|actions|mindset|goals", "text": "3-5 dense sentences"}], "points": [{"category": "achievement|experience|value|fact", "text": "...", "source_label": "..."}]}`;
 }
 
-export function buildPatternsPrompt({ sampleText }) {
+export function buildPatternsPrompt({ sampleText, limits = null }) {
+  const cap = limits || knowledgeLimitsFor({ samples: 1 });
   return `You are studying successful college application essays that the applicant chose as models. They were written by other people. They are not the applicant's life.
 
 Read them comparatively and critically. Explain not only what the samples do, but why the choice works on a reader: what is withheld, where the emotional or intellectual turn happens, how evidence earns trust, how diction controls distance, and what a weaker imitation would get wrong. Convert those observations into general rules that can be applied to a completely different life. Never copy a person, place, event, grade, or sentence from a sample.
 
+Be critical of the samples too. A successful essay is not automatically a good one, and a rule like "successful essays open with a scene" is useless to a drafter. Say which move works for which reader, where the sample is weak or risky to imitate, and what a reader with 40 files in front of them would actually remember.
+
 PLATFORM: each sample's label may say [US] or [UK]. Tag a pattern "US" or "UK" when the rule depends on that system, and "General" otherwise. Never apply UK structure (three fixed questions sharing 4,000 characters) to a US essay, or US structure to a UK answer.
 
 Categories: opening, structure, evidence, reflection, voice, length, judgement.
-At most ${LIMITS.patterns} patterns. Each should be a dense, usable rule rather than a one-line compliment.
+Each pattern is one dense, usable rule of 2-4 sentences: the technique, the reason it works on a reader, and the failure mode it prevents. Aim for at least ${Math.max(1, cap.patterns.min)} patterns across every sample you were given, and at most ${cap.patterns.max}. A sample that produced no pattern should be named in one pattern about what it does badly.
 
 SAMPLE ESSAYS (craft only)
 ${sampleText}
@@ -219,13 +282,16 @@ ${sampleText}
 Return JSON only: {"patterns": [{"category": "...", "platform": "US|UK|General", "text": "a critical, reusable rule"}]}`;
 }
 
-export function buildGuidancePrompt({ guidanceText }) {
+export function buildGuidancePrompt({ guidanceText, limits = null }) {
+  const cap = limits || knowledgeLimitsFor({ guidance: 1 });
   return `You are extracting a separate guidance layer from tips, writing guides, college requirements, and application reference documents. These sources are not the applicant's biography and their examples, statistics, and advice must never become facts about the applicant.
 
-Read for the underlying decision rules: what the reader is looking for, what a writer should do or avoid, how to choose evidence, structural constraints, deadlines or requirements, and where common advice becomes misleading. Preserve useful nuance and conflicts between sources instead of flattening everything into slogans. Each item should state the rule and its practical implication.
+Read for the underlying decision rules: what the reader is looking for, what a writer should do or avoid, how to choose evidence, structural constraints, deadlines or requirements, and where common advice becomes misleading. Preserve useful nuance and conflicts between sources instead of flattening everything into slogans. Each item should state the rule, the source it came from in substance, and the practical implication for drafting or review — 2-4 sentences, complete and finished.
+
+Write every rule so a drafter can obey it without reading the original document: "in a 50-word box, answer in the first sentence and spend the rest on one detail" is a rule; "be concise" is not. Where two sources disagree, record both and say which is more specific.
 
 Categories: writing_principle, application_rule, requirement, warning, process.
-At most ${LIMITS.guidance} items. Keep source-specific constraints in the item rather than presenting them as universal.
+Aim for at least ${Math.max(1, cap.guidance.min)} items and at most ${cap.guidance.max}. Keep source-specific constraints in the item rather than presenting them as universal, and note which essay type or platform each rule governs.
 
 GUIDANCE AND REFERENCE SOURCES
 ${guidanceText || '(none)'}
@@ -233,44 +299,104 @@ ${guidanceText || '(none)'}
 Return JSON only: {"guidance": [{"category": "...", "text": "a precise rule with its implication"}]}`;
 }
 
+/**
+ * The second kind of build: add what the first one missed.
+ *
+ * A rebuild replaces Atlas's own items. A deeper pass keeps every one of them and
+ * only appends, which is what makes it safe to run the same pile of materials
+ * twice when the first pass came back thin. Existing items are shown to the model
+ * so it cannot restate them, and near-duplicates are dropped on the way in.
+ */
+export const DEEPER_SCHEMA = {
+  type: 'object',
+  properties: {
+    about: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' } } } },
+    points: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' }, source_label: { type: 'string' } } } },
+    patterns: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, platform: { type: 'string' }, text: { type: 'string' } } } },
+    guidance: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' } } } },
+  },
+};
+
+export function buildDeeperPrompt({ inputs, existingText, limits }) {
+  return `You are adding to an existing, evidence-grounded portrait of one college applicant. Everything you return is APPENDED; nothing you return replaces what is already saved.
+
+THE ONLY JOB: write what is missing.
+- The items under ALREADY SAVED are complete. Do not repeat them, do not restate them in other words, do not "improve" them, and do not answer with an empty list unless the sources genuinely hold nothing more.
+- Go back through the sources one at a time. For each one, ask what it establishes that ALREADY SAVED does not mention: a detail, a habit, a tension, a number, a choice, a way of working, a constraint, a craft move.
+- Read between the lines as before: what a document implies about how this person thinks and what they value, always tied to what the text actually says.
+- Do not invent an experience, number, relationship, result, or motive. Label an uncertain reading "suggests" or "the materials do not establish".
+- Every item is a dense paragraph of 2-5 sentences and a COMPLETE sentence: never stop mid-word, never leave a clause hanging.
+- ${limits.about.max} new ABOUT items, ${limits.points.max} new personal points, ${limits.patterns.max} new patterns, ${limits.guidance.max} new guidance items at most. Prefer fewer, fuller items to one-line compliments.
+- Sample essays supply craft only, never another person's life. Tips and references supply rules, never biography. Academic work is never scored as a college essay.
+
+ALREADY SAVED (do not repeat)
+${existingText || '(nothing yet — read every source)'}
+
+STUDENT PROFILE (form data)
+${inputs.profileText || '(no profile saved)'}
+
+OWN MATERIALS
+${inputs.ownText || '(none)'}
+
+ESSAY DRAFTS
+${inputs.essayText || '(none)'}
+
+SAMPLE ESSAYS (craft only)
+${inputs.sampleText || '(none)'}
+
+TIPS, GUIDES, AND REFERENCES
+${inputs.guidanceText || '(none)'}
+
+Return JSON only: {"about": [...], "points": [...], "patterns": [...], "guidance": [...]} — each entry in the same shape as the first-build schema, and every entry new.`;
+}
+
 // ---------------------------------------------------------------------------
 // Normalising what the model returned
 // ---------------------------------------------------------------------------
-function cleanItems(list, validCategories, fallbackCategory, max, extra = (_item) => ({})) {
-  const seen = new Set();
+/**
+ * Keep whole, distinct items up to a cap. A fragment the model returned with a
+ * trailing "de" is kept as it is — Atlas does not invent an ending — but the
+ * Knowledge Base marks it as cut off so the applicant can finish or delete it.
+ */
+function cleanItems(list, validCategories, fallbackCategory, max, extra = (_item) => ({}), seen = new Set()) {
   const out = [];
+  const limit = Number(max);
   for (const item of Array.isArray(list) ? list : []) {
     const text = clean(item?.text);
-    if (!text) continue;
+    if (!text || text.split(/\s+/).length < 2) continue;
     const category = validCategories[String(item?.category || '').toLowerCase()] ? String(item.category).toLowerCase() : fallbackCategory;
     const key = `${category}|${text.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ category, text, ...extra(item) });
-    if (out.length >= max) break;
+    if (Number.isFinite(limit) && out.length >= limit) break;
   }
   return out;
 }
 
-export function normalizeAboutAndPoints(raw) {
+const capOf = (limits, kind, fallback) => (Number.isFinite(Number(limits?.[kind]?.max)) ? Number(limits[kind].max) : fallback);
+
+export function normalizeAboutAndPoints(raw, limits = null) {
   return {
-    about: cleanItems(raw?.about, ABOUT_CATEGORIES, 'personality', LIMITS.about),
-    points: cleanItems(raw?.points, POINT_CATEGORIES, 'fact', LIMITS.points, (item) => ({
-      source_label: clean(item?.source_label, 160) || 'Profile or materials',
+    about: cleanItems(raw?.about, ABOUT_CATEGORIES, 'personality', capOf(limits, 'about', KNOWLEDGE_BASE_LIMITS.about)),
+    points: cleanItems(raw?.points, POINT_CATEGORIES, 'fact', capOf(limits, 'points', KNOWLEDGE_BASE_LIMITS.points), (item) => ({
+      // A source label is a label, not an essay: keep it in full rather than
+      // cutting it at an arbitrary character count.
+      source_label: clean(item?.source_label) || 'Profile or materials',
     })),
   };
 }
 
-export function normalizePatterns(raw) {
-  return cleanItems(raw?.patterns, PATTERN_CATEGORIES, 'judgement', LIMITS.patterns, (item) => {
+export function normalizePatterns(raw, limits = null) {
+  return cleanItems(raw?.patterns, PATTERN_CATEGORIES, 'judgement', capOf(limits, 'patterns', KNOWLEDGE_BASE_LIMITS.patterns), (item) => {
     const platform = String(item?.platform || '').trim();
     const match = Object.keys(PATTERN_PLATFORMS).find((p) => p.toLowerCase() === platform.toLowerCase());
     return { platform: match || 'General' };
   });
 }
 
-export function normalizeGuidance(raw) {
-  return cleanItems(raw?.guidance, GUIDANCE_CATEGORIES, 'writing_principle', LIMITS.guidance);
+export function normalizeGuidance(raw, limits = null) {
+  return cleanItems(raw?.guidance, GUIDANCE_CATEGORIES, 'writing_principle', capOf(limits, 'guidance', KNOWLEDGE_BASE_LIMITS.guidance));
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +465,10 @@ export async function rebuildApplicantKnowledge({ inputs, existingRows = [], run
     throw new Error('Add a profile, a material, or an essay draft first. Atlas builds this from what you have entered.');
   }
   const warnings = [];
+  // One budget per build, derived from how much there actually is to read. The
+  // model is told both the floor and the ceiling, so a thin answer is a visible
+  // failure instead of the default outcome.
+  const limits = knowledgeLimitsFor(inputs.counts || {});
   let about = { about: [], points: [] };
 
   // A source-only rebuild is valid: for example, someone may add only a tips
@@ -346,31 +476,47 @@ export async function rebuildApplicantKnowledge({ inputs, existingRows = [], run
   // portrait when there is no applicant evidence to support one.
   if (inputs.profileText.trim() || inputs.ownText.trim() || inputs.essayText.trim()) {
     const first = await runAI({
-      prompt: buildAboutAndPointsPrompt(inputs),
+      prompt: buildAboutAndPointsPrompt({ ...inputs, limits }),
       response_json_schema: ABOUT_AND_POINTS_SCHEMA,
     }, { quiet: true, fallbackTitle: 'Could not build your profile' });
-    if (isLive(first)) about = normalizeAboutAndPoints(first.result);
+    if (isLive(first)) about = normalizeAboutAndPoints(first.result, limits);
     else throw first?.error || new Error('The AI did not return a profile. Your existing items were kept.');
   }
 
   let patterns = null;
   if (inputs.sampleText.trim()) {
     const second = await runAI({
-      prompt: buildPatternsPrompt(inputs),
+      prompt: buildPatternsPrompt({ ...inputs, limits }),
       response_json_schema: PATTERNS_SCHEMA,
     }, { quiet: true, fallbackTitle: 'Could not build the patterns' });
-    if (isLive(second)) patterns = normalizePatterns(second.result);
+    if (isLive(second)) patterns = normalizePatterns(second.result, limits);
     else warnings.push('The sample-essay patterns could not be built, so the existing patterns were kept.');
   }
 
   let guidance = null;
   if (inputs.guidanceText?.trim()) {
     const third = await runAI({
-      prompt: buildGuidancePrompt(inputs),
+      prompt: buildGuidancePrompt({ ...inputs, limits }),
       response_json_schema: GUIDANCE_SCHEMA,
     }, { quiet: true, fallbackTitle: 'Could not build the guidance layer' });
-    if (isLive(third)) guidance = normalizeGuidance(third.result);
+    if (isLive(third)) guidance = normalizeGuidance(third.result, limits);
     else warnings.push('The tips and reference guidance could not be built, so the existing guidance was kept.');
+  }
+
+  // Density is the point of the feature. Say out loud when the answer came back
+  // thinner than the pile of sources supports, and point at "Go deeper".
+  const thin = [
+    limits.about.min > 0 && about.about.length > 0 && about.about.length < limits.about.min
+      ? `only ${about.about.length} item${about.about.length === 1 ? '' : 's'} about you from ${(inputs.counts?.materials || 0) + (inputs.counts?.essays || 0) + (inputs.counts?.profile ? 1 : 0)} source${(inputs.counts?.materials || 0) + (inputs.counts?.essays || 0) === 1 ? '' : 's'}` : '',
+    limits.points.min > 0 && about.points.length > 0 && about.points.length < limits.points.min
+      ? `only ${about.points.length} personal point${about.points.length === 1 ? '' : 's'}` : '',
+    limits.patterns.min > 0 && patterns && patterns.length > 0 && patterns.length < limits.patterns.min
+      ? `only ${patterns.length} pattern${patterns.length === 1 ? '' : 's'} from ${inputs.counts?.samples || 0} sample${(inputs.counts?.samples || 0) === 1 ? '' : 's'}` : '',
+    limits.guidance.min > 0 && guidance && guidance.length > 0 && guidance.length < limits.guidance.min
+      ? `only ${guidance.length} guidance item${guidance.length === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+  if (thin.length) {
+    warnings.push(`This build came back thinner than the sources allow (${thin.join('; ')}). Press “Go deeper” to append what was missed without losing anything already saved.`);
   }
 
   const builtAt = now();
@@ -414,58 +560,300 @@ export async function rebuildApplicantKnowledge({ inputs, existingRows = [], run
   };
 }
 
+/**
+ * Whether a new item is really the same claim as a saved one.
+ *
+ * A deeper pass reads the whole saved portrait, and a model asked not to repeat
+ * itself will still paraphrase occasionally. Comparing the shared content words
+ * catches that: two items describing the same thing in different words have
+ * almost the same vocabulary, two different facts do not.
+ */
+function nearDuplicate(text, seenList) {
+  const words = new Set(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 4));
+  if (!words.size) return false;
+  for (const other of seenList) {
+    let shared = 0;
+    for (const word of other) if (words.has(word)) shared += 1;
+    const smaller = Math.min(words.size, other.size) || 1;
+    if (shared / smaller > 0.62) return true;
+  }
+  return false;
+}
+
+const wordSet = (text) => new Set(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 4));
+
+/**
+ * `cleanItems` keeps only `category` and `text`. A deeper pass writes database
+ * rows, and a row without its source label or platform loses its provenance in the
+ * UI, so this mirrors the same cleaning and carries those two fields through.
+ */
+function itemsWithProvenance(list, valid, fallback, maxChars) {
+  const limit = Number.isFinite(maxChars) ? Math.max(0, maxChars) : (list || []).length;
+  return (Array.isArray(list) ? list : []).map((item) => {
+    const text = String(item?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 700);
+    if (!text) return null;
+    const category = valid && !Object.prototype.hasOwnProperty.call(valid, item?.category) ? fallback : item.category;
+    return {
+      category,
+      text,
+      source_label: String(item?.source_label ?? '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      platform: String(item?.platform ?? '').replace(/\s+/g, ' ').trim(),
+    };
+  }).filter(Boolean).slice(0, limit);
+}
+
+/**
+ * "Go deeper": read the same sources again and append only what is new.
+ *
+ * Nothing here deletes a row, so a longer portrait is always safe to build. The
+ * saved items are passed to the model as a do-not-repeat list and used again on
+ * the way in, so an item that restates one already saved is dropped rather than
+ * doubling the list.
+ *
+ * @returns {Promise<{ counts: object, warnings: string[] }>}
+ */
+export async function extendApplicantKnowledge({ inputs, existingRows = [], runAI, isLive, createRows, model = null, now = () => new Date().toISOString() }) {
+  if (inputs.empty) {
+    throw new Error('Add a profile, a material, or an essay draft first. Atlas builds this from what you have entered.');
+  }
+  const saved = (existingRows || []).filter((row) => String(row.text || '').trim());
+  const existingText = saved.map((row) => `- [${row.kind}] ${row.text}`).join('\n');
+  // Room is measured against the absolute ceiling for a kind, not against the
+  // size of this build — a portrait that stopped short is the thing a deeper pass
+  // exists to fix. One pass still asks for at most a build's worth of new items,
+  // so the list grows in steps the applicant can read rather than without bound.
+  const limits = knowledgeLimitsFor(inputs.counts || {});
+  const countOf = (kind) => saved.filter((row) => row.kind === kind).length;
+  const headroom = (kind, base, ceiling) => Math.min(base, Math.max(0, ceiling - countOf(kind)));
+  const ask = {
+    about: { min: 0, max: headroom('brief', limits.about.max, MAX_LIMITS.about) },
+    points: { min: 0, max: headroom('evidence', limits.points.max, MAX_LIMITS.points) },
+    patterns: { min: 0, max: headroom('pattern', limits.patterns.max, MAX_LIMITS.patterns) },
+    guidance: { min: 0, max: headroom('guidance', limits.guidance.max, MAX_LIMITS.guidance) },
+  };
+  if (!ask.about.max && !ask.points.max && !ask.patterns.max && !ask.guidance.max) {
+    return { counts: { about: 0, points: 0, patterns: 0, guidance: 0 }, warnings: ['Every kind is already at the largest size Atlas allows for one knowledge base. Remove or merge an item to make room, or edit an existing item so it carries more.'] };
+  }
+
+  const outcome = await runAI({
+    prompt: buildDeeperPrompt({ inputs, existingText, limits: ask }),
+    response_json_schema: DEEPER_SCHEMA,
+  }, { quiet: true, fallbackTitle: 'Could not go deeper' });
+  if (!isLive(outcome)) throw outcome?.error || new Error('The AI did not return anything. Your existing items were kept.');
+
+  const result = outcome.result || {};
+  const seenLists = {
+    about: saved.filter((r) => r.kind === 'brief').map((r) => wordSet(r.text)),
+    points: saved.filter((r) => r.kind === 'evidence').map((r) => wordSet(r.text)),
+    patterns: saved.filter((r) => r.kind === 'pattern').map((r) => wordSet(r.text)),
+    guidance: saved.filter((r) => r.kind === 'guidance').map((r) => wordSet(r.text)),
+  };
+  const fresh = [];
+  const add = (list, kind, valid, fallback, bucket) => {
+    for (const item of itemsWithProvenance(list, valid, fallback, ask[bucket].max)) {
+      const set = wordSet(item.text);
+      if (nearDuplicate(item.text, seenLists[bucket])) continue;
+      seenLists[bucket].push(set);
+      fresh.push({
+        kind,
+        category: item.category,
+        text: item.text,
+        origin: 'ai',
+        source_label: item.source_label || '',
+        source_id: '',
+        platform: item.platform || 'General',
+        sort_order: countOf(kind) + fresh.filter((row) => row.kind === kind).length,
+        data: { fingerprint: inputs.fingerprint, built_at: now(), model: model || null, appended: true },
+      });
+    }
+  };
+  add(result.about, 'brief', ABOUT_CATEGORIES, 'personality', 'about');
+  add(
+    (Array.isArray(result.points) ? result.points : []).map((item) => ({ ...item, source_label: clean(item?.source_label) || 'Profile or materials' })),
+    'evidence', POINT_CATEGORIES, 'fact', 'points',
+  );
+  const patternItems = (Array.isArray(result.patterns) ? result.patterns : []).map((item) => {
+    const match = Object.keys(PATTERN_PLATFORMS).find((p) => p.toLowerCase() === String(item?.platform || '').trim().toLowerCase());
+    return { ...item, platform: match || 'General' };
+  });
+  add(patternItems, 'pattern', PATTERN_CATEGORIES, 'judgement', 'patterns');
+  add(result.guidance, 'guidance', GUIDANCE_CATEGORIES, 'writing_principle', 'guidance');
+
+  if (fresh.length) await createRows(fresh);
+  const byKind = (kind) => fresh.filter((row) => row.kind === kind).length;
+  const warnings = [];
+  if (!fresh.length) {
+    warnings.push('The model found nothing new to add at this depth. What is already saved stays exactly as it is.');
+  }
+  return {
+    counts: { about: byKind('brief'), points: byKind('evidence'), patterns: byKind('pattern'), guidance: byKind('guidance') },
+    warnings,
+  };
+}
+
+/**
+ * How well the saved portrait covers the sources, per category.
+ *
+ * The applicant asked for the thin list to be impossible to miss: "1 personality,
+ * 4 facts" against 40 documents is a report on the build, not a finished
+ * feature. This returns the numbers the page needs to say so.
+ */
+export function knowledgeCoverage(rows, inputs) {
+  const saved = (rows || []).filter((row) => String(row.text || '').trim());
+  const counts = inputs?.counts || {};
+  const limits = knowledgeLimitsFor(counts);
+  const byKind = (kind) => saved.filter((row) => row.kind === kind);
+  const perCategory = (list, table) => Object.keys(table).reduce((out, key) => {
+    out[key] = list.filter((row) => row.category === key).length;
+    return out;
+  }, {});
+  const brief = byKind('brief');
+  const evidence = byKind('evidence');
+  const patterns = byKind('pattern');
+  const guidance = byKind('guidance');
+  const thin = [
+    limits.about.min > 0 && brief.length < limits.about.min ? 'About you' : '',
+    limits.points.min > 0 && evidence.length < limits.points.min ? 'Personal points' : '',
+    limits.patterns.min > 0 && (counts.samples || 0) > 0 && patterns.length < limits.patterns.min ? 'Patterns' : '',
+    limits.guidance.min > 0 && (counts.guidance || 0) > 0 && guidance.length < limits.guidance.min ? 'Guidance' : '',
+  ].filter(Boolean);
+  const cutOff = saved.filter((row) => itemLooksCutOff(row.text)).length;
+  return {
+    limits,
+    thin,
+    cutOff,
+    sources: (counts.materials || 0) + (counts.samples || 0) + (counts.guidance || 0) + (counts.essays || 0),
+    about: perCategory(brief, ABOUT_CATEGORIES),
+    points: perCategory(evidence, POINT_CATEGORIES),
+    patterns: perCategory(patterns, PATTERN_CATEGORIES),
+    guidance: perCategory(guidance, GUIDANCE_CATEGORIES),
+    totals: { brief: brief.length, evidence: evidence.length, pattern: patterns.length, guidance: guidance.length },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // What drafting, review, and the holistic review read
 // ---------------------------------------------------------------------------
-/**
- * The knowledge base as text for a prompt. Patterns are filtered to the
- * platform's region, plus General ones. Output is capped; About you comes first.
- */
+/** The saved item's own scope, as the model sees it. '' when it is general. */
 function targetLabel(row, options) {
   const label = contextTargetLabel(row, options);
   return label === 'All applications and tasks' ? '' : ` · ${label}`;
 }
 
+/**
+ * How specific a saved item is to the job being asked.
+ *
+ * One portrait is shared by every school, so an item written for Stanford's
+ * roommate question has to be fetched before the general ones, and an item for
+ * a different school must never appear at all. Higher rank means it is shown
+ * first and is the last thing dropped when the prompt budget is tight.
+ */
+function specificityRank(row, { universityId = '', essayId = '' } = {}) {
+  const essayTarget = String(row?.target_essay_id || '');
+  const universityTarget = String(row?.target_university_id || '');
+  if (essayId && essayTarget && essayTarget === String(essayId)) return 4;
+  if (universityId && universityTarget && universityTarget === String(universityId)) return 3;
+  // Bound to a platform or a task: relevant, but not to this particular school.
+  if (String(row?.target_platform || '') || String(row?.target_task || '')) return 2;
+  if (universityTarget || essayTarget) return 0;
+  return 1;
+}
+
+/**
+ * The knowledge base as text for a prompt. Patterns are filtered to the
+ * platform's region, plus General ones.
+ *
+ * Two rules the earlier version broke. Items are packed whole, in order of how
+ * specifically they target this essay, and an item that does not fit is left out
+ * and counted — it is never cut mid-sentence, because the drafter cannot use a
+ * fact that stops at "someone who de" and the applicant cannot see that anything
+ * is missing.
+ */
 export function applicantKnowledgeForPrompt(rows, {
   platform = '', universityId = '', essayId = '', essayIds = [], task = '',
-  universities = [], essays = [], maxChars = 7000,
+  universities = [], essays = [], maxChars = 24000,
 } = {}) {
   const usable = filterByContextTarget(rows, { universityId, essayId, essayIds, platform, task })
-    .filter((r) => String(r.text || '').trim());
+    .filter((r) => String(r.text || '').trim())
+    .map((row) => ({ row, rank: specificityRank(row, { universityId, essayId }) }))
+    // Most specific first; the database order breaks ties, so two runs match.
+    .sort((a, b) => b.rank - a.rank);
   if (!usable.length) return '';
   const region = platform ? platformRegion(platform) : '';
-  const about = usable.filter((r) => r.kind === 'brief');
-  const points = usable.filter((r) => r.kind === 'evidence');
-  const patterns = usable.filter((r) => r.kind === 'pattern' && (!region || r.platform === 'General' || r.platform === region));
-  const guidance = usable.filter((r) => r.kind === 'guidance');
+  const pick = (...kinds) => usable.filter(({ row }) => kinds.includes(row.kind));
+  const about = pick('brief');
+  const points = pick('evidence');
+  const patterns = usable.filter(({ row }) => row.kind === 'pattern'
+    && (!region || row.platform === 'General' || row.platform === region));
+  const guidance = pick('guidance');
+
+  // The headings and the closing "did not fit" line are part of what this function
+  // returns, so they are paid for out of `maxChars` too: a caller that asked for
+  // 24,000 characters gets 24,000 characters of prompt, not 24,000 plus framing.
+  const headingChars = 4 * 130;
+  const noteReserve = maxChars > KNOWLEDGE_NOTE_CHARS * 3 ? KNOWLEDGE_NOTE_CHARS : 0;
+  const limit = Math.max(0, maxChars - headingChars - noteReserve);
+  // Share the budget across the four sections in the order a writer needs them:
+  // who the applicant is, then what they have done, then craft, then rules.
+  const share = (weight) => Math.max(0, Math.round(limit * weight));
+  const groups = [
+    {
+      heading: 'ABOUT THE APPLICANT (AI-built and applicant-edited; consistent with the profile and materials):',
+      items: about,
+      budget: share(0.3),
+      render: ({ row }) => `- [${ABOUT_CATEGORIES[row.category] || 'About'}]${targetLabel(row, { universities, essays })} ${row.text}`,
+    },
+    {
+      heading: 'PERSONAL POINTS (facts the applicant can use. Use these, and never add experiences beyond them):',
+      items: points,
+      budget: share(0.34),
+      render: ({ row }) => `- [${POINT_CATEGORIES[row.category] || 'Fact'}]${targetLabel(row, { universities, essays })} ${row.text}${row.source_label ? ` (source: ${row.source_label})` : ''}`,
+    },
+    {
+      heading: 'SUCCESSFUL-APPLICATION PATTERNS (apply the technique to this applicant’s own life; never copy a sample’s life):',
+      items: patterns,
+      budget: share(0.18),
+      render: ({ row }) => `- [${row.platform || 'General'} · ${PATTERN_CATEGORIES[row.category] || 'Judgement'}]${targetLabel(row, { universities, essays })} ${row.text}`,
+    },
+    {
+      heading: 'TIPS AND APPLICATION GUIDANCE (rules and constraints, not facts about the applicant):',
+      items: guidance,
+      budget: share(0.18),
+      render: ({ row }) => `- [${GUIDANCE_CATEGORIES[row.category] || 'Guidance'}]${targetLabel(row, { universities, essays })} ${row.text}`,
+    },
+  ];
 
   const lines = [];
-  const add = (heading, items, render) => {
-    if (!items.length) return;
-    lines.push(heading);
-    items.forEach((item) => lines.push(render(item)));
+  let omitted = 0;
+  let used = groups.reduce((sum, group) => sum + (group.items.length ? group.heading.length + 2 : 0), 0);
+  for (const group of groups) {
+    if (!group.items.length) continue;
+    const room = Math.max(0, limit - used);
+    // Less than a sentence of room left: this section waits, and the closing
+    // line says so. A half-line of context is worth nothing to the model.
+    if (room < MIN_KNOWLEDGE_LINE_CHARS) { omitted += group.items.length; continue; }
+    const budget = Math.min(group.budget, room);
+    const rendered = group.items.map((item) => ({ item, text: group.render(item) }));
+    const packed = packBlocks(rendered, budget, (block) => block.text.length + 1);
+    // `packBlocks` always keeps its first block whole. When even that will not
+    // fit what is left of the prompt, clip it at a sentence boundary: a section
+    // the writer cannot skip is exactly the section that must not be allowed to
+    // push the request over its size, and a complete sentence is what survives.
+    const head = packed.kept[0];
+    if (head && head.text.length > room) {
+      packed.kept[0] = { ...head, text: clipToBoundary(head.text, room, { marker: null }) };
+    }
+    if (!packed.kept.length) { omitted += group.items.length; continue; }
+    used += packed.kept.reduce((sum, block) => sum + block.text.length + 1, 0);
+    omitted += packed.omitted.length;
+    lines.push(group.heading);
+    packed.kept.forEach((block) => lines.push(block.text));
     lines.push('');
-  };
-  add(
-    'ABOUT THE APPLICANT (AI-built and applicant-edited; consistent with the profile and materials):',
-    about,
-    (r) => `- [${ABOUT_CATEGORIES[r.category] || 'About'}]${targetLabel(r, { universities, essays })} ${r.text}`,
-  );
-  add(
-    'PERSONAL POINTS (facts the applicant can use. Use these, and never add experiences beyond them):',
-    points,
-    (r) => `- [${POINT_CATEGORIES[r.category] || 'Fact'}]${targetLabel(r, { universities, essays })} ${r.text}${r.source_label ? ` (source: ${r.source_label})` : ''}`,
-  );
-  add(
-    'SUCCESSFUL-APPLICATION PATTERNS (apply the technique to this applicant’s own life; never copy a sample’s life):',
-    patterns,
-    (r) => `- [${r.platform || 'General'} · ${PATTERN_CATEGORIES[r.category] || 'Judgement'}]${targetLabel(r, { universities, essays })} ${r.text}`,
-  );
-  add(
-    'TIPS AND APPLICATION GUIDANCE (rules and constraints, not facts about the applicant):',
-    guidance,
-    (r) => `- [${GUIDANCE_CATEGORIES[r.category] || 'Guidance'}]${targetLabel(r, { universities, essays })} ${r.text}`,
-  );
+  }
   const text = lines.join('\n').trim();
-  return clip(text, maxChars);
+  if (!text) return '';
+  if (omitted > 0) {
+    return `${text}\n\n[${omitted} further knowledge item${omitted === 1 ? '' : 's'} are saved but did not fit this prompt; they are complete in the AI Knowledge Base page, and nothing above was shortened to make room.]`;
+  }
+  return text;
 }

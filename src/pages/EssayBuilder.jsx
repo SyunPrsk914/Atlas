@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine,
   Trash2, ChevronDown, ChevronUp, Library, CheckCircle2, CircleDashed,
-  Info, ArrowRight, AlertTriangle, Undo2, FileDiff, RotateCcw, Ruler,
+  Info, ArrowRight, AlertTriangle, Undo2, FileDiff, RotateCcw, Ruler, Compass,
 } from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
 import EssayDiffView from '@/components/essay/EssayDiffView';
@@ -25,9 +25,11 @@ import { buildProfileContext } from '@/lib/profileContext';
 import {
   buildGeneratePrompt, GENERATE_SCHEMA, buildReviewPrompt, REVIEW_SCHEMA, buildPolishPrompt,
   POLISH_SCHEMA, LENGTH_REPAIR_SCHEMA, buildLengthRepairPrompt, AI_TEMPERATURES,
-  extractRevisedEssay, cleanEssayText, withMeasuredLength,
+  extractRevisedEssay, cleanEssayText, withMeasuredLength, buildRootCorrection,
 } from '@/lib/essayPrompts';
-import { assessLength, isBetterLength } from '@/lib/essayLength';
+import { assessLength, isBetterLength, lengthSeverity } from '@/lib/essayLength';
+import { checkDraftAgainstRoot, interpretRoot, rootCheckBrief } from '@/lib/essayRoot';
+import { findUnaddressedFindings, unaddressedBrief } from '@/lib/essayEditCheck';
 import { diffText, diffStats, isAggressiveRewrite } from '@/lib/textDiff';
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
@@ -98,6 +100,11 @@ export default function EssayBuilder() {
   const [saving, setSaving] = useState(false);
   const [dirtyFields, setDirtyFields] = useState([]);
   const [rootSaving, setRootSaving] = useState(false);
+  // Shown under the box as it is typed: what Atlas will read the direction as,
+  // because "pick the best of these" and "cover all of these" look the same in a
+  // list and produce completely different essays. Cheap to compute, and it lets the
+  // applicant correct an ambiguous direction before spending a model call on it.
+  const rootReading = useMemo(() => interpretRoot(selectedEssay?.draft_anchor || ''), [selectedEssay?.draft_anchor]);
   const [reviewResult, setReviewResult] = useState(null);
   const [reviewCachedAt, setReviewCachedAt] = useState(null);
   const [previousScore, setPreviousScore] = useState(null);
@@ -695,7 +702,7 @@ export default function EssayBuilder() {
   const guardLive = (action) => {
     if (hasLiveModel()) return true;
     toast.error(`${action} needs a connected AI model`, {
-      description: 'Demo mode shows placeholder text, so Atlas will not write, review, or edit an essay with it. Nothing was changed. Connect a local model in AI setup (AI status in the sidebar).',
+      description: 'Demo mode shows placeholder text, so Atlas will not write, review, or edit an essay with it. Nothing was changed. Connect NaraRouter in AI setup (AI status in the sidebar).',
       duration: 9000,
     });
     return false;
@@ -740,7 +747,7 @@ export default function EssayBuilder() {
 
   /** Why the drafting actions are unavailable right now, in one sentence. */
   const actionHintFor = (essay) => {
-    if (!hasLiveModel()) return 'Demo mode: connect a local model in AI setup to generate, review, or edit.';
+    if (!hasLiveModel()) return 'Demo mode: connect NaraRouter in AI setup to generate, review, or edit.';
     if (!essay?.content?.trim()) return 'Review and Apply edits read the essay text. Write or generate the essay first.';
     return '';
   };
@@ -825,11 +832,47 @@ export default function EssayBuilder() {
       }, { fallbackTitle: 'Could not generate a draft' });
 
       if (!isLiveOutcome(outcome)) return;
-      const result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
       let text = cleanEssayText(extractRevisedEssay(outcome.result));
       if (!text) {
         toast.error('The AI returned an empty draft', { description: 'Try again, or lower the length you asked for.' });
         return;
+      }
+      // Atlas then checks the answer against the direction the applicant wrote in
+      // the root box — not whether the words appear, but whether the essay was
+      // BUILT on one option when it was told to choose one. A draft that failed
+      // that check is sent back once before anything else is done to it, because
+      // a beautiful essay about the wrong subject still has to be thrown away.
+      let rootCheck = checkDraftAgainstRoot(essayForAction.draft_anchor || '', text);
+      let rootNote = rootCheckBrief(rootCheck);
+      let result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
+      let rootRetried = false;
+      if (!rootCheck.ok && rootCheck.correction) {
+        setBusy('generate');
+        const retry = await runAI({
+          prompt: buildGeneratePrompt({
+            essay: essayForAction, university: universityForEssay(essayForAction), platform,
+            profileText: context.profileText, knowledgeText: context.knowledgeText,
+            materialsText: context.materialsText, applicantText: context.applicantText,
+            allEssays: essays, rootCorrection: buildRootCorrection(rootCheck),
+          }),
+          response_json_schema: GENERATE_SCHEMA,
+          temperature: AI_TEMPERATURES.generate,
+        }, { fallbackTitle: 'The second draft could not be completed' });
+        if (isLiveOutcome(retry)) {
+          const candidate = cleanEssayText(extractRevisedEssay(retry.result));
+          const candidateCheck = candidate ? checkDraftAgainstRoot(essayForAction.draft_anchor || '', candidate) : null;
+          const candidateLength = candidate ? assessLength(candidate, essayForAction, essays) : null;
+          // Keep the retry only when it actually follows the direction and does
+          // not hand back a shorter essay than the one it replaces.
+          if (candidate && candidateCheck?.ok
+            && lengthSeverity(candidateLength) <= lengthSeverity(assessLength(text, essayForAction, essays))) {
+            text = candidate;
+            result = retry.result && typeof retry.result === 'object' ? retry.result : result;
+            rootCheck = candidateCheck;
+            rootNote = rootCheckBrief(candidateCheck);
+            rootRetried = true;
+          }
+        }
       }
       let assessment = assessLength(text, essayForAction, essays);
       let repaired = false;
@@ -869,7 +912,12 @@ export default function EssayBuilder() {
         wordsAfter: assessment.count,
         scoreBefore: reviewResult?.overall_score ?? null,
         scoreAfter: null,
-        note: repaired ? 'length repaired automatically' : assessment.ok ? 'inside the target band' : 'still outside the target band',
+        rootRetried,
+        note: [
+          rootRetried ? 're-drafted to follow your required root' : '',
+          repaired ? 'length repaired automatically' : '',
+          assessment.ok ? 'inside the target band' : 'still outside the target band',
+        ].filter(Boolean).join(' · '),
       });
       setLengthIssue(assessment.ok ? null : assessment);
 
@@ -878,11 +926,16 @@ export default function EssayBuilder() {
           description: `${assessment.message} Use “Fix length” below — Atlas will ask the model to finish the job properly.`,
           duration: 12000,
         });
+      } else if (rootRetried) {
+        toast.success(`Draft rewritten on your required root — ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}`, {
+          description: `The first answer ignored the direction in the root box, so Atlas sent it back. ${rootNote}`,
+          duration: 12000,
+        });
       } else {
         toast.success(`Draft written — ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}`, {
           description: gaps.length
             ? 'Check the "fill these in" list — the AI deliberately left gaps rather than inventing your life.'
-            : 'Inside the target band. Read it, then edit it in your own voice.',
+            : 'Inside the target band, and built on the root you set. Read it, then edit it in your own voice.',
         });
       }
     } catch (e) {
@@ -960,12 +1013,21 @@ export default function EssayBuilder() {
     }
   };
 
-  const handlePolish = async () => {
+  /**
+   * One AI edit pass.
+   *
+   * `focusPhrases` turns the same pipeline into the follow-up edit: the flagged
+   * phrases that are still in the draft, and nothing else. Keeping both in one
+   * function is deliberate — the follow-up gets the same snapshot, the same
+   * conservation diff, the same length contract, and the same re-score, so an
+   * applicant never gets a weaker safety net for the second pass than the first.
+   */
+  const runPolishAction = async ({ focusPhrases = null, label = 'Apply edits' } = {}) => {
     const current = currentSelectedEssay();
     if (!current?.content?.trim()) return;
-    if (!guardLive('Apply edits')) return;
+    if (!guardLive(label)) return;
     const essayTarget = { ...current };
-    if (!confirmReplace(essayTarget, 'the edits are applied')) return;
+    if (!focusPhrases?.length && !confirmReplace(essayTarget, 'the edits are applied')) return;
     const before = essayTarget.content || '';
     const priorReview = reviewResult;
     setBusy('polish');
@@ -979,6 +1041,7 @@ export default function EssayBuilder() {
           reviewResult: priorReview, knowledgeText: context.knowledgeText, allEssays: essays,
           materialsText: context.materialsText, profileText: context.profileText,
           applicantText: context.applicantText,
+          focusPhrases: focusPhrases?.length ? focusPhrases : null,
         }),
         response_json_schema: POLISH_SCHEMA,
         temperature: AI_TEMPERATURES.polish,
@@ -1013,10 +1076,15 @@ export default function EssayBuilder() {
       const { ops } = diffText(before, text);
       const stats = diffStats(ops);
       const rewritten = isAggressiveRewrite(stats);
+      // The measure of an edit is whether it fixed what was wrong, so Atlas
+      // checks the review's own quoted phrases against the text it got back
+      // instead of reading the model's change log and hoping.
+      const unaddressed = findUnaddressedFindings(priorReview, text, before);
 
       setEssaySnapshot(essayForAction.id, { content: before, label: 'your version before this edit', review: priorReview });
       setSnapshot(getEssaySnapshot(essayForAction.id));
-      rememberForUndo(essayForAction, { content: before, status: essayForAction.status }, 'edits applied');
+      rememberForUndo(essayForAction, { content: before, status: essayForAction.status },
+        focusPhrases?.length ? 'follow-up edits applied' : 'edits applied');
       await persist({ content: text, status: 'polishing' }, essayForAction);
 
       setRevision({
@@ -1033,6 +1101,11 @@ export default function EssayBuilder() {
         preservedEstimate: Number(result.preserved_estimate) > 0 ? Number(result.preserved_estimate) : null,
         at: new Date().toISOString(),
         repaired,
+        followUp: !!focusPhrases?.length,
+        unaddressed: unaddressed.stillPresent,
+        resolvedPhrases: unaddressed.fixed,
+        refused: Array.isArray(result.unresolved_phrases) ? result.unresolved_phrases : [],
+        unaddressedNote: unaddressedBrief(unaddressed),
       });
       setLengthIssue(assessment.ok ? null : assessment);
 
@@ -1041,9 +1114,14 @@ export default function EssayBuilder() {
           description: `Only ${Math.round(stats.preservedRatio * 100)}% of your words survived, and Atlas asked it to keep at least 80%. The comparison below highlights everything it touched — restore your version if you prefer it.`,
           duration: 14000,
         });
+      } else if (unaddressed.stillPresent.length) {
+        toast.warning('Revision applied, but the review is not answered yet', {
+          description: `${unaddressed.message} The remaining ones are listed under the comparison — “Fix what is still flagged” edits only those.`,
+          duration: 14000,
+        });
       } else {
         toast.success('Revision applied', {
-          description: `${stats.kept} of your ${stats.oldTotal} ${formatLimit(assessment.unit)} kept, ${stats.added} added, ${stats.removed} cut. Every change is highlighted below.`,
+          description: `${stats.kept} of your ${stats.oldTotal} ${formatLimit(assessment.unit)} kept, ${stats.added} added, ${stats.removed} cut${unaddressed.fixed.length ? `, and all ${unaddressed.fixed.length} flagged phrase(s) the review objected to are gone` : ''}. Every change is highlighted below.`,
         });
       }
 
@@ -1074,20 +1152,31 @@ export default function EssayBuilder() {
       }
 
       recordProgress(essayForAction.id, {
-        action: 'edit',
+        action: focusPhrases?.length ? 'follow-up' : 'edit',
         unit: assessment.unit,
         wordsBefore: assessLength(before, essayForAction, essays).count,
         wordsAfter: assessment.count,
         scoreBefore: priorReview?.overall_score ?? null,
         scoreAfter: nextReview?.overall_score ?? null,
         preservedRatio: stats.preservedRatio,
-        note: repaired ? 'length repaired automatically' : rewritten ? 'rewrote more than expected' : '',
+        note: [
+          focusPhrases?.length ? `follow-up on ${focusPhrases.length} flagged phrase(s)` : '',
+          repaired ? 'length repaired automatically' : '',
+          rewritten ? 'rewrote more than expected' : '',
+          unaddressed.stillPresent.length ? `${unaddressed.stillPresent.length} still unaddressed` : '',
+        ].filter(Boolean).join(' · '),
       });
 
       if (nextReview) {
         const beforeScore = Number(priorReview?.overall_score) || 0;
         const afterScore = Number(nextReview.overall_score) || 0;
         const delta = beforeScore > 0 ? Math.round((afterScore - beforeScore) * 10) / 10 : null;
+        // The score belongs on the comparison, not only in a toast that disappears
+        // while it is being read: an edit is judged by whether the same rubric now
+        // says more, and the applicant must be able to see the number afterwards.
+        setRevision((prev) => (prev ? {
+          ...prev, scoreBefore: beforeScore || null, scoreAfter: afterScore || null, scoreDelta: delta,
+        } : prev));
         if (delta !== null && delta < 0) {
           toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
             description: 'Restore your version below, or apply edits again — the new review says exactly what is wrong now.',
@@ -1106,6 +1195,29 @@ export default function EssayBuilder() {
     } finally {
       setBusy(null);
     }
+  };
+
+  /** The normal "Apply edits" action. */
+  const handlePolish = () => runPolishAction({});
+
+  /**
+   * The follow-up: edit only the phrases the review objected to that are still in
+   * the draft. This is what closes the loop: an edit that
+   * polishes prose while leaving every flagged line alone, and a score that never
+   * moves. The same conservation rules and the same snapshot apply, so a
+   * follow-up can never quietly become a rewrite.
+   */
+  const handleFinishFlagged = () => {
+    const still = (revision?.unaddressed?.length
+      ? revision.unaddressed
+      : findUnaddressedFindings(reviewResult, selectedEssay?.content || '').stillPresent);
+    if (!still?.length) {
+      toast.message('There is nothing left to fix', {
+        description: 'Every phrase the review flagged is already out of the draft. Run an admissions review to look for new ones.',
+      });
+      return;
+    }
+    return runPolishAction({ focusPhrases: still, label: 'The follow-up edit' });
   };
 
   /** Brings the current text to its length contract on demand. */
@@ -1666,6 +1778,25 @@ export default function EssayBuilder() {
                   rows={4}
                   className="bg-background/70"
                 />
+                {rootReading.hasRoot && (
+                  <p className="text-[11px] text-foreground/45 flex items-start gap-1.5 leading-relaxed">
+                    <Compass className="w-3.5 h-3.5 mt-px shrink-0 text-accent-foreground/70" />
+                    <span>
+                      {rootReading.chooseOne
+                        ? `Atlas reads this as “choose one”: ${rootReading.alternatives.length || 'several'} possible subjects, and the draft must build on ONE of them`
+                        : rootReading.includeAll
+                          ? `Atlas reads this as “cover them all”: ${rootReading.alternatives.length || 'the listed'} subjects are each a requirement`
+                          : rootReading.alternatives.length >= 2
+                            ? `Atlas found ${rootReading.alternatives.length} subjects with no instruction to choose, so it will build on one and hold the draft to that`
+                            : 'Atlas reads one direction, with no list of alternatives inside it'}
+                      {rootReading.constraints.length
+                        ? `, plus ${rootReading.constraints.length} stated rule${rootReading.constraints.length === 1 ? '' : 's'} it must not break` : ''}.
+                      {rootReading.alternatives.length >= 2 && !rootReading.chooseOne && !rootReading.includeAll
+                        ? ' Say “pick the strongest one” or “include all of them” if you want the other reading.' : ''}
+                      {' '}Every draft is checked against this before it is shown to you.
+                    </span>
+                  </p>
+                )}
                 <p className="text-[11px] text-foreground/45 leading-relaxed">
                   Atlas will use the profile, materials, guidance, and sample craft to deepen this direction. It must not replace your roots with a random activity; if something is missing, it will leave a gap for you.
                 </p>
@@ -1867,7 +1998,9 @@ export default function EssayBuilder() {
                 <EssayDiffView
                   revision={revision}
                   restoring={busy === 'restore'}
+                  disabled={busy !== null}
                   onKeep={() => setRevision(null)}
+                  onFixRemaining={revision?.unaddressed?.length ? handleFinishFlagged : null}
                   onRestore={revision.fromSnapshot ? null : (snapshot?.content ? handleRestoreSnapshot : null)}
                 />
               )}

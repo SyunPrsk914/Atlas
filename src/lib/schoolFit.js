@@ -30,6 +30,7 @@
 //      because an admissions officer sees the page, not the school's website.
 
 import { detectSupplementShapes } from './essayCraft';
+import { clipToBoundary } from './textClip';
 import { isSharedEssay } from './applicationData';
 
 /**
@@ -208,14 +209,11 @@ export function parseSchoolKnowledge(text) {
   };
 }
 
-const cap = (body, budget) => {
-  const text = String(body || '').trim();
-  if (text.length <= budget) return text;
-  // Cut on a line boundary so the brief never ends mid-sentence-looking.
-  const slice = text.slice(0, budget);
-  const lastBreak = slice.lastIndexOf('\n');
-  return `${slice.slice(0, lastBreak > budget * 0.5 ? lastBreak : budget).trim()}\n[section continues in the full research record]`;
-};
+const cap = (body, budget) => clipToBoundary(String(body || '').trim(), budget, {
+  // Never mid-word, and always announced: a brief that ends on a half sentence
+  // teaches the model a half fact and tells the applicant nothing.
+  marker: () => '\n[section continues in the full research record]',
+});
 
 const KIND_INSTRUCTIONS = {
   draft: 'Use this to write for THIS reader: aim at what it values, structure the piece the way its readers reward, and let the named programmes, facilities, traditions or clubs supply the specific nouns — but only ones this applicant genuinely touched. Never name-drop a place or a club just because it is in the research; a reader spots a borrowed detail instantly.',
@@ -368,9 +366,10 @@ export function buildFitBrief(knowledgeText, {
   const essayNote = essay
     ? `\nCURRENT ESSAY TARGET: ${essay.title || 'Untitled essay'}\nExact prompt: ${essay.prompt || '(none saved)'}\nUse only the matching requirements above. Do not blend this prompt with another supplement or try to answer multiple prompts.`
     : '';
-  let out = `WHAT THIS UNIVERSITY PUBLISHES ABOUT ITSELF (kind: ${kind}):\n${KIND_INSTRUCTIONS[kind] || KIND_INSTRUCTIONS.draft}${essayNote}\n\n${blocks.join('\n\n')}`;
-  if (out.length > totalBudget) out = `${out.slice(0, totalBudget).trimEnd()}\n[brief trimmed to fit the prompt — the full record is stored with this university]`;
-  return out;
+  const out = `WHAT THIS UNIVERSITY PUBLISHES ABOUT ITSELF (kind: ${kind}):\n${KIND_INSTRUCTIONS[kind] || KIND_INSTRUCTIONS.draft}${essayNote}\n\n${blocks.join('\n\n')}`;
+  return clipToBoundary(out, totalBudget, {
+    marker: () => '\n[brief trimmed to fit the prompt — the full record is stored with this university]',
+  });
 }
 
 /**

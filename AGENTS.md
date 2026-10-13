@@ -36,7 +36,17 @@ Vercel + Supabase deployment, environment variables, and key locations.
   and the validation that cuts a suggestion to the real form.
 - `src/lib/persist.js`: browser-local cache, pre-edit snapshots, and the
   per-essay progress history (deliberately not in Postgres — no schema change).
-- `scripts/verify-quality.mjs`: offline checks for all of the above.
+- `src/lib/textClip.js`: the ONLY way text is shortened for a prompt or a preview.
+  Never `.slice(0, n)` a document, a knowledge item, or a generated answer: clip at
+  a sentence boundary with `clipToBoundary`, or drop the item whole with `packBlocks`
+  and name what did not fit. A truncated sentence in the knowledge base is a lost
+  fact, and a prompt cut mid-word reads to the model as an instruction to stop early.
+- `src/lib/essayRoot.js` and `src/lib/essayEditCheck.js`: Atlas verifies an AI answer
+  against the instruction it was given (the root) and against the review it was asked
+  to answer (the flagged phrases), instead of trusting the model's own summary. A
+  check that fails is corrected once, then reported honestly to the applicant.
+- `scripts/verify-instructions.mjs`: offline checks for all of the above, including
+  that the pages still call these modules.
 - `scripts/render-check.mjs`: renders the essay/activity components in Node with
   the props the pages really pass them (`npm run verify:render`). Lint and build
   cannot see a missing prop; this can.

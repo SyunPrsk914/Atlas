@@ -1,6 +1,6 @@
 // Background work for materials: read the uploaded file or the linked page,
 // then analyse the whole text. Jobs run one at a time, in the order they were
-// added, so a local model is never asked to do two long analyses at once.
+// added, so the model is never asked to do two long analyses at once.
 //
 // The job manager takes its side effects as parameters (read, analyse, save,
 // load, notify). The app passes the real ones (see materialService.js); tests

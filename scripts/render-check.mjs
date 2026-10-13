@@ -125,8 +125,31 @@ export const cases = {
         changes: [{ original: 'It was hard', revised: 'over one summer', reason: 'more specific' }],
         why: 'Made the middle concrete.', protectedItems: ['the workshop scene'],
         gaps: ['name the mentor'], at: new Date().toISOString(),
+        summary: 'Sharpened the opening and cut two hedges.',
+        scoreBefore: 8.2, scoreAfter: 8.6, scoreDelta: 0.4, repaired: true,
       }}
       onKeep={() => {}} onRestore={() => {}} restoring={false}
+    />
+  ),
+  // The edit that left a flagged phrase alone: the page must be able to show the
+  // list and the follow-up button, and never assume the change log is complete.
+  'EssayDiffView — flagged phrases still present': () => (
+    <EssayDiffView
+      revision={{
+        before, after, ops, stats, unit: 'words', changes: [],
+        unaddressed: ['we worked hard together', 'in the end I learned'],
+        scoreBefore: 8.2, scoreAfter: 7.9, scoreDelta: -0.3,
+        resolvedPhrases: ['It was hard'],
+        refused: [{ phrase: 'a turning point', reason: 'the reviewer misread this line; it is the essay\u2019s hinge' }],
+        unaddressedNote: '2 of the 3 phrases the review objected to are still in the draft, unchanged.',
+      }}
+      onKeep={() => {}} onRestore={() => {}} onFixRemaining={() => {}} disabled={false}
+    />
+  ),
+  'EssayDiffView — every flagged phrase resolved': () => (
+    <EssayDiffView
+      revision={{ before, after, ops, stats, unit: 'words', changes: [], unaddressed: [], resolvedPhrases: ['It was hard', 'but I learned'] }}
+      onKeep={() => {}}
     />
   ),
   // handleFixLength and showSnapshotDiff build a revision with no change log.

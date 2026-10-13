@@ -1,5 +1,5 @@
 // Fetch one public admissions page from the user's browser, without cookies or
-// a proxy, and extract its readable text for a local model or report cache.
+// a proxy, and extract its readable text for the model or report cache.
 import { makeError } from './aiError';
 
 export function normalizePublicPageUrl(value) {
