@@ -63,7 +63,11 @@ const GEMINI_ALIASES = {
 
 const PROVIDER_DEFAULTS = {
   gemini: process.env.GEMINI_MODEL || 'gemini-flash-latest',
-  nararouter: process.env.NARAROUTER_MODEL || 'agnes-3-flash',
+  // `agnes-2.5-flash` is the alias this app is tuned around: it is the model the
+  // Atlas essays, reviews, and deep analyses were developed against, and its
+  // analysis depth is the reason the hosted path beats a local model. The
+  // model picker in AI setup can still select any alias the key can call.
+  nararouter: process.env.NARAROUTER_MODEL || 'agnes-2.5-flash',
   openai: process.env.OPENAI_MODEL || 'gpt-4o',
   anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
   groq: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -614,7 +618,7 @@ export async function handleInvokeLLM(req, res) {
   // Ollama needs no key: it is a local server, selected explicitly.
   if (!provider || (provider !== 'ollama' && !apiKeyFor(provider))) {
     send(res, 503, {
-      error: 'No AI provider is configured for this deployment. Set NARAROUTER_API_KEY (see DEPLOYMENT.md) and redeploy, set LLM_PROVIDER=ollama to use a local Ollama, or use demo mode until then.',
+      error: 'No AI provider is configured for this deployment. Set NARAROUTER_API_KEY (see DEPLOYMENT.md) and redeploy, or use demo mode until then. (A local Ollama is available only as an explicit opt-in — LLM_PROVIDER=ollama, see DEPLOYMENT.md Part 2.7 — and is not needed for Atlas.)',
     });
     return;
   }

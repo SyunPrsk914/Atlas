@@ -14,10 +14,10 @@ craft patterns from successful samples, and reusable tips/reference guidance.
 
 - **Frontend:** React 18 + Vite + Tailwind (shadcn/ui) — `src/`
 - **Backend:** Supabase (Postgres + Auth + Storage) — `supabase/schema.sql`
-- **AI:** [NaraRouter](https://router.bynara.id/docs) through `api/invoke-llm.js`, with the key on the server and the model alias chosen in the app from `api/models.js`
-- **Local AI (optional):** [Ollama](https://ollama.com) runs a model on your own computer when `LLM_PROVIDER=ollama` is set (never chosen automatically; see DEPLOYMENT.md, Part 2.7). Reasoning models such as `qwen3:8b` are used at full depth: Atlas asks them to think, keeps the chain of thought out of the answer, and reserves output room and sampling for it — [LOCAL_SETUP.md](./LOCAL_SETUP.md) is the step-by-step local guide
-- **Other providers (optional):** a Gemini, Groq, OpenRouter, OpenAI or Anthropic key is still honoured if set; NaraRouter takes precedence
+- **AI:** [NaraRouter](https://router.bynara.id/docs) through `api/invoke-llm.js`, with the key on the server and the model alias chosen in the app from `api/models.js`. The default alias is `agnes-2.5-flash` — the model the analysis, drafting, and review prompts are tuned around
 - **Hosting:** Vercel (static frontend plus the serverless `api/*` functions)
+- **Local AI (optional, last resort):** [Ollama](https://ollama.com) can run a model on your own computer when `LLM_PROVIDER=ollama` is set (never chosen automatically; see DEPLOYMENT.md, Part 2.7). It works — reasoning models such as `qwen3:8b` are used at full depth — but every model is a multi-gigabyte download that stays on disk, and a loaded model reserves gigabytes of memory on every call. That footprint is what once filled a machine and broke the app, so the supported path is NaraRouter; see the warning at the top of [LOCAL_SETUP.md](./LOCAL_SETUP.md) before opting in
+- **Other providers (optional):** a Gemini, Groq, OpenRouter, OpenAI or Anthropic key is still honoured if set; NaraRouter takes precedence
 
 The app originally ran on Base44. A compatibility layer (`src/api/base44Client.js`)
 keeps every page's `base44.*` calls working unchanged on top of Supabase.
@@ -31,12 +31,14 @@ npm run dev            # no configuration needed -> Demo mode (browser-only data
 
 Atlas needs **Node.js 22.13 or newer** (pdf.js 6, which reads PDFs, requires it).
 
-To run the AI on your own computer instead of a hosted provider, follow
-**[LOCAL_SETUP.md](./LOCAL_SETUP.md)**: clone, `npm install`, three lines in
-`.env.local`, `npm run dev`. It uses [Ollama](https://ollama.com) with a
-reasoning model (`qwen3:8b`) and needs no API key.
+The AI runs on **NaraRouter**, reached through the deployment's own server
+function — follow **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the key, the model
+choice (`agnes-2.5-flash` by default), Supabase, and Vercel. There is nothing to
+download: the hosted path needs one API key and no local model.
 
-Atlas itself does not impose an AI request, token, or daily quota — your NaraRouter plan does, and Atlas surfaces the provider's real 429 rather than working around it. Follow **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the key, the model choice, Supabase, and Vercel setup. Without a key the app runs in clearly labeled Demo mode, where every page works and no AI output is persisted as if it were real.
+Atlas itself does not impose an AI request, token, or daily quota — your NaraRouter plan does, and Atlas surfaces the provider's real 429 rather than working around it. Without a key the app runs in clearly labeled Demo mode, where every page works and no AI output is persisted as if it were real.
+
+> **About running the AI on your own computer.** [LOCAL_SETUP.md](./LOCAL_SETUP.md) still exists for machines that deliberately want a local model (Ollama, opt-in via `LLM_PROVIDER=ollama`). Read its warning first: each model is a multi-gigabyte download that stays on disk until you delete it, and a loaded model plus its context window can exhaust a machine's disk and memory. It is not needed for Atlas — NaraRouter does the same work with no downloads — and it cannot run on Vercel.
 
 ## Scripts
 

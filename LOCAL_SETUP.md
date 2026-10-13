@@ -1,5 +1,17 @@
 # Running Atlas on your own computer, with Ollama and `qwen3:8b`
 
+> **⚠️ Read this first — this is the optional path, not the recommended one.**
+> Atlas is built and tested around **NaraRouter on Vercel + Supabase** (see
+> [DEPLOYMENT.md](./DEPLOYMENT.md)): that path needs one API key and **no
+> downloads**. Local hosting with Ollama is opt-in (`LLM_PROVIDER=ollama`) and
+> costs real resources — every `ollama pull` is a multi-gigabyte download that
+> stays on this machine's disk until you delete it (`ollama rm <model>`), and a
+> loaded model plus its context window reserves gigabytes of memory on every
+> call. Filling a disk with models once broke Atlas on a machine we used; if you
+> only want to *use* Atlas, use NaraRouter instead of this guide. If you do want
+> a local model anyway, pull **only the one model you will use**, and delete it
+> when you are done (`ollama rm qwen3:8b`, then uninstall Ollama).
+
 A step-by-step guide from an empty folder to a working local Atlas whose AI runs
 entirely on your machine — no API key, no account, no provider quota, and no
 essay or profile leaving the computer.

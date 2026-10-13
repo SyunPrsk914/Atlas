@@ -122,7 +122,7 @@ This is a two-location setup:
 
 ## Part 2 — NaraRouter (the AI provider)
 
-Atlas talks to exactly one AI provider. There is no second code path to configure, no local server to install, and no browser origin to whitelist: the key lives on the server, the browser calls `/api/invoke-llm`, and every status message, error and setting in the app describes NaraRouter.
+Atlas's AI runs on NaraRouter. The key lives on the server, the browser calls `/api/invoke-llm`, and every status message, error and setting in the app describes that path: nothing about the key ever reaches the browser, and there is no browser origin to whitelist. (Optional alternative keys and an opt-in local Ollama exist for edge cases — see “Other providers” and §2.7 — but NaraRouter on Vercel + Supabase is the path Atlas is built and tested around.)
 
 ### 2.1 Get a key
 
@@ -136,7 +136,7 @@ In **Vercel → Project → Settings → Environment Variables**:
 ```dotenv
 LLM_PROVIDER=nararouter
 NARAROUTER_API_KEY=sk-nry-your-secret-key
-NARAROUTER_MODEL=agnes-3-flash
+NARAROUTER_MODEL=agnes-2.5-flash
 # Optional; this is already the default:
 NARAROUTER_BASE_URL=https://router.bynara.id/v1
 ```
@@ -158,7 +158,7 @@ NaraRouter's authenticated `/v1/models` returns exactly the aliases your own pla
     -H "Authorization: Bearer $NARAROUTER_API_KEY"
   ```
 
-Atlas's shipped default alias is `agnes-3-flash`. Public free-plan data has also listed `agnes-2.5-flash`, `exo-stealh`, `jev`, `laguna-s-2.1`, `ling-3.0-flash-fin-free`, `nemotron-3-super-free`, `nemotron-3-ultra-free` and `nemotron-3.5-lightning-free`; treat your own `/v1/models` result as authoritative, because aliases and entitlements change. If a chosen alias turns out not to be entitled, the server falls back to the default model for that call and reports what happened in `meta` rather than failing the action.
+Atlas's shipped default alias is `agnes-2.5-flash` — the alias its analysis, drafting, and review prompts are tuned around. Public free-plan data has also listed `agnes-3-flash`, `exo-stealh`, `jev`, `laguna-s-2.1`, `ling-3.0-flash-fin-free`, `nemotron-3-super-free`, `nemotron-3-ultra-free` and `nemotron-3.5-lightning-free`; treat your own `/v1/models` result as authoritative, because aliases and entitlements change. If a chosen alias turns out not to be entitled, the server falls back to the default model for that call and reports what happened in `meta` rather than failing the action.
 
 Optional direct key check (this sends a test prompt to NaraRouter, not through Atlas):
 
@@ -166,7 +166,7 @@ Optional direct key check (this sends a test prompt to NaraRouter, not through A
 curl -sS https://router.bynara.id/v1/chat/completions \
   -H "Authorization: Bearer $NARAROUTER_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"agnes-3-flash","messages":[{"role":"user","content":"Reply with OK."}]}'
+  -d '{"model":"agnes-2.5-flash","messages":[{"role":"user","content":"Reply with OK."}]}'
 ```
 
 ### 2.4 Confirm from inside Atlas
@@ -194,7 +194,7 @@ NaraRouter is the supported path. These other keys are still honoured by `/api/i
 | Provider | Server environment variable | Optional model/base URL settings |
 |---|---|---|
 | Gemini | `GEMINI_API_KEY` | `GEMINI_MODEL` (default `gemini-flash-latest`) |
-| NaraRouter | `NARAROUTER_API_KEY` | `NARAROUTER_MODEL` (default `agnes-3-flash`), optional `NARAROUTER_BASE_URL` |
+| NaraRouter | `NARAROUTER_API_KEY` | `NARAROUTER_MODEL` (default `agnes-2.5-flash`), optional `NARAROUTER_BASE_URL` |
 | Groq | `GROQ_API_KEY` | `GROQ_MODEL`, optional `GROQ_BASE_URL` |
 | OpenRouter | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` (default `openrouter/auto`), optional `OPENROUTER_BASE_URL` |
 | OpenAI | `OPENAI_API_KEY` | `OPENAI_MODEL`, optional `OPENAI_BASE_URL` |
@@ -210,7 +210,7 @@ NaraRouter exposes an OpenAI Chat Completions-compatible endpoint. Atlas connect
    ```dotenv
    LLM_PROVIDER=nararouter
    NARAROUTER_API_KEY=sk-nry-your-secret-key
-   NARAROUTER_MODEL=agnes-3-flash
+   NARAROUTER_MODEL=agnes-2.5-flash
    # Optional; this is already the default:
    NARAROUTER_BASE_URL=https://router.bynara.id/v1
    ```
@@ -224,14 +224,14 @@ NaraRouter exposes an OpenAI Chat Completions-compatible endpoint. Atlas connect
      -H "Authorization: Bearer $NARAROUTER_API_KEY"
    ```
 
-   The current public Free-plan data lists `agnes-3-flash` (the Atlas default), along with `agnes-2.5-flash`, `exo-stealh`, `jev`, `laguna-s-2.1`, `ling-3.0-flash-fin-free`, `ling-3.0-flash-sante-free`, `nemotron-3-super-free`, `nemotron-3-ultra-free`, and `nemotron-3.5-lightning-free`. Use your key's `/v1/models` result as the final authority; model access and aliases can change. The NaraRouter homepage also demonstrates `auto/bynara`, but the explicit Free-plan alias avoids assuming that an automatic route is included in your account.
+   The current public Free-plan data lists `agnes-2.5-flash` (the Atlas default), along with `agnes-3-flash`, `exo-stealh`, `jev`, `laguna-s-2.1`, `ling-3.0-flash-fin-free`, `ling-3.0-flash-sante-free`, `nemotron-3-super-free`, `nemotron-3-ultra-free`, and `nemotron-3.5-lightning-free`. Use your key's `/v1/models` result as the final authority; model access and aliases can change. The NaraRouter homepage also demonstrates `auto/bynara`, but the explicit Free-plan alias avoids assuming that an automatic route is included in your account.
 5. Optional direct key check (this sends a test prompt to NaraRouter, not through Atlas):
 
    ```bash
    curl -sS https://router.bynara.id/v1/chat/completions \
      -H "Authorization: Bearer $NARAROUTER_API_KEY" \
      -H "Content-Type: application/json" \
-     -d '{"model":"agnes-3-flash","messages":[{"role":"user","content":"Reply with OK."}]}'
+     -d '{"model":"agnes-2.5-flash","messages":[{"role":"user","content":"Reply with OK."}]}'
    ```
 
 **Free-tier limits are NaraRouter's, not Atlas's.** As checked on 9 October 2026, NaraRouter's live public `/api/plans` and pricing page report **7,000,000 tokens/day** and **15 requests/minute** for Free. Its developer-docs quota table still shows a **5,000,000-token base-class** figure. Treat NaraRouter's account dashboard/live plan data as authoritative for your quota, and authenticated `/v1/models` as authoritative for aliases your key can use. Nara also documents concurrency/model-tier limits; its actual HTTP 429/403 errors are shown rather than retried or converted to success. The service's plans, included models, and quota can change.
@@ -251,6 +251,8 @@ Google Search grounding is only requested for an explicitly selected Gemini prov
 ### 2.7 Local AI with Ollama (optional, runs on your computer)
 
 Ollama runs an open model on your own machine. It is **opt-in**: Atlas uses it only when the server is set to `LLM_PROVIDER=ollama`, and it never picks it automatically. NaraRouter stays the default.
+
+**Know the footprint before you start.** Every `ollama pull` is a multi-gigabyte download that stays on this machine's disk until you delete it (`ollama rm <model>`), and a loaded model plus its context window reserves gigabytes of RAM/VRAM on every call. Local hosting is what filled a machine's disk and broke the app for us once — which is exactly why Atlas's supported path is NaraRouter on Vercel + Supabase, with no downloads at all. Choose Ollama only if you deliberately want that footprint; if you are just trying to use Atlas, stop here and go back to Part 2.
 
 For a full, beginner-safe walkthrough — GitHub Desktop, Node, Ollama, `qwen3:8b`, first run, and the checks to run when something is wrong — read **[LOCAL_SETUP.md](./LOCAL_SETUP.md)**. This section is the reference.
 
@@ -365,7 +367,7 @@ npm run dev                  # http://localhost:5173
 - Without Supabase environment values the app uses its existing browser-only Demo backend.
 - Without a selected AI model, AI buttons produce clearly labeled **Demo output**.
 - Node.js 22.13 or newer is required (pdf.js 6 needs it when a PDF is read).
-- To use real AI in local development, put `LLM_PROVIDER` and `NARAROUTER_API_KEY` in `.env.local` (Part 2) and restart `npm run dev`. For a free local model instead, set `LLM_PROVIDER=ollama` (Part 2.7). The Vite dev server serves the same `api/*` handlers Vercel runs, so the browser never talks to NaraRouter directly and the key never reaches the page.
+- To use real AI in local development, put `LLM_PROVIDER=nararouter` and `NARAROUTER_API_KEY` in `.env.local` (Part 2) and restart `npm run dev`. The Vite dev server serves the same `api/*` handlers Vercel runs, so the browser never talks to NaraRouter directly and the key never reaches the page. (An opt-in local Ollama also exists for machines that deliberately accept its multi-gigabyte footprint — Part 2.7.)
 - `/api/invoke-llm` remains only for the optional hosted path. Its API keys stay server-side; hosted-provider limits still apply.
 - University Research needs an official public admissions URL and page text. Atlas fetches the page from the browser without cookies. If the site blocks CORS or redirects to login, Atlas says so and lets the user paste public text; it does not proxy around the block or scrape behind a login.
 

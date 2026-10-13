@@ -28,7 +28,7 @@ function setupHint(provider) {
   if (provider === 'ollama') {
     return 'Set LLM_PROVIDER=ollama in .env.local, start Ollama on this computer, and press Re-check in AI setup (see DEPLOYMENT.md).';
   }
-  return 'Set NARAROUTER_API_KEY on the deployment (see DEPLOYMENT.md), or set LLM_PROVIDER=ollama to use a local Ollama.';
+  return 'Set NARAROUTER_API_KEY on the deployment (Vercel → Environment Variables, then redeploy; see DEPLOYMENT.md).';
 }
 
 /**
