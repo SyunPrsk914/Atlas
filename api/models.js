@@ -9,6 +9,10 @@
 
 import { resolveSupabaseConfig } from './supabaseConfig.js';
 import { ollamaConfig, describeOllamaNetworkError } from './ollamaConfig.js';
+import { describeOllamaModel } from './ollamaReasoning.js';
+
+/** How many local models are asked whether they reason, at most. */
+const MAX_REASONING_PROBES = 12;
 
 function send(res, status, payload) {
   res.statusCode = status;
@@ -56,6 +60,10 @@ function defaultModelFor(provider) {
 /**
  * Models already pulled into the local Ollama (`GET /api/tags`). Ollama needs
  * no key; the answer is the list of models on this computer, nothing else.
+ *
+ * Each model is also asked (through its own local manifest) whether it is a
+ * reasoning model, so the picker can say which of them think before answering
+ * — the difference between a shallow draft and a deep one on this machine.
  */
 async function listOllamaModels(res, configured) {
   const cfg = ollamaConfig(process.env);
@@ -64,9 +72,10 @@ async function listOllamaModels(res, configured) {
     provider: 'ollama',
     default_model: cfg.model,
     listable: true,
+    reasoning_requested: cfg.think === null ? 'model default' : String(cfg.think),
   };
   if (cfg.problem) {
-    send(res, 200, { ok: false, ...base, models: [], message: cfg.problem });
+    send(res, 200, { ok: false, ...base, models: [], thinking_models: [], message: cfg.problem });
     return;
   }
   try {
@@ -76,7 +85,7 @@ async function listOllamaModels(res, configured) {
     });
     if (!response.ok) {
       send(res, 200, {
-        ok: false, ...base, models: [],
+        ok: false, ...base, models: [], thinking_models: [],
         message: `Ollama answered HTTP ${response.status} at ${cfg.baseUrl}. Atlas will keep using ${cfg.model}.`,
       });
       return;
@@ -86,15 +95,23 @@ async function listOllamaModels(res, configured) {
       .map((row) => row?.model || row?.name || '')
       .filter(Boolean)
       .sort();
+    // A local manifest read per model, in parallel and bounded: cheap, but a
+    // machine can have a dozen models and this must not hang the setup dialog.
+    const probed = await Promise.all(
+      models.slice(0, MAX_REASONING_PROBES).map((name) => describeOllamaModel(cfg.baseUrl, name)),
+    );
+    const thinkingModels = probed
+      .map((info, index) => (info?.support?.supported === true ? models[index] : null))
+      .filter(Boolean);
     send(res, 200, {
-      ok: true, ...base, models,
+      ok: true, ...base, models, thinking_models: thinkingModels,
       message: models.length
-        ? `${models.length} model(s) installed in Ollama on this computer.`
+        ? `${models.length} model(s) installed in Ollama on this computer.${thinkingModels.length ? ` ${thinkingModels.length} of them reason before answering; Atlas asks them to.` : ''}`
         : `Ollama is running but has no models yet. Run \`ollama pull ${cfg.model}\` in a terminal.`,
     });
   } catch (error) {
     send(res, 200, {
-      ok: false, ...base, models: [],
+      ok: false, ...base, models: [], thinking_models: [],
       message: `Ollama is not reachable at ${cfg.baseUrl} (${describeOllamaNetworkError(error)}). Start Ollama on this computer, then press Re-check.`,
     });
   }

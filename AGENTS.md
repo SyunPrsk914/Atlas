@@ -20,9 +20,11 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - `api/invoke-llm.js`: serverless AI endpoint — NaraRouter first, then optional
   Ollama (explicit only), Gemini/Groq/OpenRouter/OpenAI/Anthropic adapters.
   `api/models.js` proxies the provider's authenticated model list (for Ollama:
-  the local `/api/tags`) so the app can offer only real models. `api/ollamaConfig.js`
-  holds the Ollama settings; `scripts/verify-ollama.mjs` tests the whole path
-  against a mock Ollama.
+  the local `/api/tags`, plus which models reason) so the app can offer only real
+  models. `api/ollamaConfig.js` holds the Ollama settings, `api/ollamaChat.js`
+  the streamed call to `/api/chat`, and `api/ollamaReasoning.js` the reasoning
+  ("thinking") probe and trace handling; `scripts/verify-ollama.mjs` tests the
+  whole path against a mock Ollama.
 - `src/api/aiProvider.js`: AI mode (hosted or demo), the remembered model alias,
   and the FIFO queue that keeps calls one at a time.
 - `src/lib/schoolFit.js`: the eleven-section shape of a university research
@@ -69,6 +71,26 @@ Vercel + Supabase deployment, environment variables, and key locations.
   model, a silent provider fallback, or a third provider without the same rules.
   Demo mode is the only fallback and it must keep working with obvious
   placeholders that are never persisted as real.
+- Ollama reasoning models (`qwen3:8b`) are used at full depth, and four rules
+  keep that true — do not undo one of them to simplify a call:
+  1. `think` is sent only after `api/ollamaReasoning.js` has read the model's
+     own manifest; a model that has no reasoning control never receives it
+     (Ollama answers 400), and a model that refuses it is retried once without
+     it. Atlas asks explicitly, so a global `/set nothink` cannot quietly remove
+     the depth.
+  2. The trace lives in `message.thinking` and never becomes the answer. It is
+     stripped from the answer, counted in `meta.reasoning_chars`, and used only
+     to recover a JSON answer a model wrote there — which is then reported as
+     recovered, never passed off as normal.
+  3. `num_predict` is the answer cap **plus** `OLLAMA_THINK_BUDGET` (or `-1`
+     when no cap was asked for): Ollama counts reasoning and answer against one
+     budget, so an answer-sized cap alone produces an empty answer.
+  4. Sampling follows the model's own published thinking-mode guidance
+     (temperature floor 0.6, top_p 0.95, top_k 20 — Qwen3 and DeepSeek-R1 both
+     say so, and both say not to decode greedily). A change to a caller's
+     temperature is recorded in `meta.sampling.raised_from`, never silent.
+  The call is streamed for the same reason: Node's fetch would abort a
+  generation whose headers take over 300 seconds, and a deep local run does.
 - Every status message, error title and setup step names the provider the
   server actually reports (`/api/status`), never a hard-coded one. Use
   `providerLabel()` and the `setupHint()` helper in `src/lib/ai.js`.
