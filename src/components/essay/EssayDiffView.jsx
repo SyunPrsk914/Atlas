@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
-  AlertTriangle, Check, CornerUpLeft, Eye, EyeOff, FileDiff, ShieldCheck,
+  AlertTriangle, Check, CornerUpLeft, Eye, EyeOff, FileDiff, ShieldCheck, Target, Wand2,
 } from 'lucide-react';
 import { isAggressiveRewrite } from '@/lib/textDiff';
 import { formatLimit } from '@/lib/essayScope';
@@ -26,9 +26,10 @@ function Stat({ label, value, tone = '' }) {
  * one-click restore of the version that was on the page before the edit.
  *
  * @param {object} revision { before, after, ops, stats, changes, notes,
- *   preservedEstimate, why, protectedItems, gaps, at, unit }
+ *   preservedEstimate, why, protectedItems, gaps, at, unit, unaddressed,
+ *   resolvedPhrases, refused, unaddressedNote }
  */
-export default function EssayDiffView({ revision, onKeep, onRestore, restoring = false }) {
+export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemaining, restoring = false, disabled = false }) {
   const [showRemoved, setShowRemoved] = useState(true);
 
   if (!revision || !revision.ops?.length) return null;
@@ -37,6 +38,12 @@ export default function EssayDiffView({ revision, onKeep, onRestore, restoring =
   const words = formatLimit(unit);
   const rewritten = isAggressiveRewrite(stats);
   const changes = (revision.changes || []).filter((change) => change && (change.original || change.revised));
+  // Whether the edit answered the review. Atlas measures this itself: a change
+  // log written by the same model that made the edit is a claim, while a flagged
+  // phrase still sitting in the text is a fact.
+  const unaddressed = (revision.unaddressed || []).filter(Boolean);
+  const resolved = (revision.resolvedPhrases || []).filter(Boolean);
+  const refused = (revision.refused || []).filter((item) => item && (item.phrase || item.reason));
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -93,6 +100,71 @@ export default function EssayDiffView({ revision, onKeep, onRestore, restoring =
             </div>
           </div>
         )}
+
+        {unaddressed.length > 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <div className="flex items-start gap-2.5">
+              <Target className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="flex-1 text-xs text-amber-900 leading-relaxed">
+                <p className="font-medium">
+                  {unaddressed.length} phrase{unaddressed.length === 1 ? '' : 's'} the review objected to {unaddressed.length === 1 ? 'is' : 'are'} still in your draft
+                </p>
+                <ul className="mt-1.5 space-y-1">
+                  {unaddressed.map((phrase, index) => (
+                    <li key={index} className="font-mono text-[11px] bg-white/70 border border-amber-200 rounded px-1.5 py-0.5 break-words">“{phrase}”</li>
+                  ))}
+                </ul>
+                <p className="mt-1.5 text-[11px] text-amber-800/90">
+                  The editor may still have improved the essay — but it did not do the job it was given, so the score has no reason to rise.
+                </p>
+                {resolved.length > 0 && (
+                  <p className="mt-1 text-[11px] text-amber-800/80">{resolved.length} of the review's flagged phrase{resolved.length === 1 ? ' is' : 's are'} already gone.</p>
+                )}
+              </div>
+              {onFixRemaining && (
+                <Button size="sm" onClick={onFixRemaining} disabled={disabled} className="shrink-0">
+                  <Wand2 className="w-3.5 h-3.5 mr-1.5" />
+                  Fix what is still flagged
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {revision.scoreAfter != null && (
+          <div className={`flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2 ${revision.scoreDelta < 0
+            ? 'border-red-200 bg-red-50 text-red-800'
+            : 'border-green-200 bg-green-50 text-green-800'}`}>
+            <span className="font-medium">
+              Re-scored on the same rubric: {revision.scoreBefore ?? '—'} → {revision.scoreAfter}/10
+              {revision.scoreDelta != null && revision.scoreDelta !== 0
+                ? ` (${revision.scoreDelta > 0 ? '+' : ''}${revision.scoreDelta})` : ''}
+            </span>
+            <span className="text-[11px] opacity-80">
+              {revision.scoreDelta < 0
+                ? 'The revision scored lower. Restore your version, or fix what is still flagged below.'
+                : 'Measured by Atlas on the text now in the editor, not by the editor itself.'}
+            </span>
+          </div>
+        )}
+
+        {unaddressed.length === 0 && resolved.length > 0 && (
+          <p className="text-[11px] text-green-700 flex items-start gap-1.5">
+            <Check className="w-3.5 h-3.5 mt-px shrink-0" />
+            Every phrase the review objected to is now out of the draft ({resolved.length} changed or removed), so this edit answered the review rather than re-polishing around it.
+          </p>
+        )}
+
+        {refused.length > 0 && (
+          <div className="text-[11px] text-foreground/50 leading-relaxed">
+            <p className="font-medium text-foreground/60">Left in on purpose, by the editor:</p>
+            <ul className="mt-1 space-y-0.5">
+              {refused.slice(0, 8).map((item, index) => (
+                <li key={index}>“{item.phrase || ''}”{item.reason ? ` — ${item.reason}` : ''}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       <div className="px-5 py-4 max-h-[28rem] overflow-y-auto bg-background/60">
@@ -121,6 +193,9 @@ export default function EssayDiffView({ revision, onKeep, onRestore, restoring =
 
       {(revision.why || changes.length > 0 || revision.protectedItems?.length > 0 || revision.gaps?.length > 0) && (
         <div className="px-5 py-4 border-t border-border space-y-4">
+          {revision.summary && (
+            <p className="text-sm text-foreground/70 leading-relaxed">{revision.summary}</p>
+          )}
           {revision.why && (
             <div>
               <h4 className="text-xs font-medium text-foreground/50 mb-1">Why the editor says this scores higher</h4>

@@ -22,6 +22,8 @@ import {
   AMBITION_RULES, ESSAY_REVIEW_DIMENSIONS, SCORE_ANCHORS, craftBrief, schoolVoiceFor,
 } from './essayCraft';
 import { buildFitBrief } from './schoolFit';
+import { interpretRoot } from './essayRoot';
+import { extractFlaggedPhrases } from './essayEditCheck';
 
 /**
  * Sampling temperature per action.
@@ -103,15 +105,47 @@ export function rootBrief(essay) {
   if (!root) {
     return `APPLICANT'S REQUIRED ROOT / DIRECTION:\nNo root has been entered yet. Do not silently select a random activity just because it appears in the materials. Use only details that clearly serve this prompt, and put any missing personal decision or detail in gaps_for_applicant.`;
   }
+  // Atlas reads the direction as an instruction first, so the model is told what
+  // Atlas will hold it to, rather than discovering it in the feedback afterwards.
+  const reading = interpretRoot(root);
+  const shape = reading.chooseOne
+    ? `Atlas has classified this direction as CHOOSE-ONE: ${reading.alternatives.length || 'several'} options are listed and exactly ONE of them may carry the essay.`
+    : reading.includeAll
+      ? `Atlas has classified this direction as INCLUDE-ALL: every listed option is a requirement.`
+      : reading.alternatives.length >= 2
+        ? `Atlas reads ${reading.alternatives.length} options here with no instruction to include all of them, so ONE must be chosen as the through-line.`
+        : `Atlas reads this as a single direction with no list of alternatives.`;
+  const options = reading.alternatives.length
+    ? `\nOptions found in the direction: ${reading.alternatives.map((item) => `"${item.label}"`).join(', ')}.`
+    : '';
+  const rules = reading.constraints.length
+    ? `\nStated rules you must satisfy${reading.chooseOne ? ' while narrowing to one option' : ''}: ${reading.constraints.map((item) => `"${item.text}" (${item.polarity})`).join('; ')}.`
+    : '';
   return `APPLICANT'S REQUIRED ROOT / DIRECTION (hard constraint):
 ${root}
 
 Start from this direction. Do not swap in a different activity, hobby, or achievement merely because it is more convenient in the materials. Use the profile, deep material readings, guidance, and craft patterns to expand, verify, complicate, and structure this root. If a necessary concrete detail is not available, leave a clear gap for the applicant rather than inventing one.
 
-INTERPRET THE APPLICANT'S INSTRUCTIONS, DO NOT TURN THEM INTO A CHECKLIST:
-- Read the meaning of the direction. Separate hard constraints ("must", "only", "never", "choose one") from examples, brainstormed options, and possible angles.
-- If the applicant says to choose one idea, choose ONE. If they list alternatives or several possible ideas without asking to include each, select the single idea that best answers this prompt and gives the essay one clear through-line; do not cram all of them into the draft.
-- Include multiple items only when the applicant explicitly makes each one a requirement and they genuinely fit the prompt. If the direction is contradictory or impossible to honor, do not guess: explain the conflict and leave a question in gaps_for_applicant.`;
+HOW ATLAS READS THIS DIRECTION — and what it will check your draft against:
+${shape}${options}${rules}
+- Read the meaning of the direction, not its word count. Separate hard constraints ("must", "only", "never", "choose one") from examples, brainstormed options, and possible angles.
+- A numbered or bulleted list inside the direction is a menu of possible subjects, not an outline to fill in. If the applicant says to choose one, choose ONE; one paragraph per option is the single most common way an essay like this fails, and it is why the draft will be rejected and sent back.
+- Include multiple items only when the applicant explicitly makes each one a requirement and they genuinely fit the prompt. If the direction is contradictory or impossible to honor, do not guess: explain the conflict and leave a question in gaps_for_applicant.
+- Say in essay_analysis which option you built on and why the others were dropped. Atlas checks that claim against the draft word by word.`;
+}
+
+/**
+ * The send-back text used when a finished draft ignored or overstuffed the root.
+ * It is a correction, not a fresh brief: everything else the model was told
+ * (craft, voice, length) still applies.
+ */
+export function buildRootCorrection(check) {
+  if (!check || !check.correction) return '';
+  return `ROOT CHECK — ATLAS REJECTED YOUR LAST ANSWER BEFORE SENDING IT BACK:
+${check.message}
+${check.correction}
+
+Keep everything that already worked: the voice, the evidence, the structure, and the length contract. Change the relationship between the essay and the applicant's direction, and nothing else about the job you were given.`;
 }
 
 /**
@@ -141,7 +175,20 @@ export function lengthBrief(essay, allEssays) {
 // ---------------------------------------------------------------------------
 // Generate
 // ---------------------------------------------------------------------------
-export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, applicantText = '', allEssays }) {
+/**
+ * @param {object} args
+ * @param {object} args.essay the draft row, including its `draft_anchor` root
+ * @param {object} [args.university]
+ * @param {string} [args.platform]
+ * @param {string} [args.profileText]
+ * @param {string} [args.knowledgeText]
+ * @param {string} [args.materialsText]
+ * @param {string} [args.applicantText]
+ * @param {Array} [args.allEssays]
+ * @param {string} [args.rootCorrection] the failed root check from ./essayRoot, when
+ *   this call is the send-back pass rather than the first attempt
+ */
+export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, applicantText = '', allEssays, rootCorrection = '' }) {
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
   const promptWarning = isAmbiguousCommonAppPrompt(essay?.prompt)
@@ -182,7 +229,7 @@ THE ESSAY TO WRITE:
 
 ${rootBrief(essay)}
 
-${buildLengthContractText(essay, allEssays)}
+${rootCorrection ? `${rootCorrection}\n\n` : ''}${buildLengthContractText(essay, allEssays)}
 
 ${LENGTH_CRAFT_RULES}
 
@@ -444,11 +491,23 @@ Use one ONLY where it fits the sentence you are already editing and does not cha
 
 export function buildPolishPrompt({
   essay, university, platform, reviewResult, knowledgeText, allEssays,
-  materialsText = '', profileText = '', applicantText = '',
+  materialsText = '', profileText = '', applicantText = '', focusPhrases = null,
 }) {
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
   const facts = lengthFacts(essay, allEssays);
+  // A review quotes the phrases it objects to. Atlas keeps that list and checks
+  // the answer against it, so "the edit improved the style" cannot pass as
+  // "the edit did the job" while every flagged line sits there untouched.
+  const flagged = focusPhrases && focusPhrases.length
+    ? focusPhrases
+    : extractFlaggedPhrases(reviewResult);
+  const phraseRules = flagged.length
+    ? `\nTHE FLAGGED PHRASES — EVERY ONE MUST BE RESOLVED:\n${flagged.map((phrase) => `- "${phrase}"`).join('\n')}\nFor each one, either change it, or list it under "unresolved_phrases" with the reason it should stay. Returning a draft that still contains a flagged phrase without naming it is a failed edit, whatever else improved. If a phrase is a strength the reviewer misread, say so in the reason — that is a legitimate answer and Atlas will show it.`
+    : '';
+  const focusBlock = focusPhrases && focusPhrases.length
+    ? `THIS IS A FOLLOW-UP EDIT. The draft below was already revised once, and these ${focusPhrases.length} phrase${focusPhrases.length === 1 ? '' : 's'} from the review are still in it verbatim. Do not restructure the essay, do not re-polish sentences that are already working, and do not change the story: resolve exactly these, plus anything they touch. Everything else must survive word for word.`
+    : '';
 
   return `You are a master essay editor working line by line on a draft that belongs to the applicant. Your job is to lift it to the level of an essay read aloud in committee — more human, more specific, better aligned to its prompt — without inventing anything and without taking the essay over.
 
@@ -470,7 +529,7 @@ An edit that makes the draft SHORTER than the target band is a failed edit, what
 
 ${LENGTH_CRAFT_RULES}
 
-${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check each one against your change log):
+${focusBlock ? `${focusBlock}\n\n` : ''}${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check each one against your change log):
 - Overall score last review: ${reviewResult.overall_score ?? '?'}/10
 - Weaknesses: ${(reviewResult.weaknesses || []).join(' | ') || 'none reported'}
 - Priority improvements: ${(reviewResult.priority_improvements || []).join(' | ') || 'none reported'}
@@ -496,7 +555,7 @@ Rules for the revision itself:
 - Deepen before you cut. Where a sentence is weak, first try to make it more concrete; only delete it if nothing in it is doing evidential work.
 ${limitUnitFor(essay) === 'characters' ? '- This limit is in CHARACTERS including spaces. Check your output length before returning it.' : '- Stay inside the word limit and inside the target band.'}
 
-${AMBITION_RULES}
+${AMBITION_RULES}${phraseRules}
 
 Return JSON only, with:
 - "revised_essay": the COMPLETE edited essay, from its first word to its last. Never a fragment, never only the changed paragraphs, never commentary, never markdown fences.
@@ -505,6 +564,7 @@ Return JSON only, with:
 - "protected": what you deliberately left alone and why (this is how the applicant knows you read the whole draft).
 - "why_it_scores_higher": two or three sentences naming which dimensions improved and what earned the increase.
 - "gaps_for_applicant": facts you needed but did not have.
+- "unresolved_phrases": each flagged phrase you deliberately left alone, as { "phrase", "reason" }. Empty only if you resolved every one.
 - "summary_of_edit": one sentence for the applicant.`;
 }
 
@@ -524,6 +584,13 @@ export const POLISH_SCHEMA = {
       },
     },
     preserved_estimate: { type: 'number' },
+    unresolved_phrases: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { phrase: { type: 'string' }, reason: { type: 'string' } },
+      },
+    },
     protected: { type: 'array', items: { type: 'string' } },
     why_it_scores_higher: { type: 'string' },
     gaps_for_applicant: { type: 'array', items: { type: 'string' } },

@@ -104,7 +104,7 @@ function describeMaterial(item, job, modelReady) {
         progress: job.parts ? (job.part / job.parts) * 100 : null,
       };
     }
-    if (job.state === 'waiting') return { tone: 'wait', text: 'Read. The analysis starts when a local model is connected (AI status in the sidebar).' };
+    if (job.state === 'waiting') return { tone: 'wait', text: 'Read. The analysis starts when a model is connected (AI status in the sidebar).' };
     if (job.state === 'failed') return failed(job.stage, job.message);
     if (job.state === 'done' && job.persisted === false) {
       return {
@@ -124,7 +124,7 @@ function describeMaterial(item, job, modelReady) {
     }
     return modelReady
       ? { tone: 'work', text: 'Read. The analysis is starting…', retry: true }
-      : { tone: 'wait', text: 'Read. The analysis starts when a local model is connected.' };
+      : { tone: 'wait', text: 'Read. The analysis starts when a model is connected.' };
   }
   if (item.document_state === 'outdated') {
     return { tone: 'work', text: 'The file or link changed. Reading the new version…', retry: true };
@@ -873,7 +873,7 @@ export default function Materials() {
 
       {!modelReady && shown.length > 0 && (
         <p className="text-xs text-foreground/50 rounded-lg border border-border bg-card px-3.5 py-2.5">
-          No local model is connected. Atlas still reads each document now; the analysis starts once you connect a model in AI setup (the AI status in the sidebar).
+          No model is connected. Atlas still reads each document now; the analysis starts once you connect a model in AI setup (the AI status in the sidebar).
         </p>
       )}
 

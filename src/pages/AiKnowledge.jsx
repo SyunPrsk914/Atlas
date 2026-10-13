@@ -14,10 +14,12 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Brain, Loader2, Pencil, Trash2, Plus, RotateCw, TriangleAlert, Info, X, Check, ChevronDown,
+  Search, Layers,
 } from 'lucide-react';
 import {
   KNOWLEDGE_KINDS, ABOUT_CATEGORIES, POINT_CATEGORIES, PATTERN_CATEGORIES, PATTERN_PLATFORMS,
   GUIDANCE_CATEGORIES, buildKnowledgeInputs, knowledgeStatus, rebuildApplicantKnowledge,
+  extendApplicantKnowledge, knowledgeCoverage, itemLooksCutOff,
 } from '@/lib/applicantKnowledge';
 
 const CATEGORIES = {
@@ -106,6 +108,12 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
           })()}
         </div>
         <p className="text-sm text-foreground/75 leading-relaxed">{item.text}</p>
+        {itemLooksCutOff(item.text) && (
+          <p className="text-[11px] text-amber-700 mt-1 flex items-start gap-1.5">
+            <TriangleAlert className="w-3 h-3 mt-0.5 shrink-0" />
+            This item ends mid-sentence. Atlas never finishes a sentence for you — edit it so the drafter gets the whole thought.
+          </p>
+        )}
         {(item.kind === 'evidence' || item.kind === 'guidance') && item.source_label && (
           <p className="text-[11px] text-foreground/40 mt-1">Source: {item.source_label}</p>
         )}
@@ -136,6 +144,8 @@ export default function AiKnowledge() {
   const [draft, setDraft] = useState(EMPTY_DRAFT);
   const [adding, setAdding] = useState(false);
   const [patternFilter, setPatternFilter] = useState('all');
+  const [extending, setExtending] = useState(false);
+  const [query, setQuery] = useState('');
   const modelReady = hasLiveModel();
 
   /** Reads the applicant's sources (profile, materials, drafts) and the saved items. */
@@ -197,7 +207,7 @@ export default function AiKnowledge() {
 
   const rebuildBlocker = (() => {
     if (tableMissing) return 'The database table is missing. Run supabase/schema.sql once, then come back.';
-    if (!modelReady) return 'Connect a local model in AI setup (AI status in the sidebar). Demo mode will not invent a profile.';
+    if (!modelReady) return 'Connect NaraRouter in AI setup (the AI status in the sidebar). Demo mode will not invent a profile.';
     if (!inputs || inputs.empty) return 'Add a profile, a material, or an essay draft first. Atlas builds this from what you have entered.';
     return '';
   })();
@@ -227,6 +237,44 @@ export default function AiKnowledge() {
       notifyAIError(e, 'Could not rebuild the knowledge base');
     } finally {
       setRebuilding(false);
+    }
+  };
+
+  /**
+   * “Go deeper”: read the same sources again and APPEND what the first pass
+   * missed. Nothing is removed, so a half-built portrait is never destroyed by
+   * trying to finish it. A portrait built from forty documents is meant to be
+   * long — this is the path that lets it grow without losing what is there.
+   */
+  const handleGoDeeper = async () => {
+    if (rebuildBlocker) return;
+    setExtending(true);
+    try {
+      const fresh = await readSources();
+      const outcome = await extendApplicantKnowledge({
+        inputs: fresh.inputs,
+        existingRows: fresh.items,
+        runAI,
+        isLive: isLiveOutcome,
+        createRows: (items) => base44.entities.ApplicantKnowledge.bulkCreate(items),
+        model: peekAIStatus()?.model || getModelOverride() || null,
+      });
+      await load();
+      const added = outcome.counts.about + outcome.counts.points + outcome.counts.patterns + outcome.counts.guidance;
+      if (added) {
+        toast.success(`${added} more item${added === 1 ? '' : 's'} saved`, {
+          description: `${outcome.counts.about} about you · ${outcome.counts.points} personal points · ${outcome.counts.patterns} patterns · ${outcome.counts.guidance} guidance. Nothing you already had was changed.`,
+        });
+      } else {
+        toast.message('Nothing new to add', { description: outcome.warnings[0] || 'The sources hold nothing the portrait does not already have.' });
+      }
+      for (const warning of outcome.warnings.filter((text) => !text.startsWith('The model found nothing'))) {
+        toast.warning('Partly done', { description: warning });
+      }
+    } catch (e) {
+      notifyAIError(e, 'Could not extend the knowledge base');
+    } finally {
+      setExtending(false);
     }
   };
 
@@ -318,8 +366,26 @@ export default function AiKnowledge() {
   const patterns = byKind('pattern').filter((r) => patternFilter === 'all' || r.platform === patternFilter);
   const sourceCounts = inputs?.counts || { profile: 0, materials: 0, samples: 0, guidance: 0, essays: 0 };
 
+  const matchesQuery = (item) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return `${item.text || ''} ${item.source_label || ''}`.toLowerCase().includes(q);
+  };
+  const coverage = knowledgeCoverage(rows, inputs);
+  // Which part of the "thin build" warning belongs to which section, so the
+  // notice sits next to the list it is about instead of in a banner nobody reads.
+  const THIN_LABEL = { brief: 'About you', evidence: 'Personal points', pattern: 'Patterns', guidance: 'Guidance' };
+  const thinFor = (kind) => coverage.thin.includes(THIN_LABEL[kind]);
+
   const renderSection = (kind, items, extra = null) => {
     const collapsed = !!collapsedSections[kind];
+    const visible = items.filter(matchesQuery);
+    const table = CATEGORIES[kind] || {};
+    const grouped = Object.keys(table)
+      .map((category) => ({ category, rows: visible.filter((item) => item.category === category) }))
+      .filter((group) => group.rows.length);
+    const uncategorised = visible.filter((item) => !table[item.category]);
+    if (uncategorised.length) grouped.push({ category: 'other', rows: uncategorised });
     return (
       <section className="rounded-xl border border-border bg-card overflow-hidden">
         <button
@@ -332,33 +398,53 @@ export default function AiKnowledge() {
             <h2 className="font-display text-lg font-semibold">{KNOWLEDGE_KINDS[kind].label}</h2>
             <p className="text-xs text-foreground/40">{KNOWLEDGE_KINDS[kind].hint}</p>
           </div>
-          <Badge variant="outline" className="shrink-0">{items.length} {items.length === 1 ? 'entry' : 'entries'}</Badge>
+          {thinFor(kind) && !collapsed && (
+            <Badge variant="outline" className="shrink-0 h-5 px-1.5 text-[10px] text-amber-700 border-amber-300 bg-amber-50">
+              thinner than your {coverage.sources} source{coverage.sources === 1 ? '' : 's'} support
+            </Badge>
+          )}
+          <Badge variant="outline" className="shrink-0">
+            {query.trim() ? `${visible.length} of ${items.length}` : `${items.length} ${items.length === 1 ? 'entry' : 'entries'}`}
+          </Badge>
           <ChevronDown className={`w-4 h-4 text-foreground/45 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
         </button>
         {!collapsed && (
-          <div className="border-t border-border p-4 pt-3 space-y-3">
+          <div className="border-t border-border p-4 pt-3 space-y-4">
             {extra}
             {items.length === 0 ? (
               <p className="text-sm text-foreground/35 border border-dashed border-border rounded-xl p-4">Nothing here yet.</p>
+            ) : visible.length === 0 ? (
+              <p className="text-sm text-foreground/35 border border-dashed border-border rounded-xl p-4">
+                No entry in this section matches “{query.trim()}”.
+              </p>
             ) : (
-              <ul className="space-y-2">
-                {items.map((item) => (
-                  <ItemRow
-                    key={item.id}
-                    item={item}
-                    universities={universities}
-                    essays={essays}
-                    showPlatform={kind === 'pattern'}
-                    editing={editingId === item.id}
-                    draft={draft}
-                    setDraft={setDraft}
-                    onEdit={() => startEdit(item)}
-                    onDelete={() => removeItem(item)}
-                    onSave={saveItem}
-                    onCancel={cancelEdit}
-                  />
-                ))}
-              </ul>
+              grouped.map((group) => (
+                <div key={group.category} className="space-y-2">
+                  <h3 className="text-[10px] uppercase tracking-wide text-foreground/35 flex items-center gap-1.5">
+                    <Layers className="w-3 h-3" />
+                    {table[group.category] || 'Other'}
+                    <span className="text-foreground/25">{group.rows.length}</span>
+                  </h3>
+                  <ul className="space-y-2">
+                    {group.rows.map((item) => (
+                      <ItemRow
+                        key={item.id}
+                        item={item}
+                        universities={universities}
+                        essays={essays}
+                        showPlatform={kind === 'pattern'}
+                        editing={editingId === item.id}
+                        draft={draft}
+                        setDraft={setDraft}
+                        onEdit={() => startEdit(item)}
+                        onDelete={() => removeItem(item)}
+                        onSave={saveItem}
+                        onCancel={cancelEdit}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              ))
             )}
           </div>
         )}
@@ -415,6 +501,22 @@ export default function AiKnowledge() {
             {status.built && (
               <p className="text-xs text-foreground/45">
                 {plural(status.counts.brief, 'item')} about you · {plural(status.counts.evidence, 'personal point')} · {plural(status.counts.pattern, 'pattern')} · {plural(status.counts.guidance, 'guidance item')}
+                {' · from '}{plural(coverage.sources, 'source')}
+                {` · about you: ${['personality', 'actions', 'mindset', 'goals'].map((key) => `${coverage.about[key] || 0} ${key}`).join(', ')}`}
+              </p>
+            )}
+            {coverage.thin.length > 0 && (
+              <p className="text-[11px] text-amber-700 flex items-start gap-1.5 mt-1 max-w-2xl">
+                <Info className="w-3.5 h-3.5 mt-px shrink-0" />
+                {coverage.thin.join(', ')} {coverage.thin.length === 1 ? 'is' : 'are'} thinner than these materials can support
+                {coverage.thin.includes('Patterns') ? ' for the samples you added' : ''}
+                {coverage.thin.includes('Guidance') ? ' for the guides and references you added' : ''}. Press “Go deeper” to append the rest — a rebuild rewrites, this only adds.
+              </p>
+            )}
+            {coverage.cutOff > 0 && (
+              <p className="text-[11px] text-red-700/80 flex items-start gap-1.5 mt-1">
+                <TriangleAlert className="w-3.5 h-3.5 mt-px shrink-0" />
+                {plural(coverage.cutOff, 'item')} {coverage.cutOff === 1 ? 'ends' : 'end'} mid-sentence and {coverage.cutOff === 1 ? 'is' : 'are'} marked below. Finish {coverage.cutOff === 1 ? 'it' : 'them'}: a drafter cannot use half a thought.
               </p>
             )}
             {status.stale && (
@@ -425,12 +527,25 @@ export default function AiKnowledge() {
             )}
           </div>
           <div className="flex flex-col items-end gap-1.5">
-            <Button onClick={handleRebuild} disabled={!!rebuildBlocker || rebuilding}>
-              {rebuilding ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RotateCw className="w-4 h-4 mr-2" />}
-              {rebuilding ? 'Reading your file…' : status.built ? 'Rebuild' : 'Build from my profile and materials'}
-            </Button>
+            <div className="flex items-center gap-2">
+              {status.built && (
+                <Button variant="outline" onClick={handleGoDeeper} disabled={!!rebuildBlocker || extending || rebuilding}>
+                  {extending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Plus className="w-4 h-4 mr-2" />}
+                  {extending ? 'Reading again…' : 'Go deeper'}
+                </Button>
+              )}
+              <Button onClick={handleRebuild} disabled={!!rebuildBlocker || rebuilding}>
+                {rebuilding ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RotateCw className="w-4 h-4 mr-2" />}
+                {rebuilding ? 'Reading your file…' : status.built ? 'Rebuild' : 'Build from my profile and materials'}
+              </Button>
+            </div>
             {rebuildBlocker && !rebuilding && (
               <p className="text-[11px] text-foreground/40 max-w-xs text-right">{rebuildBlocker}</p>
+            )}
+            {status.built && !rebuildBlocker && (
+              <p className="text-[11px] text-foreground/35 max-w-xs text-right">
+                “Go deeper” reads the same materials again and only adds what is missing. Nothing you have — or what Atlas already wrote — is removed.
+              </p>
             )}
           </div>
         </div>
@@ -438,6 +553,22 @@ export default function AiKnowledge() {
           A rebuild replaces only the items Atlas built before. Items you wrote are never removed by a rebuild, and if the AI returns
           nothing new, your current items stay as they are.
         </p>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 min-w-56 max-w-md">
+          <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-foreground/35" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search every item in the knowledge base"
+            className="pl-8"
+            aria-label="Search the AI knowledge base"
+          />
+        </div>
+        {query.trim() && (
+          <Button variant="ghost" size="sm" onClick={() => setQuery('')}>Clear</Button>
+        )}
       </div>
 
       {renderSection('brief', byKind('brief'))}

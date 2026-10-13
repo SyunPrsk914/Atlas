@@ -100,7 +100,7 @@ export default function ActivityAiPanel({
   const guard = (action) => {
     if (hasLiveModel()) return true;
     toast.error(`${action} needs a connected AI model`, {
-      description: 'Demo mode returns placeholder text, so Atlas will not suggest anything for your activities list with it. Connect a local model in AI setup.',
+      description: 'Demo mode returns placeholder text, so Atlas will not suggest anything for your activities list with it. Connect NaraRouter in AI setup.',
       duration: 9000,
     });
     return false;
@@ -628,7 +628,7 @@ export default function ActivityAiPanel({
       {busy && (
         <p className="text-[11px] text-foreground/40 flex items-center gap-1.5">
           <Loader2 className="w-3 h-3 animate-spin" />
-          Working. Local AI requests run one at a time, so other AI actions wait until this finishes.
+          Working. AI requests run one at a time through a shared queue, so other AI actions wait until this finishes.
         </p>
       )}
 

@@ -148,7 +148,7 @@ export default function ApplicationReview() {
   const runReview = async () => {
     if (!hasLiveModel()) {
       toast.error('The full review needs a connected AI model', {
-        description: 'Demo mode shows placeholder text, so nothing was reviewed or saved. Connect a local model in AI setup (AI status in the sidebar).',
+        description: 'Demo mode shows placeholder text, so nothing was reviewed or saved. Connect NaraRouter in AI setup (AI status in the sidebar).',
         duration: 9000,
       });
       return;
@@ -364,7 +364,7 @@ Return JSON only.`;
             {!modelReady && (
               <li className="text-sm text-foreground/60 flex gap-2">
                 <Circle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
-                No AI model is connected (demo mode). Connect a local model in AI setup, from the AI status in the sidebar, to run the review.
+                No AI model is connected (demo mode). Connect NaraRouter in AI setup, from the AI status in the sidebar, to run the review.
               </li>
             )}
           </ul>
@@ -559,7 +559,7 @@ Return JSON only.`;
           {reviewing ? 'Running holistic review…' : reviewResult ? 'Re-run full application review' : 'Run full application review'}
         </Button>
         {!modelReady && (
-          <p className="text-[11px] text-foreground/40">Demo mode: connect a local model in AI setup to run this review. Nothing is reviewed with placeholder text.</p>
+          <p className="text-[11px] text-foreground/40">Demo mode: connect NaraRouter in AI setup to run this review. Nothing is reviewed with placeholder text.</p>
         )}
         <div className="flex flex-col items-center gap-1">
           <p className="text-xs text-foreground/30">

@@ -23,6 +23,7 @@ import { fetchPublicAdmissionsPage, normalizePublicPageUrl } from '@/lib/researc
 import { buildProfileContext } from '@/lib/profileContext';
 import { getUniversityPlatform, PLATFORMS, universityNamesMatch, universityMatchKey } from '@/lib/essayScope';
 import { daysSince } from '@/lib/dates';
+import { previewClip } from '@/lib/textClip';
 
 // ---------------------------------------------------------------------------
 // Research prompt
@@ -134,7 +135,9 @@ function previewOf(markdown = '', max = 190) {
     .replace(/[*_`>#-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return plain.length > max ? `${plain.slice(0, max).trimEnd()}…` : plain;
+  // A word-boundary cut: a card that ended "…someone who de" read as a bug even
+  // when the full record underneath was complete.
+  return previewClip(plain, max);
 }
 
 const relativeTime = (iso) => {
@@ -282,7 +285,7 @@ export default function KnowledgeBase() {
     const mode = getAIMode();
     if (!hasLiveModel()) {
       toast.error('University research needs a connected AI model', {
-        description: 'Demo mode produces placeholder text, which Atlas does not save as research. Nothing was changed. Connect a local model in AI setup (AI status in the sidebar), then research again.',
+        description: 'Demo mode produces placeholder text, which Atlas does not save as research. Nothing was changed. Connect NaraRouter in AI setup (AI status in the sidebar), then research again.',
         duration: 9000,
       });
       return;
@@ -634,7 +637,7 @@ export default function KnowledgeBase() {
 
             <p className="text-xs text-foreground/40 flex items-start gap-1.5">
               <Clock className="w-3 h-3 mt-0.5 shrink-0" />
-              Local model speed depends on your computer. Queued calls run in order; hosted-provider quotas, if used, are set by that provider.
+              Response speed depends on the connected provider. Queued calls run in order, and any quota on that account is set by the provider.
             </p>
 
             {profile && (

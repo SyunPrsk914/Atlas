@@ -174,7 +174,7 @@ export default function Dashboard() {
         title: `Finish ${plural(materialSummary.open, 'material')}`,
         detail: materialSummary.modelReady
           ? 'Atlas reads and analyzes each material automatically when you open Materials.'
-          : 'Atlas reads each material automatically. The analysis starts when a local model is connected (AI status in the sidebar).',
+          : 'Atlas reads each material automatically. The analysis starts when a model is connected (AI status in the sidebar).',
         tone: 'normal',
       });
     }

@@ -339,11 +339,11 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 | A material says the file is too large | Over 30 MB | Upload a smaller copy, or split the document |
 | Old Word `.doc` file is refused | Only `.docx`, RTF, HTML, text and PDF are read | Save the file as `.docx` or PDF in Word or Google Docs |
 | Analysis says it did not finish | The provider returned an error or no usable answer | Open **AI setup** to re-check the key and the model, then retry; Atlas tries again the next time you open Materials |
-| A long material takes many minutes | Each 6,000-character part is one local-model call, and calls run one at a time | Wait for the progress bar on that material, or use a smaller model. Other AI actions resume when the analysis finishes |
+| A long material takes many minutes | Each 6,000-character part is one model call, and calls run one at a time through a shared queue | Wait for the progress bar on that material, or analyse a shorter document. Other AI actions resume when the analysis finishes |
 | AI Knowledge Base says the table is missing | `applicant_knowledge` has not been created yet | Re-run `supabase/schema.sql` (idempotent). Drafts and reviews work without it in the meantime |
 | Demo mode: a large upload fails with a storage error | Demo mode keeps files inside browser storage, which is limited (typically about 5 MB in total) | Use Supabase for real documents; Demo mode is for trying the app
 | AI call returns HTTP 429 | NaraRouter's plan limit for the day or the minute was reached | Atlas displays the real error. Wait for the window to reset, choose a lighter model alias, or upgrade the plan; no key rotation or quota bypass is attempted |
-| Local model returns invalid JSON | Model did not follow the existing response schema | Atlas retries once with a stricter JSON-only instruction; if still invalid, it reports the parse failure rather than substituting demo text |
+| The model returns invalid JSON | Model did not follow the existing response schema | Atlas retries once with a stricter JSON-only instruction; if still invalid, it reports the parse failure rather than substituting demo text |
 | Lists come back empty though data exists | RLS: rows belong to another user | Data is per-account by design (same as Base44). Log in with the same account that created it |
 | `filter({ university_name: "X" })` misses rows | Case/spacing differs | Equality match is exact (same as Base44) |
 | Uploads fail with 403 | Row not in `uploads` bucket or bucket missing | Re-run `supabase/schema.sql` (idempotent) — it (re)creates the bucket and policies |
@@ -351,7 +351,7 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 ## Part 7 — Costs, limits, and data safety (honest summary)
 
 - **Atlas AI limits:** Atlas does not add an AI request-per-minute, request-per-day, token, or daily budget. Calls are queued one at a time in order rather than rejected when another is running, so a page cannot fan out into the provider's rate limit.
-- **Document analysis:** a material is read up to 200,000 characters (about 30 to 40 pages); beyond that the text is cut and the cut is marked in the stored text. The whole text is analysed, in parts of about 6,000 characters, one local-model call per part (42 parts at most). Local requests run one at a time in click order, so a long analysis delays other AI actions until it finishes.
+- **Document analysis:** a material is read up to 200,000 characters (about 30 to 40 pages); beyond that the text is cut and the cut is marked in the stored text. The whole text is analysed, in parts of about 6,000 characters, one model call per part (42 parts at most). Requests run one at a time in click order through a shared queue, so a long analysis delays other AI actions until it finishes.
 - **Provider limits:** inference is performed by NaraRouter under your plan's token-per-day and requests-per-minute limits, and the context window depends on the alias you choose. Atlas reports the provider's real errors instead of converting a capped call into a successful-looking one.
 - **Hosted providers:** any hosted provider may cap free usage, throttle requests, charge fees, or return HTTP 429. Those are the provider's rules—not an unlimited service—and Atlas displays the real provider error without bypassing it.
 - **Vercel / Supabase:** their plans and operational limits still apply to hosting, database, auth, and storage; these are separate from an Atlas-imposed AI quota.

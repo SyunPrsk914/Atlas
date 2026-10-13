@@ -5,6 +5,8 @@
 // and the line-level annotation model so the Materials screen and the essay
 // pipeline agree on what a "finding" looks like.
 
+import { clipToBoundary } from './textClip';
+
 export const FINDING_KINDS = {
   strength: { label: 'Works', tone: 'positive' },
   issue: { label: 'Fix', tone: 'negative' },
@@ -137,7 +139,7 @@ export const ESSAY_ANALYSIS_SCHEMA = {
         voice_score: { type: 'number' },
       },
     },
-    // These legacy top-level fields are accepted so an older local model can
+    // These legacy top-level fields are accepted so an older model can
     // still be normalized; they are ignored for non-writing roles.
     overall_score: { type: 'number' },
     specificity_score: { type: 'number' },
@@ -390,7 +392,7 @@ export function mergeAnalysisParts(results, { fullText = '', analysisRole: reque
     return out;
   };
   // Each part's summary gets an equal share of one overall budget, so 42 parts still fit.
-  const summaryBudget = Math.max(150, Math.floor(8000 / Math.max(1, usable.length)));
+  const summaryBudget = Math.max(150, Math.floor(16000 / Math.max(1, usable.length)));
   const summaries = usable.map((u) => {
     const text = briefly(u.analysis.summary || '', summaryBudget);
     return text ? (usable.length > 1 ? `Part ${u.index + 1}: ${text}` : text) : '';
@@ -398,13 +400,19 @@ export function mergeAnalysisParts(results, { fullText = '', analysisRole: reque
   const aiFlags = usable.filter((u) => u.analysis.sounds_like_ai).length;
   const partsTotal = results.length;
 
-  const deepRead = summaries.join('\n').slice(0, 12000);
-  const significance = usable
+  // A merged reading can outgrow the storage cap on a 42-part document. The cut
+  // is made at a sentence end and announced, because a deep read that stops at
+  // "the applicant is someone who de" is worse than one that says where it ended.
+  const deepRead = clipToBoundary(summaries.join('\n'), 12000, {
+    marker: (dropped) => `\n[… ${dropped.toLocaleString()} further characters of the part-by-part reading are in the document's saved analysis.]`,
+  });
+  const significance = clipToBoundary(usable
     .map((u) => briefly(u.analysis.significance || '', summaryBudget))
     .filter(Boolean)
     .map((text, i) => usable.length > 1 ? `Part ${i + 1}: ${text}` : text)
-    .join('\n')
-    .slice(0, 9000);
+    .join('\n'), 9000, {
+    marker: (dropped) => `\n[… ${dropped.toLocaleString()} further characters of why it matters are in the saved analysis.]`,
+  });
 
   return {
     analysis_role: analysisRole,
