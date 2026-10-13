@@ -68,7 +68,7 @@ import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
 import ActivitiesEditor from '@/components/profile/ActivitiesEditor';
 import ActivityAiPanel from '@/components/profile/ActivityAiPanel';
 import AiStatusPill from '@/components/AiStatusPill';
-import AiSetupDialog from '@/components/AiSetupDialog';
+import AiSetupDialog, { OllamaReasoning } from '@/components/AiSetupDialog';
 import { assessLength } from '@/lib/essayLength';
 import { diffText, diffStats } from '@/lib/textDiff';
 
@@ -116,6 +116,39 @@ export const cases = {
   'AiStatusPill — first paint (checking)': () => <AiStatusPill />,
   'AiSetupDialog — open while the provider is read': () => <AiSetupDialog open onOpenChange={() => {}} onStatusChange={() => {}} />,
   'AiSetupDialog — closed': () => <AiSetupDialog open={false} onOpenChange={() => {}} />,
+  // The local-model reasoning panel, with the exact shape /api/status returns
+  // for a machine running qwen3:8b through Ollama.
+  'OllamaReasoning — reasoning model, reasoning on': () => (
+    <OllamaReasoning
+      status={{
+        provider: 'ollama', model: 'qwen3:8b', configured: true, message: '',
+        thinking: { supported: true, default_on: true, levels: [], requested: true, on: true, think_budget: 8192, source: 'model' },
+        context: { requested: 32768, model_max: 40960, clamped: false },
+        notes: [], timeout_ms: 1800000, keep_alive: '30m',
+      }}
+    />
+  ),
+  'OllamaReasoning — reasoning switched off by configuration': () => (
+    <OllamaReasoning
+      status={{
+        provider: 'ollama', model: 'qwen3:8b', configured: true, message: '',
+        thinking: { supported: true, default_on: true, levels: [], requested: false, on: false, think_budget: 8192, source: 'model' },
+        context: { requested: 16384, model_max: 40960, clamped: false },
+        notes: [], timeout_ms: 1800000,
+      }}
+    />
+  ),
+  'OllamaReasoning — plain model, and a window bigger than the model': () => (
+    <OllamaReasoning
+      status={{
+        provider: 'ollama', model: 'llama3.2', configured: true, message: '',
+        thinking: { supported: false, default_on: false, levels: [], requested: null, on: false, think_budget: 8192, source: 'model' },
+        context: { requested: 65536, model_max: 131072, clamped: true },
+        notes: ['llama3.2 has a 131072-token context, so OLLAMA_NUM_CTX=65536 is reduced to that.'],
+      }}
+    />
+  ),
+  'OllamaReasoning — the server has not answered yet': () => <OllamaReasoning status={null} />,
   'LengthMeter — under the band': () => <LengthMeter assessment={assessLength(words(480), personalStatement(''), [])} />,
   'LengthMeter — inside the band': () => <LengthMeter assessment={assessLength(words(620), personalStatement(''), [])} />,
   'LengthMeter — over the ceiling': () => <LengthMeter assessment={assessLength(words(700), personalStatement(''), [])} />,

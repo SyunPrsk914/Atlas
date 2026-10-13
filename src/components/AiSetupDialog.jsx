@@ -47,14 +47,14 @@ const OLLAMA_COPY = {
     </>
   ),
   notConnected: 'Ollama is selected but it is not reachable. Start Ollama on this computer, then press Re-check.',
-  modelHelpOk: 'These are the models installed in Ollama on this computer (the same list as `ollama list`).',
+  modelHelpOk: 'These are the models installed in Ollama on this computer (the same list as `ollama list`). A model marked “reasons first” writes a chain of thought before it answers, which is where the depth of an essay review or a research report comes from.',
   steps: [
     <>Install Ollama from <a className="underline inline-flex items-center gap-1" href="https://ollama.com/download" target="_blank" rel="noreferrer">ollama.com/download<ExternalLink className="h-3 w-3" /></a> and open it. It keeps running in the background.</>,
-    <>In a terminal run <code>ollama pull llama3.2</code> (or another model; bigger models need more memory).</>,
-    <>In <code>.env.local</code> (git-ignored) add <code>LLM_PROVIDER=ollama</code>. Optional: <code>OLLAMA_MODEL</code> (the model name) and <code>OLLAMA_NUM_CTX</code> (context size, default 16384).</>,
+    <>In a terminal run <code>ollama pull qwen3:8b</code> (a reasoning model — the recommended one; bigger models need more memory).</>,
+    <>In <code>.env.local</code> (git-ignored) add <code>LLM_PROVIDER=ollama</code> and <code>OLLAMA_MODEL=qwen3:8b</code>. Optional: <code>OLLAMA_NUM_CTX</code> (context window, default 16384; 32768 suits a reasoning model), <code>OLLAMA_THINK</code> (on | off | auto, default on), <code>OLLAMA_THINK_BUDGET</code> (output room for the reasoning trace, default 8192).</>,
     <>Restart <code>npm run dev</code>, press “Re-check” here, then choose Ollama.</>,
   ],
-  note: 'Runs on this computer: no key and no provider quota. Prompts go to your local Ollama, not to NaraRouter, unless you pick an Ollama cloud model. Speed depends on your hardware, so a long document can take many minutes. A prompt larger than the context window is refused with a message; Atlas never cuts it silently.',
+  note: 'Runs on this computer: no key and no provider quota. Prompts go to your local Ollama, not to NaraRouter, unless you pick an Ollama cloud model. A reasoning model is asked to think on every call, its trace is kept out of the answer, and its output room is enlarged to fit both — so an answer is never cut short by the thinking that produced it. Speed depends on your hardware, so a long document can take many minutes. A prompt larger than the context window is refused with a message; Atlas never cuts it silently.',
 };
 
 /** Copy for the provider the server reports. Unknown providers get neutral wording. */
@@ -70,6 +70,53 @@ function copyFor(provider) {
     modelHelpOk: 'This provider does not expose a model list Atlas can read, so the deployment default is used.',
     steps: [<>Set the provider&apos;s key on the deployment (see DEPLOYMENT.md), redeploy, then press “Re-check”.</>],
   };
+}
+
+const formatCount = (value) => (Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-US') : '');
+
+/**
+ * What the local model does with reasoning, read from the server's own probe of
+ * Ollama — never guessed here.
+ *
+ * This is the only place a local applicant can see whether the model they
+ * installed is actually being asked to think, so it states the request Atlas
+ * sends, what the model said it supports, and the two settings that decide the
+ * depth of an answer (the context window and the trace budget).
+ */
+export function OllamaReasoning({ status }) {
+  const thinking = status?.thinking;
+  if (!thinking) return null;
+  const model = status?.model || 'this model';
+  const context = status?.context || {};
+
+  let headline;
+  let detail;
+  if (thinking.supported === false) {
+    headline = `${model} has no reasoning mode`;
+    detail = 'Atlas asks nothing and uses the answer as written. A model marked “reasons first” (qwen3:8b, for example) writes a chain of thought before it answers, which is where the depth of a review or a research report comes from.';
+  } else if (thinking.on) {
+    headline = `Reasoning is on for ${model}`;
+    detail = `Atlas asks it to think on every call, keeps the trace out of the answer, and reserves ${formatCount(thinking.think_budget)} output tokens for it so the answer is never cut short by the thinking that produced it.`;
+  } else {
+    headline = `Reasoning is off for ${model}`;
+    detail = `OLLAMA_THINK is set to ${thinking.requested === null ? 'the model default' : String(thinking.requested)}, so answers come back faster and shallower. Set OLLAMA_THINK=on in .env.local and restart to restore the depth.`;
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3 text-[11px] text-foreground/70 space-y-1.5">
+      <p className="font-medium text-foreground/85">{headline}</p>
+      <p>{detail}</p>
+      <p className="text-foreground/55">
+        Context window {formatCount(context.requested) || 'unknown'} tokens
+        {context.model_max ? ` · this model's own limit is ${formatCount(context.model_max)}` : ''}
+        {context.clamped ? ' · Ollama will use the smaller number' : ''}
+        {status?.timeout_ms ? ` · Atlas waits up to ${Math.round(Number(status.timeout_ms) / 60000)} minutes for one answer` : ''}.
+      </p>
+      {(Array.isArray(status?.notes) ? status.notes : []).map((note) => (
+        <p key={note} className="text-amber-800">{note}</p>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -130,6 +177,7 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
   const isOllama = provider === 'ollama';
   const configured = !!status?.configured;
   const entitled = Array.isArray(modelList?.models) ? modelList.models : [];
+  const reasoningModels = Array.isArray(modelList?.thinking_models) ? modelList.thinking_models : [];
 
   const activate = async (mode) => {
     try {
@@ -224,7 +272,9 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
                       Deployment default{modelList?.default_model ? ` (${modelList.default_model})` : ''}
                     </SelectItem>
                     {entitled.map((alias) => (
-                      <SelectItem key={alias} value={alias}>{alias}</SelectItem>
+                      <SelectItem key={alias} value={alias}>
+                        {alias}{reasoningModels.includes(alias) ? ' · reasons first' : ''}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -233,6 +283,7 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
                     ? copy.modelHelpOk
                     : (modelList?.message || 'This provider does not expose a model list Atlas can read, so the deployment default is used.')}
                 </p>
+                {isOllama && <OllamaReasoning status={status} />}
               </div>
             )}
 

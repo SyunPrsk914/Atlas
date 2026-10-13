@@ -10,6 +10,7 @@
 
 import { resolveSupabaseConfig } from './supabaseConfig.js';
 import { ollamaConfig, describeOllamaNetworkError } from './ollamaConfig.js';
+import { describeOllamaModel, resolveThinkValue, thinkingIsOn } from './ollamaReasoning.js';
 
 function send(res, status, payload) {
   res.statusCode = status;
@@ -22,23 +23,73 @@ function send(res, status, payload) {
  * Ollama has no key to check, so "configured" means "a local Ollama answers".
  * The probe is a single GET to the local server, with a short timeout, and it
  * never reports the base URL's credentials (there are none).
+ *
+ * It also reads the configured model's manifest, so the pill can say whether
+ * the model reasons (qwen3:8b does) and whether the context window asked for is
+ * bigger than the model's own — both of which change the quality of an answer.
  */
 async function probeOllama() {
   const cfg = ollamaConfig(process.env);
-  if (cfg.problem) return { ok: false, message: cfg.problem, model: cfg.model };
+  if (cfg.problem) return { ok: false, message: cfg.problem, model: cfg.model, notes: cfg.warnings };
   try {
-    const response = await fetch(`${cfg.baseUrl}/api/tags`, { signal: AbortSignal.timeout(2000) });
+    const response = await fetch(`${cfg.baseUrl}/api/tags`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(2000),
+    });
     if (!response.ok) {
-      return { ok: false, model: cfg.model, message: `Ollama answered HTTP ${response.status} at ${cfg.baseUrl}. Check that it is the Ollama server.` };
+      return { ok: false, model: cfg.model, notes: cfg.warnings, message: `Ollama answered HTTP ${response.status} at ${cfg.baseUrl}. Check that it is the Ollama server.` };
     }
-    return { ok: true, model: cfg.model, message: '' };
   } catch (error) {
     return {
       ok: false,
       model: cfg.model,
+      notes: cfg.warnings,
       message: `Ollama is not running at ${cfg.baseUrl} (${describeOllamaNetworkError(error)}). Start Ollama on this computer, then press Re-check.`,
     };
   }
+
+  // Ollama is up. Now describe the model Atlas will actually call.
+  const info = await describeOllamaModel(cfg.baseUrl, cfg.model);
+  const thinkValue = resolveThinkValue(cfg.think, info.support);
+  const windowTooBig = !!info.contextLength && cfg.numCtx > info.contextLength;
+  const notes = [
+    ...cfg.warnings,
+    windowTooBig
+      ? `${cfg.model} has a ${info.contextLength}-token context, so OLLAMA_NUM_CTX=${cfg.numCtx} is reduced to that.`
+      : '',
+    info.ok ? '' : info.problem,
+  ].filter(Boolean);
+
+  return {
+    ok: true,
+    model: cfg.model,
+    // A healthy connection has no complaint to make; the reasoning state is
+    // reported in its own field, not smuggled into a warning message.
+    message: '',
+    notes,
+    thinking: {
+      // Whether the model says it can reason, and what Atlas will ask for.
+      supported: info.support.supported,
+      default_on: info.support.defaultOn,
+      levels: info.support.levels,
+      requested: thinkValue === undefined ? null : thinkValue,
+      on: thinkingIsOn(thinkValue, info.support),
+      think_budget: cfg.thinkBudget,
+      source: info.support.source,
+    },
+    context: {
+      requested: cfg.numCtx,
+      model_max: info.contextLength,
+      clamped: windowTooBig,
+    },
+    sampling: {
+      min_temperature: cfg.minTemperature,
+      top_p: cfg.topP,
+      top_k: cfg.topK,
+    },
+    timeout_ms: cfg.timeoutMs,
+    keep_alive: cfg.keepAlive,
+  };
 }
 
 async function readEnvStatus() {
@@ -65,6 +116,14 @@ async function readEnvStatus() {
       model: probe.model,
       grounding: false,
       message: probe.message,
+      // What the local model can actually do, so the setup panel can say
+      // whether a reasoning model is being asked to reason.
+      ...(probe.thinking ? { thinking: probe.thinking } : {}),
+      ...(probe.context ? { context: probe.context } : {}),
+      ...(probe.notes ? { notes: probe.notes } : {}),
+      ...(probe.sampling ? { sampling: probe.sampling } : {}),
+      ...(probe.timeout_ms ? { timeout_ms: probe.timeout_ms } : {}),
+      ...(probe.keep_alive ? { keep_alive: probe.keep_alive } : {}),
       available_providers: Object.keys(keys).filter((p) => keys[p]),
     };
   }

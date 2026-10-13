@@ -5,14 +5,21 @@
 // NaraRouter OpenAI-compatible endpoint, so no real model and no network are
 // needed. It checks:
 //
-//   1. the request sent to Ollama (native /api/chat, no key, no silent
-//      truncation, explicit context window, JSON mode only when a schema is asked);
-//   2. the answers: parsed JSON, plain text, cut-off answers, empty answers;
-//   3. every failure a local user can actually hit, each with a message that
-//      says what to do (not running, model not pulled, prompt too large, OOM);
-//   4. that a missing model is never swapped for another model;
-//   5. the status pill and the model picker tell the truth about Ollama;
-//   6. that NaraRouter is still the default and still works unchanged.
+//   1. the request sent to Ollama (native /api/chat, streamed, no key, no
+//      silent truncation, explicit context window, JSON mode only when a schema
+//      is asked, the reasoning controls, keep-alive);
+//   2. reasoning ("thinking") models such as qwen3:8b: that Atlas asks them to
+//      think, keeps the trace out of the answer, reserves output room for it,
+//      keeps their own sampling guidance, recovers a JSON answer that landed in
+//      the trace, and never sends `think` to a model that refuses it;
+//   3. the answers: parsed JSON, plain text, cut-off answers, empty answers,
+//      reasoning-only answers;
+//   4. every failure a local user can actually hit, each with a message that
+//      says what to do (not running, model not pulled, prompt too large, OOM,
+//      the Atlas deadline);
+//   5. that a missing model is never swapped for another model;
+//   6. the status pill and the model picker tell the truth about Ollama;
+//   7. that NaraRouter is still the default and still works unchanged.
 //
 // Run with: node --import ./scripts/register-ext.mjs scripts/verify-ollama.mjs
 
@@ -20,11 +27,54 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
 import { ollamaConfig, describeOllamaNetworkError } from '../api/ollamaConfig.js';
+import { ollamaChat } from '../api/ollamaChat.js';
+import { splitThinkingTrace, thinkingSupport } from '../api/ollamaReasoning.js';
 
 // ---------------------------------------------------------------------------
 // Mock Ollama + mock NaraRouter
 // ---------------------------------------------------------------------------
 const seen = [];
+
+/**
+ * What each model's own manifest (`/api/show`) claims. Mirrors the real
+ * shapes: qwen3 advertises on/off with thinking on by default, gpt-oss
+ * advertises effort levels, llama3.2 has no reasoning control at all.
+ */
+const MANIFESTS = {
+  'qwen3:8b': { thinking: { values: [false, true], default: true }, family: 'qwen3', context: 40960, capabilities: ['completion', 'thinking', 'tools'] },
+  'gpt-oss:20b': { thinking: { values: ['low', 'medium', 'high'], default: 'medium' }, family: 'gpt-oss', context: 131072, capabilities: ['completion', 'thinking'] },
+  'llama3.2:latest': { thinking: { values: [false], default: false }, family: 'llama', context: 131072, capabilities: ['completion', 'tools'] },
+  'llama3.2': { thinking: { values: [false], default: false }, family: 'llama', context: 131072, capabilities: ['completion', 'tools'] },
+  'qwen2.5:7b': { thinking: { values: [false], default: false }, family: 'qwen2', context: 32768, capabilities: ['completion', 'tools'] },
+  // The other fixture models stand in for "a reasoning model that …"; they all
+  // inherit qwen3's controls.
+  default: { thinking: { values: [false, true], default: true }, family: 'qwen3', context: 40960, capabilities: ['completion', 'thinking'] },
+};
+const NO_THINK_SUPPORT = 'refuses-thinking';
+
+// The closing reasoning tag is assembled here rather than written literally.
+const THINK_CLOSE = '</' + 'think' + '>';
+
+/** One streamed Ollama answer, built from the parts a model would emit. */
+function streamAnswer(res, body, parts) {
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+  const chunkBase = { model: body.model, created_at: '2026-10-13T00:00:00Z', done: false };
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      // A raw write, so the caller's line buffering is exercised.
+      res.write(part);
+      continue;
+    }
+    res.write(`${JSON.stringify({ ...chunkBase, ...part })}\n`);
+  }
+}
+
+function finishWith(res, body, extra = {}) {
+  res.write(`${JSON.stringify({
+    model: body.model, created_at: '2026-10-13T00:00:00Z', done: true,
+    prompt_eval_count: 40, eval_count: 9, ...extra,
+  })}\n`);
+}
 
 const server = createServer((req, res) => {
   let raw = '';
@@ -40,31 +90,123 @@ const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/api/tags') {
       return send(200, {
         models: [
+          { name: 'qwen3:8b', model: 'qwen3:8b' },
           { name: 'qwen2.5:7b', model: 'qwen2.5:7b' },
           { name: 'llama3.2:latest', model: 'llama3.2:latest' },
         ],
       });
     }
 
+    if (req.method === 'POST' && req.url === '/api/show') {
+      const manifest = MANIFESTS[body.model] || MANIFESTS.default;
+      return send(200, {
+        model: body.model,
+        details: { family: manifest.family, parameter_size: '8.2B' },
+        capabilities: manifest.capabilities,
+        ...(manifest.thinking ? { thinking: manifest.thinking } : {}),
+        model_info: { [`${manifest.family}.context_length`]: manifest.context },
+        template: '<|im_start|>user\n{{ .Prompt }}<|im_end|>\n<|im_start|>assistant\n',
+      });
+    }
+
     if (req.method === 'POST' && req.url === '/api/chat') {
-      const base = { model: body.model, created_at: '2026-10-13T00:00:00Z', done: true, prompt_eval_count: 40, eval_count: 9 };
+      const fail = (status, error) => send(status, { error });
+
+      // A model with no reasoning control answers `think: true` the way Ollama
+      // does: HTTP 400 naming the model. Atlas must recover from that.
+      if (body.model === NO_THINK_SUPPORT && body.think) {
+        return fail(400, `"${body.model}" does not support thinking`);
+      }
+
       switch (body.model) {
         case 'llama3.2':
-          return send(200, { ...base, message: { role: 'assistant', content: '{"ok": true, "n": 3}' }, done_reason: 'stop' });
-        case 'qwen2.5:7b':
-          return send(200, { ...base, message: { role: 'assistant', content: 'plain text answer' }, done_reason: 'stop' });
-        case 'short-len':
-          return send(200, { ...base, message: { role: 'assistant', content: 'partial answ' }, done_reason: 'length' });
-        case 'empty-model':
-          return send(200, { ...base, message: { role: 'assistant', content: '' }, done_reason: 'stop' });
+        case 'llama3.2:latest': {
+          streamAnswer(res, body, [{ message: { role: 'assistant', content: '{"ok": true, "n": 3}' } }]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case 'qwen2.5:7b': {
+          streamAnswer(res, body, [{ message: { role: 'assistant', content: 'plain text answer' } }]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case 'qwen3:8b': {
+          // The reasoning trace arrives first and in pieces, then the answer —
+          // one content chunk is deliberately split across two writes.
+          streamAnswer(res, body, [
+            { message: { role: 'assistant', thinking: 'First I weigh the evidence ' } },
+            { message: { role: 'assistant', thinking: 'in the transcript, then the essay prompt.' } },
+            { message: { role: 'assistant', content: 'The draft works ' } },
+            '{"model":"qwen3:8b","done":false,"mess',
+            'age":{"role":"assistant","content":"because the opening is specific."}}\n',
+          ]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case 'json-in-thinking': {
+          // The documented failure mode: everything useful is in the trace and
+          // the answer field comes back empty.
+          streamAnswer(res, body, [
+            { message: { role: 'assistant', thinking: 'Scoring each dimension in turn. {"ok": true, "n": 7}' } },
+            { message: { role: 'assistant', content: '' } },
+          ]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case 'thinking-only': {
+          // Reasoning with no answer at all, and no JSON to recover.
+          streamAnswer(res, body, [
+            { message: { role: 'assistant', thinking: 'Let me think about the applicant for a moment.' } },
+            { message: { role: 'assistant', content: '' } },
+          ]);
+          finishWith(res, body, { done_reason: 'length' });
+          return res.end();
+        }
+        case 'leaked-think': {
+          // An older server (or a hand-written template) leaves the tags in the
+          // answer itself.
+          streamAnswer(res, body, [
+            { message: { role: 'assistant', content: '<think>Weighing the options.\n' + THINK_CLOSE + '\n\nA clean answer.' } },
+          ]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case 'short-len': {
+          streamAnswer(res, body, [{ message: { role: 'assistant', content: 'partial answ' } }]);
+          finishWith(res, body, { done_reason: 'length' });
+          return res.end();
+        }
+        case 'empty-model': {
+          streamAnswer(res, body, [{ message: { role: 'assistant', content: '' } }]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case NO_THINK_SUPPORT: {
+          // Reached only on the retry, once `think` is gone.
+          streamAnswer(res, body, [{ message: { role: 'assistant', content: 'A direct answer.' } }]);
+          finishWith(res, body, { done_reason: 'stop' });
+          return res.end();
+        }
+        case 'slow-model': {
+          // Says nothing until after the Atlas deadline has passed.
+          res.on('error', () => { /* the client gave up first: that is the point */ });
+          const late = setTimeout(() => {
+            if (res.writableEnded || res.destroyed) return;
+            streamAnswer(res, body, [{ message: { role: 'assistant', content: 'too late' } }]);
+            finishWith(res, body, { done_reason: 'stop' });
+            res.end();
+          }, 8000);
+          late.unref?.();
+          return undefined;
+        }
         case 'missing-model':
-          return send(404, { error: `model "${body.model}" not found, try pulling it first` });
+          return fail(404, `model "${body.model}" not found, try pulling it first`);
         case 'ctx-model':
-          return send(400, { error: 'input length exceeds maximum context length' });
+          return fail(400, 'input length exceeds maximum context length');
         case 'oom-model':
-          return send(500, { error: 'model requires more system memory (12.0 GiB) than is available' });
+          return fail(500, 'model requires more system memory (12.0 GiB) than is available');
         default:
-          return send(404, { error: `model "${body.model}" not found, try pulling it first` });
+          return fail(404, `model "${body.model}" not found, try pulling it first`);
       }
     }
 
@@ -160,6 +302,43 @@ await test('config: a trailing slash or /v1 suffix is normalised; a bad URL is r
   assert.match(ollamaConfig({ OLLAMA_BASE_URL: 'localhost:11434' }).problem, /must start with http/);
 });
 
+await test('config: reasoning is asked for by default, with room for the trace and the model\'s own sampling', () => {
+  const cfg = ollamaConfig({});
+  assert.equal(cfg.think, true, 'a thinking model left to a global nothink would lose its depth');
+  assert.equal(cfg.thinkBudget, 8192);
+  assert.equal(cfg.minTemperature, 0.6, "Qwen3's published floor for thinking mode");
+  assert.equal(cfg.topP, 0.95);
+  assert.equal(cfg.topK, 20);
+  assert.equal(cfg.keepAlive, '30m');
+  assert.equal(cfg.timeoutMs, 30 * 60 * 1000);
+  assert.deepEqual(cfg.warnings, []);
+});
+
+await test('config: OLLAMA_THINK accepts on/off/auto/levels, and says so when it does not', () => {
+  assert.equal(ollamaConfig({ OLLAMA_THINK: 'off' }).think, false);
+  assert.equal(ollamaConfig({ OLLAMA_THINK: 'FALSE' }).think, false);
+  assert.equal(ollamaConfig({ OLLAMA_THINK: 'auto' }).think, null, 'auto = send no think field');
+  assert.equal(ollamaConfig({ OLLAMA_THINK: 'high' }).think, 'high');
+  assert.equal(ollamaConfig({ OLLAMA_THINK: 'max' }).think, 'max');
+  const bad = ollamaConfig({ OLLAMA_THINK: 'sometimes' });
+  assert.equal(bad.think, true, 'an unreadable value falls back to reasoning, never to less quality');
+  assert.match(bad.warnings.join(' '), /OLLAMA_THINK="sometimes"/);
+});
+
+await test('config: a value that cannot be used is reported, not applied silently', () => {
+  const cfg = ollamaConfig({
+    OLLAMA_THINK_BUDGET: '10', OLLAMA_MIN_TEMPERATURE: '3', OLLAMA_TIMEOUT_MS: '10',
+    OLLAMA_KEEP_ALIVE: 'half an hour',
+  });
+  assert.equal(cfg.thinkBudget, 8192);
+  assert.equal(cfg.minTemperature, 2, 'a floor above the provider maximum is capped, and the note says so');
+  assert.equal(cfg.timeoutMs, 30 * 60 * 1000);
+  assert.equal(cfg.keepAlive, '30m');
+  assert.equal(cfg.warnings.length, 4, cfg.warnings.join(' | '));
+  // A floor of 0 is a real choice: "never touch Atlas's temperature".
+  assert.equal(ollamaConfig({ OLLAMA_MIN_TEMPERATURE: '0' }).minTemperature, 0);
+});
+
 await test('network errors: connection refused is named in plain words', async () => {
   try {
     await fetch(`${deadBase}/api/tags`);
@@ -167,6 +346,40 @@ await test('network errors: connection refused is named in plain words', async (
   } catch (error) {
     assert.match(describeOllamaNetworkError(error), /connection refused/);
   }
+});
+
+await test('reasoning: a manifest decides what a model supports', () => {
+  assert.deepEqual(
+    thinkingSupport({ thinking: { values: [false, true], default: true } }),
+    { supported: true, defaultOn: true, levels: [], source: 'model' },
+  );
+  assert.deepEqual(
+    thinkingSupport({ thinking: { values: ['low', 'medium', 'high'], default: 'medium' } }),
+    { supported: true, defaultOn: true, levels: ['low', 'medium', 'high'], source: 'model' },
+  );
+  assert.deepEqual(
+    thinkingSupport({ thinking: { values: [false], default: false } }),
+    { supported: false, defaultOn: false, levels: [], source: 'model' },
+  );
+  // An older server with no metadata: the capability list still counts.
+  assert.equal(thinkingSupport({ capabilities: ['completion', 'thinking'] }).supported, true);
+  // A readable manifest with no reasoning evidence means the model has none.
+  assert.equal(thinkingSupport({ details: { family: 'llama' } }).supported, false);
+  // A manifest that could not be read at all is "unknown", never "no": Atlas
+  // asks anyway and learns from the answer.
+  assert.equal(thinkingSupport(null).supported, null);
+  assert.equal(thinkingSupport({ details: { family: 'qwen3' } }).supported, null);
+});
+
+await test('reasoning: a leaked reasoning block is separated from the answer', () => {
+  const clean = splitThinkingTrace('<think>A thought.' + THINK_CLOSE + '\n\nThe answer.');
+  assert.equal(clean.text, 'The answer.');
+  assert.equal(clean.thinking, 'A thought.');
+  // A run cut off mid-reasoning leaves the block open: that is not an answer.
+  const cut = splitThinkingTrace('<think>An unfinished thought');
+  assert.equal(cut.text, '');
+  assert.match(cut.thinking, /unfinished/);
+  assert.deepEqual(splitThinkingTrace(''), { text: '', thinking: '' });
 });
 
 // --- status and model picker -------------------------------------------------
@@ -179,6 +392,32 @@ await test('status: Ollama selected and answering -> configured, default model, 
   assert.equal(body.model, 'llama3.2');
   assert.equal(body.grounding, false);
   assert.equal(body.message, '');
+});
+
+await test('status: reports that llama3.2 has no reasoning, and qwen3:8b does', async () => {
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'llama3.2' });
+  const plain = (await getJson(handleStatus)).body;
+  assert.equal(plain.thinking.supported, false, 'llama3.2 must not be reported as a reasoning model');
+  assert.equal(plain.thinking.on, false);
+
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b' });
+  const thinking = (await getJson(handleStatus)).body;
+  assert.equal(thinking.thinking.supported, true);
+  assert.equal(thinking.thinking.on, true, 'Atlas asks for the reasoning it is configured to ask for');
+  assert.equal(thinking.thinking.requested, true);
+  assert.equal(thinking.thinking.think_budget, 8192);
+  assert.equal(thinking.context.requested, 16384);
+  assert.equal(thinking.context.model_max, 40960);
+  assert.equal(thinking.context.clamped, false);
+  assert.ok(seen.some((r) => r.url === '/api/show'), 'the model is described from its own manifest');
+});
+
+await test('status: a context window bigger than the model\'s own is named, not clamped silently', async () => {
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b', OLLAMA_NUM_CTX: '65536' });
+  const { body } = await getJson(handleStatus);
+  assert.equal(body.context.clamped, true);
+  assert.match(body.notes.join(' '), /40960-token context/);
+  assert.equal(body.message, '', 'a healthy connection still has no error message');
 });
 
 await test('status: Ollama selected but not running -> NOT configured, with the fix in the message', async () => {
@@ -196,8 +435,15 @@ await test('models: lists the models pulled into Ollama, sorted, with the defaul
   assert.equal(body.ok, true);
   assert.equal(body.provider, 'ollama');
   assert.equal(body.listable, true);
-  assert.deepEqual(body.models, ['llama3.2:latest', 'qwen2.5:7b']);
+  assert.deepEqual(body.models, ['llama3.2:latest', 'qwen2.5:7b', 'qwen3:8b']);
   assert.equal(body.default_model, 'llama3.2');
+});
+
+await test('models: says which installed models reason, so the picker is not a guess', async () => {
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
+  const { body } = await getJson(handleModels);
+  assert.deepEqual(body.thinking_models, ['qwen3:8b']);
+  assert.match(body.message, /reason before answering/);
 });
 
 await test('models: an unreachable Ollama says so instead of an empty success', async () => {
@@ -209,7 +455,7 @@ await test('models: an unreachable Ollama says so instead of an empty success', 
 });
 
 // --- generation: the request that goes to Ollama -----------------------------
-await test('chat: JSON schema -> native /api/chat, format json, no key, never truncated, parsed object back', async () => {
+await test('chat: JSON schema -> native /api/chat, streamed, format json, no key, never truncated, parsed object back', async () => {
   seen.length = 0;
   setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
   const { status, body } = await invoke({ prompt: 'Score this.', response_json_schema: SCHEMA });
@@ -221,16 +467,18 @@ await test('chat: JSON schema -> native /api/chat, format json, no key, never tr
   assert.equal(body.meta.grounded, false);
 
   const sent = lastChatFor('llama3.2').body;
-  assert.equal(sent.stream, false);
+  assert.equal(sent.stream, true, 'streamed: a long run must not die on a transport timeout');
   assert.equal(sent.truncate, false, 'a prompt larger than the window must be refused, not cut silently');
   assert.equal(sent.format, 'json');
   assert.equal(sent.options.num_ctx, 16384);
+  assert.equal(sent.options.num_predict, -1, 'no cap of Atlas\'s own, and no Modelfile cap inherited');
+  assert.equal(sent.keep_alive, '30m');
   assert.match(sent.messages[0].content, /Respond with ONLY one valid JSON object/);
   const chatCall = seen.find((r) => r.url === '/api/chat');
   assert.equal(chatCall.headers.authorization, undefined, 'no API key is ever sent to Ollama');
 });
 
-await test('chat: plain text -> string answer, no JSON format, temperature and max tokens passed through', async () => {
+await test('chat: a model with no reasoning control is never sent `think` (Ollama would 400)', async () => {
   seen.length = 0;
   setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_NUM_CTX: '32768' });
   const { status, body } = await invoke({
@@ -239,11 +487,107 @@ await test('chat: plain text -> string answer, no JSON format, temperature and m
   assert.equal(status, 200, JSON.stringify(body));
   assert.equal(body.result, 'plain text answer');
   assert.equal(body.meta.model, 'qwen2.5:7b', 'the model chosen in AI setup is the one that runs');
+  assert.equal(body.meta.thinking, false);
+  assert.equal(body.meta.reasoning_chars, 0);
   const sent = lastChatFor('qwen2.5:7b').body;
   assert.equal(sent.format, undefined);
-  assert.equal(sent.options.temperature, 0.2);
-  assert.equal(sent.options.num_predict, 500);
+  assert.equal('think' in sent, false, 'a plain model never receives the control');
+  assert.equal(sent.options.temperature, 0.2, "Atlas's own temperature is untouched without reasoning");
+  assert.equal(sent.options.top_p, undefined);
+  assert.equal(sent.options.num_predict, 500, 'the cap the caller asked for, with no trace to reserve for');
   assert.equal(sent.options.num_ctx, 32768, 'OLLAMA_NUM_CTX is honoured');
+});
+
+await test('chat: qwen3:8b is asked to think, and the trace never reaches the answer', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b' });
+  const { status, body } = await invoke({ prompt: 'Review this draft.' });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(
+    body.result,
+    'The draft works because the opening is specific.',
+    'the answer is assembled from the stream, with no reasoning in it',
+  );
+  assert.doesNotMatch(String(body.result), /weigh the evidence/);
+  assert.equal(body.meta.thinking, true);
+  assert.ok(body.meta.reasoning_chars > 40, `expected a real trace, got ${body.meta.reasoning_chars}`);
+  assert.equal(body.meta.recovered_from_thinking, undefined);
+
+  const sent = lastChatFor('qwen3:8b').body;
+  assert.equal(sent.think, true, 'reasoning is asked for explicitly');
+  assert.equal(sent.stream, true);
+});
+
+await test('chat: reasoning gets the model\'s own sampling, and a cold scoring temperature is raised to it', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b' });
+  const { status, body } = await invoke({ prompt: 'Score it.', temperature: 0.15 });
+  assert.equal(status, 200, JSON.stringify(body));
+  const sent = lastChatFor('qwen3:8b').body;
+  assert.equal(sent.options.temperature, 0.6, 'Qwen3 degrades and repeats below its thinking-mode floor');
+  assert.equal(sent.options.top_p, 0.95);
+  assert.equal(sent.options.top_k, 20);
+  assert.equal(body.meta.sampling.raised_from, 0.15, 'the change is reported, never silent');
+  assert.equal(body.meta.sampling.temperature, 0.6);
+});
+
+await test('chat: a caller cap is topped up by the reasoning budget, so the answer still fits', async () => {
+  seen.length = 0;
+  setEnv({
+    LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b', OLLAMA_THINK_BUDGET: '4096',
+  });
+  await invoke({ prompt: 'Review it.', max_tokens: 1000 });
+  const sent = lastChatFor('qwen3:8b').body;
+  assert.equal(sent.options.num_predict, 5096, 'answer cap + trace headroom');
+});
+
+await test('chat: OLLAMA_THINK=off asks for no reasoning and changes nothing else', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b', OLLAMA_THINK: 'off' });
+  const { body } = await invoke({ prompt: 'Review it.', temperature: 0.15, max_tokens: 800 });
+  const sent = lastChatFor('qwen3:8b').body;
+  assert.equal(sent.think, false);
+  assert.equal(sent.options.temperature, 0.15, 'no reasoning, so no sampling floor');
+  assert.equal(sent.options.top_p, undefined);
+  assert.equal(sent.options.num_predict, 800, 'no trace to reserve for');
+  assert.equal(body.meta.thinking, false);
+});
+
+await test('chat: OLLAMA_THINK=auto leaves the choice to the model', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b', OLLAMA_THINK: 'auto' });
+  await invoke({ prompt: 'Review it.' });
+  const sent = lastChatFor('qwen3:8b').body;
+  assert.equal('think' in sent, false, 'no control is sent, so the model default stands');
+});
+
+await test('chat: a JSON answer written inside the reasoning trace is recovered, not reported empty', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'json-in-thinking' });
+  const { status, body } = await invoke({ prompt: 'Score it.', response_json_schema: SCHEMA });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.deepEqual(body.result, { ok: true, n: 7 });
+  assert.equal(body.meta.recovered_from_thinking, true);
+  assert.match(body.meta.warning, /recovered it from there/);
+});
+
+await test('chat: reasoning tags leaked into the answer are stripped, and counted as reasoning', async () => {
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'leaked-think' });
+  const { status, body } = await invoke({ prompt: 'Say something.' });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.result, 'A clean answer.');
+  assert.ok(body.meta.reasoning_chars > 0);
+});
+
+await test('chat: reasoning with no answer is its own error, and says how to fix it', async () => {
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'thinking-only' });
+  const { status, body } = await invoke({ prompt: 'Review it.', response_json_schema: SCHEMA });
+  assert.equal(status, 502);
+  assert.match(body.error, /wrote only its reasoning/);
+  assert.match(body.error, /OLLAMA_NUM_CTX/);
+  assert.match(body.error, /OLLAMA_THINK=off/);
+  assert.ok(body.reasoning_chars > 0);
+  assert.doesNotMatch(body.error, /empty response/, 'an unfinished thought is not an empty response');
 });
 
 await test('chat: a cut-off answer (done_reason length) is reported as finish_reason length', async () => {
@@ -254,11 +598,31 @@ await test('chat: a cut-off answer (done_reason length) is reported as finish_re
   assert.match(body.meta.warning, /output cap/);
 });
 
+await test('chat: a context window bigger than the model\'s own is reported on the answer too', async () => {
+  setEnv({
+    LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'qwen3:8b', OLLAMA_NUM_CTX: '65536',
+  });
+  const { body } = await invoke({ prompt: 'Review it.' });
+  assert.match(body.meta.warning, /40960-token context/);
+  assert.match(body.meta.warning, /OLLAMA_NUM_CTX=40960/);
+});
+
 await test('chat: an empty answer is an explicit error, never a blank success', async () => {
   setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
   const { status, body } = await invoke({ prompt: 'Empty.', model: 'empty-model' });
   assert.equal(status, 502);
   assert.match(body.error, /empty response/);
+});
+
+await test('transport: the Atlas deadline is the only one, and it is reported in minutes', async () => {
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
+  const started = Date.now();
+  await assert.rejects(
+    ollamaChat(mockBase, { model: 'slow-model', messages: [], stream: true }, { timeoutMs: 300 }),
+    (error) => error.timedOut === true,
+    'a run that outlasts the deadline is stopped by Atlas, not by a transport timeout',
+  );
+  assert.ok(Date.now() - started < 3000, 'the deadline fired, it did not wait for the model');
 });
 
 // --- failures a local user can actually hit ----------------------------------
@@ -298,6 +662,19 @@ await test('chat: out-of-memory from Ollama is shown verbatim with its HTTP code
   assert.match(body.error, /Ollama returned HTTP 500: model requires more system memory/);
 });
 
+await test('chat: a model that refuses `think` is retried once without it, and still answers', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
+  const { status, body } = await invoke({ prompt: 'Hello.', model: NO_THINK_SUPPORT });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.meta.provider, 'ollama');
+  const attempts = seen.filter((r) => r.url === '/api/chat' && r.body.model === NO_THINK_SUPPORT);
+  assert.equal(attempts.length, 2, 'one attempt with the control, one without');
+  assert.equal(attempts[0].body.think, true);
+  assert.equal('think' in attempts[1].body, false);
+  assert.equal(body.meta.thinking, false);
+});
+
 // --- provider selection ------------------------------------------------------
 await test('selection: an explicit LLM_PROVIDER=ollama beats a NaraRouter key on the same machine', async () => {
   seen.length = 0;
@@ -321,6 +698,7 @@ await test('selection: NaraRouter remains the default when a key is set and Olla
   assert.equal(body.meta.provider, 'nararouter');
   assert.deepEqual(body.result, { ok: true, n: 1 });
   assert.ok(!seen.some((r) => r.url === '/api/chat'), 'Ollama was not called when NaraRouter is the provider');
+  assert.equal(body.meta.thinking, undefined, 'the reasoning fields belong to the local provider only');
 });
 
 await test('selection: nothing configured -> a clear 503 that names both ways to fix it', async () => {

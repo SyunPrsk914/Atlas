@@ -7,7 +7,8 @@
 //
 // Providers: NaraRouter is the default (chosen when NARAROUTER_API_KEY is set).
 // Ollama runs a model on this computer and is used ONLY when LLM_PROVIDER=ollama
-// is set explicitly; see api/ollamaConfig.js and DEPLOYMENT.md.
+// is set explicitly; see api/ollamaConfig.js, api/ollamaChat.js,
+// api/ollamaReasoning.js and DEPLOYMENT.md (Part 2.7).
 //
 // Request body (POST):
 //   {
@@ -24,6 +25,8 @@
 // keep working. It tells the UI what actually happened, which is what the
 // Knowledge Base / Essay Builder screens need in order to stop guessing:
 //   { provider, model, grounded, demo, warning, finish_reason }
+// For a local Ollama it also carries what the run actually did:
+//   { thinking, reasoning_chars, recovered_from_thinking, sampling }
 // `finish_reason` of "length"/"max_tokens" means the answer was cut off; the
 // client turns that into `meta.truncated` so essay actions can send it back.
 //
@@ -34,6 +37,11 @@
 import { createClient } from '@supabase/supabase-js';
 import { resolveSupabaseConfig } from './supabaseConfig.js';
 import { ollamaConfig, describeOllamaNetworkError } from './ollamaConfig.js';
+import { ollamaChat } from './ollamaChat.js';
+import {
+  describeOllamaModel, rememberThinkingSupport, resolveThinkValue,
+  thinkingIsOn, splitThinkingTrace,
+} from './ollamaReasoning.js';
 
 // ---------------------------------------------------------------------------
 // Model aliases used in the frontend (kept compatible with the old Base44
@@ -344,24 +352,69 @@ async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens, tem
 // the context window can be set explicitly (num_ctx) and a prompt that does not
 // fit is refused (truncate: false) instead of being cut silently. No key is sent
 // and no fallback to another model is attempted: a missing model is reported.
+//
+// Reasoning models are handled here, because getting this wrong is what makes a
+// local qwen3:8b worse than it is:
+//
+//   * `think` is sent explicitly (see api/ollamaReasoning.js), so a global
+//     `/set nothink` or a Modelfile cannot quietly switch the depth off, and a
+//     model that has no reasoning control never receives one (Ollama 400s).
+//   * The reasoning trace is read from `message.thinking` and kept OUT of the
+//     answer. It is also where a JSON answer sometimes lands, so it is used as
+//     a recovery source instead of being thrown away as "empty response".
+//   * `num_predict` reserves room for the trace on top of the answer. Ollama
+//     counts both against the same budget, so an answer-sized cap is spent on
+//     reasoning and the answer arrives empty with done_reason "length".
+//   * Sampling follows the model's own published guidance for thinking mode
+//     (Qwen3 and DeepSeek-R1: temperature 0.6, top_p 0.95, top_k 20, never
+//     greedy), which is warmer than the cold temperature Atlas asks a hosted
+//     scoring call for.
+//   * The call is streamed, so a generation longer than Node's 300-second fetch
+//     transport timeout is not killed at five minutes.
 async function callOllama({ prompt, responseJsonSchema, model, maxTokens, temperature }) {
   const cfg = ollamaConfig(process.env);
   if (cfg.problem) {
     throw Object.assign(new Error(cfg.problem), { status: 503, provider: 'ollama', userMessage: cfg.problem });
   }
   const requested = model || cfg.model;
+  // Local manifest read, cached. It says whether the model reasons, and how big
+  // its own context window is. Never throws.
+  const info = await describeOllamaModel(cfg.baseUrl, requested);
+
+  const thinkValue = resolveThinkValue(cfg.think, info.support);
+  const reasoning = thinkingIsOn(thinkValue, info.support);
 
   const options = { num_ctx: cfg.numCtx };
-  if (maxTokens) options.num_predict = maxTokens;
-  if (Number.isFinite(temperature)) options.temperature = temperature;
+
+  // -1 is "no output cap of Atlas's own" (what every other provider path means
+  // when the caller names no cap) and it also overrides a `num_predict` a
+  // Modelfile might set, which would silently truncate a reasoning run.
+  const answerTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 0;
+  options.num_predict = answerTokens ? answerTokens + (reasoning ? cfg.thinkBudget : 0) : -1;
+
+  let raisedFrom = null;
+  if (Number.isFinite(temperature)) {
+    let used = temperature;
+    if (reasoning && cfg.minTemperature > 0 && used < cfg.minTemperature) used = cfg.minTemperature;
+    options.temperature = used;
+    if (used !== temperature) raisedFrom = temperature;
+  }
+  if (reasoning) {
+    options.top_p = cfg.topP;
+    options.top_k = cfg.topK;
+  }
 
   const body = {
     model: requested,
     messages: [{ role: 'user', content: prompt }],
-    stream: false,
+    stream: true,
     truncate: false,
     options,
+    // Ollama's own keep-alive default is 5 minutes, so every AI action after a
+    // short reading pause would reload a multi-gigabyte model from disk.
+    keep_alive: cfg.keepAlive,
   };
+  if (thinkValue !== undefined) body.think = thinkValue;
   // Generic JSON mode: the schema is already spelled out in the prompt, and
   // Ollama's schema-constrained decoding is not needed for these answers.
   if (responseJsonSchema) body.format = 'json';
@@ -370,43 +423,77 @@ async function callOllama({ prompt, responseJsonSchema, model, maxTokens, temper
     const message = `Could not reach Ollama at ${cfg.baseUrl} (${reason}). Start Ollama on this computer (open the Ollama app, or run \`ollama serve\` in a terminal), then press Re-check in AI setup.`;
     return Object.assign(new Error(message), { status: 503, provider: 'ollama', userMessage: message });
   };
+  const userError = (status, message) => Object.assign(new Error(message), { status, provider: 'ollama', userMessage: message });
 
-  let res;
+  let response;
   try {
-    res = await fetch(`${cfg.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch (e) {
-    throw unreachable(describeOllamaNetworkError(e));
+    response = await ollamaChat(cfg.baseUrl, body, { timeoutMs: cfg.timeoutMs });
+    if (response.status === 400 && /does not support thinking/i.test(response.error || '') && body.think !== undefined) {
+      // The model itself refuses the control. Honour that once and remember it,
+      // rather than failing every AI action on this model.
+      rememberThinkingSupport(cfg.baseUrl, requested, false);
+      const { think: _ignored, ...withoutThink } = body;
+      response = await ollamaChat(cfg.baseUrl, withoutThink, { timeoutMs: cfg.timeoutMs });
+      if (response.status < 200 || response.status >= 300) return failOllama(response);
+      return answerFrom(response, { cfg, requested, reasoning: false, options, raisedFrom, info });
+    }
+  } catch (error) {
+    if (error?.timedOut) {
+      const minutes = Math.max(1, Math.round(cfg.timeoutMs / 60000));
+      throw userError(504, `Ollama did not finish within ${minutes} minute(s). Deep reasoning on this computer can take a long time: raise OLLAMA_TIMEOUT_MS in .env.local, send fewer or shorter materials, set OLLAMA_THINK=off for a direct answer, or use a smaller model.`);
+    }
+    throw unreachable(describeOllamaNetworkError(error));
   }
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const raw = String(data?.error || '').trim();
+  if (response.status < 200 || response.status >= 300) return failOllama(response);
+  return answerFrom(response, { cfg, requested, reasoning, options, raisedFrom, info });
+
+  /** Turn an Ollama failure into a message that says what to do about it. */
+  function failOllama(failed) {
+    const raw = String(failed.error || failed.rawPreview || '').trim();
     let message;
     if (/context length|exceeds.*context|input length/i.test(raw)) {
       message = `The prompt is larger than Ollama's context window (${cfg.numCtx} tokens). Raise OLLAMA_NUM_CTX in .env.local (for example 32768, if the computer has the memory) or send fewer or shorter materials. Atlas does not cut prompts silently.`;
-    } else if (res.status === 404 || /not found/i.test(raw)) {
+    } else if (failed.status === 404 || /not found/i.test(raw)) {
       message = `Ollama does not have the model "${requested}". Run \`ollama pull ${requested}\` in a terminal, or choose a model you already have in AI setup (or set OLLAMA_MODEL).`;
-    } else if (res.status === 401 || res.status === 403) {
-      message = `Ollama refused the request (HTTP ${res.status}): ${raw || 'access denied'}. If this is a cloud model, sign in with \`ollama signin\`.`;
+    } else if (failed.status === 401 || failed.status === 403) {
+      message = `Ollama refused the request (HTTP ${failed.status}): ${raw || 'access denied'}. If this is a cloud model, sign in with \`ollama signin\`.`;
     } else {
-      message = `Ollama returned HTTP ${res.status}${raw ? `: ${raw}` : ''}`;
+      message = `Ollama returned HTTP ${failed.status}${raw ? `: ${raw}` : ''}`;
     }
-    throw Object.assign(new Error(message), { status: res.status, provider: 'ollama', userMessage: message });
+    throw userError(failed.status, message);
   }
 
-  // done_reason "length" = Ollama stopped at the output cap; surface it the way
-  // the other adapters do so the client sends the answer back for a retry.
-  const finishReason = data?.done_reason === 'length' ? 'length' : (data?.done_reason || '');
-  return {
-    text: data?.message?.content || '',
-    model: data?.model || requested,
-    finishReason,
-    promptEvalCount: data?.prompt_eval_count,
-  };
+  /** Build Atlas's answer from the streamed chunks. */
+  function answerFrom(streamed, context) {
+    const split = splitThinkingTrace(streamed.content);
+    const trace = [streamed.thinking, split.thinking].filter(Boolean).join('\n\n').trim();
+    // A real trace is the strongest possible evidence that this model reasons;
+    // remember it so the next call does not have to ask.
+    if (trace) rememberThinkingSupport(cfg.baseUrl, requested, true);
+    // done_reason "length" = Ollama stopped at the output cap; surface it the
+    // way the other adapters do so the client sends the answer back for a retry.
+    const finishReason = streamed.finishReason === 'length' ? 'length' : (streamed.finishReason || '');
+    return {
+      text: split.text,
+      model: streamed.model || requested,
+      finishReason,
+      promptEvalCount: streamed.promptEvalCount,
+      thinking: trace,
+      reasoning: context.reasoning,
+      numCtx: context.cfg.numCtx,
+      modelContextLength: context.info.contextLength,
+      configWarnings: context.cfg.warnings,
+      sampling: {
+        num_ctx: context.options.num_ctx,
+        num_predict: context.options.num_predict,
+        ...(context.options.temperature === undefined ? {} : { temperature: context.options.temperature }),
+        ...(context.raisedFrom === null ? {} : { raised_from: context.raisedFrom }),
+        ...(context.options.top_p === undefined ? {} : { top_p: context.options.top_p }),
+        ...(context.options.top_k === undefined ? {} : { top_k: context.options.top_k }),
+      },
+    };
+  }
 }
 
 // Providers retire model IDs on their own schedule. If a caller-supplied model
@@ -577,11 +664,30 @@ export async function handleInvokeLLM(req, res) {
     }
 
     const text = out.text || '';
-    if (!text.trim()) {
+    // A reasoning model keeps its chain of thought next to the answer. Two
+    // things follow: an answer can be missing while the trace is full, and a
+    // JSON answer can end up INSIDE the trace. Neither is "the AI returned an
+    // empty response", and neither may be thrown away.
+    const trace = typeof out.thinking === 'string' ? out.thinking : '';
+    let parsed = null;
+    let parsedFromTrace = false;
+    if (responseJsonSchema) {
+      parsed = extractJSON(text);
+      if (!parsed && trace.trim()) {
+        parsed = extractJSON(trace);
+        if (parsed) parsedFromTrace = true;
+      }
+    }
+
+    if (!text.trim() && !parsed) {
       send(res, 502, {
-        error: ['MAX_TOKENS', 'length'].includes(out.finishReason)
-          ? 'The AI ran out of output space before finishing. Shorten the request or raise max_tokens.'
-          : 'The AI returned an empty response. This usually means the provider blocked the prompt — try rephrasing, or raise max_tokens.',
+        error: trace.trim()
+          ? 'The model wrote only its reasoning and never reached the answer. Give it more room: raise OLLAMA_NUM_CTX in .env.local (for example 32768), send fewer or shorter materials, or set OLLAMA_THINK=off for a direct answer.'
+          : ['MAX_TOKENS', 'length'].includes(out.finishReason)
+            ? 'The AI ran out of output space before finishing. Shorten the request or raise max_tokens.'
+            : 'The AI returned an empty response. This usually means the provider blocked the prompt — try rephrasing, or raise max_tokens.',
+        ...(trace.trim() ? { reasoning_chars: trace.length } : {}),
+        ...(responseJsonSchema ? { raw_preview: String(trace || text).slice(0, 400) } : {}),
       });
       return;
     }
@@ -596,9 +702,22 @@ export async function handleInvokeLLM(req, res) {
     if (['MAX_TOKENS', 'length'].includes(out.finishReason)) {
       warnings.push('The response hit the model output cap and may be incomplete.');
     }
-    if (provider === 'ollama' && out.promptEvalCount && out.promptEvalCount >= ollamaConfig(process.env).numCtx) {
-      // Defensive: Ollama refuses an oversized prompt, so this should not happen.
-      warnings.push(`The prompt filled the Ollama context window (${ollamaConfig(process.env).numCtx} tokens); the answer may ignore part of it. Raise OLLAMA_NUM_CTX.`);
+    if (parsedFromTrace) {
+      warnings.push('The model wrote its JSON inside its reasoning trace instead of the answer; Atlas recovered it from there. Raising OLLAMA_NUM_CTX gives it room to answer normally.');
+    }
+    if (provider === 'ollama') {
+      if (out.promptEvalCount && out.numCtx && out.promptEvalCount >= out.numCtx) {
+        // Defensive: Ollama refuses an oversized prompt, so this should not happen.
+        warnings.push(`The prompt filled the Ollama context window (${out.numCtx} tokens); the answer may ignore part of it. Raise OLLAMA_NUM_CTX.`);
+      }
+      if (out.modelContextLength && out.numCtx > out.modelContextLength) {
+        // Ollama clamps a larger window down to the model's own limit quietly.
+        warnings.push(`${out.model || 'This model'} has a ${out.modelContextLength}-token context, so the requested ${out.numCtx} is reduced to that. Set OLLAMA_NUM_CTX=${out.modelContextLength} (or lower) to stop asking for more than the model has.`);
+      }
+      if (out.finishReason === 'length' && trace) {
+        warnings.push('The reasoning trace and the answer together filled the output budget.');
+      }
+      for (const note of out.configWarnings || []) warnings.push(note);
     }
     const meta = {
       provider,
@@ -608,9 +727,17 @@ export async function handleInvokeLLM(req, res) {
       finish_reason: out.finishReason || '',
       warning: warnings.join(' '),
     };
+    if (provider === 'ollama') {
+      // Purely additive: older clients ignore fields they do not read. The
+      // trace itself stays on the server (it is long and it is not the answer),
+      // but its size tells the UI that reasoning actually happened.
+      meta.thinking = !!out.reasoning;
+      meta.reasoning_chars = trace.length;
+      if (parsedFromTrace) meta.recovered_from_thinking = true;
+      if (out.sampling) meta.sampling = out.sampling;
+    }
 
     if (responseJsonSchema) {
-      const parsed = extractJSON(text);
       if (!parsed) {
         send(res, 502, {
           error: 'The AI did not return valid JSON. Please retry.',

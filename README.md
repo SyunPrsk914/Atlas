@@ -15,7 +15,7 @@ craft patterns from successful samples, and reusable tips/reference guidance.
 - **Frontend:** React 18 + Vite + Tailwind (shadcn/ui) — `src/`
 - **Backend:** Supabase (Postgres + Auth + Storage) — `supabase/schema.sql`
 - **AI:** [NaraRouter](https://router.bynara.id/docs) through `api/invoke-llm.js`, with the key on the server and the model alias chosen in the app from `api/models.js`
-- **Local AI (optional):** [Ollama](https://ollama.com) runs a model on your own computer when `LLM_PROVIDER=ollama` is set (never chosen automatically; see DEPLOYMENT.md, Part 2.7)
+- **Local AI (optional):** [Ollama](https://ollama.com) runs a model on your own computer when `LLM_PROVIDER=ollama` is set (never chosen automatically; see DEPLOYMENT.md, Part 2.7). Reasoning models such as `qwen3:8b` are used at full depth: Atlas asks them to think, keeps the chain of thought out of the answer, and reserves output room and sampling for it — [LOCAL_SETUP.md](./LOCAL_SETUP.md) is the step-by-step local guide
 - **Other providers (optional):** a Gemini, Groq, OpenRouter, OpenAI or Anthropic key is still honoured if set; NaraRouter takes precedence
 - **Hosting:** Vercel (static frontend plus the serverless `api/*` functions)
 
@@ -31,6 +31,11 @@ npm run dev            # no configuration needed -> Demo mode (browser-only data
 
 Atlas needs **Node.js 22.13 or newer** (pdf.js 6, which reads PDFs, requires it).
 
+To run the AI on your own computer instead of a hosted provider, follow
+**[LOCAL_SETUP.md](./LOCAL_SETUP.md)**: clone, `npm install`, three lines in
+`.env.local`, `npm run dev`. It uses [Ollama](https://ollama.com) with a
+reasoning model (`qwen3:8b`) and needs no API key.
+
 Atlas itself does not impose an AI request, token, or daily quota — your NaraRouter plan does, and Atlas surfaces the provider's real 429 rather than working around it. Follow **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the key, the model choice, Supabase, and Vercel setup. Without a key the app runs in clearly labeled Demo mode, where every page works and no AI output is persisted as if it were real.
 
 ## Scripts
@@ -41,8 +46,8 @@ Atlas itself does not impose an AI request, token, or daily quota — your NaraR
 | `npm run build` | Production build to `dist/` |
 | `npm run preview` | Preview the production build |
 | `npm run lint` / `npm run typecheck` | Quality checks |
-| `npm run verify` | Offline checks of document reading, Materials analysis, the AI Knowledge Base, IB subject handling, the AI instruction rules (the shared clipping rule, material relevance and prompt budgets, knowledge-base density, the root check, the flagged-phrase edit loop), the essay/activity quality rules (length bands, repair acceptance, the diff, the prompts, Common App field limits), and a render check of every component (no browser or model needed) |
-| `npm run verify:render` | Just the render check: builds the essay/activity components with Vite's SSR pipeline and renders 23 fixtures, so a component that would crash on real props is caught before it reaches the browser |
+| `npm run verify` | Offline checks of document reading, Materials analysis, the AI Knowledge Base, IB subject handling, the AI instruction rules (the shared clipping rule, material relevance and prompt budgets, knowledge-base density, the root check, the flagged-phrase edit loop), the essay/activity quality rules (length bands, repair acceptance, the diff, the prompts, Common App field limits), the local Ollama provider (its request shape, reasoning models, and every failure a local user can hit), and a render check of every component (no browser or model needed) |
+| `npm run verify:render` | Just the render check: builds the essay/activity components with Vite's SSR pipeline and renders 30 fixtures, so a component that would crash on real props is caught before it reaches the browser |
 
 ## Materials and the AI Knowledge Base
 

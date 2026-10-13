@@ -252,12 +252,20 @@ Google Search grounding is only requested for an explicitly selected Gemini prov
 
 Ollama runs an open model on your own machine. It is **opt-in**: Atlas uses it only when the server is set to `LLM_PROVIDER=ollama`, and it never picks it automatically. NaraRouter stays the default.
 
+For a full, beginner-safe walkthrough — GitHub Desktop, Node, Ollama, `qwen3:8b`, first run, and the checks to run when something is wrong — read **[LOCAL_SETUP.md](./LOCAL_SETUP.md)**. This section is the reference.
+
 | Setting (`.env.local`) | Meaning | Default |
 |---|---|---|
 | `LLM_PROVIDER=ollama` | Use the local Ollama instead of NaraRouter (wins even if `NARAROUTER_API_KEY` is set) | — |
-| `OLLAMA_MODEL` | Model name you pulled with `ollama pull` | `llama3.2` |
+| `OLLAMA_MODEL` | Model name you pulled with `ollama pull` (`qwen3:8b` is the recommended reasoning model) | `llama3.2` |
 | `OLLAMA_BASE_URL` | Where Ollama listens | `http://127.0.0.1:11434` |
-| `OLLAMA_NUM_CTX` | Context window requested per call, in tokens (16384 is a practical minimum for Atlas prompts) | `16384` |
+| `OLLAMA_NUM_CTX` | Context window requested per call, in tokens (16384 is a practical minimum for Atlas prompts; a reasoning model keeps its trace inside this same window, so 32768 suits `qwen3:8b`) | `16384` |
+| `OLLAMA_THINK` | `on` \| `off` \| `auto` \| `low` \| `medium` \| `high` \| `max` — whether Atlas asks a reasoning model to think | `on` |
+| `OLLAMA_THINK_BUDGET` | Output tokens reserved for the reasoning trace, on top of the answer | `8192` |
+| `OLLAMA_MIN_TEMPERATURE` | Floor applied to a requested temperature while reasoning is on (`0` disables the floor) | `0.6` |
+| `OLLAMA_TOP_P` / `OLLAMA_TOP_K` | Sampling used while reasoning is on | `0.95` / `20` |
+| `OLLAMA_TIMEOUT_MS` | Wall-clock ceiling for one call | `1800000` (30 min) |
+| `OLLAMA_KEEP_ALIVE` | How long Ollama keeps the model loaded between AI actions | `30m` |
 
 What happens, and what does not:
 
@@ -265,16 +273,45 @@ What happens, and what does not:
 - Prompts stay on your computer, unless you deliberately pick an Ollama cloud model.
 - Atlas never swaps a missing model for another one. If the model is not pulled, the error gives the exact `ollama pull …` command.
 - A prompt larger than `OLLAMA_NUM_CTX` is **refused with a message**, not cut silently. Raise `OLLAMA_NUM_CTX` (for example `32768`) if your computer has the memory.
-- Speed depends on your hardware. A long document on a laptop CPU can take many minutes; `Ollama did not finish within the wait limit` means Atlas stopped waiting, so try a smaller model or a shorter document.
+- Speed depends on your hardware. A long document on a laptop CPU can take many minutes; `Ollama did not finish within N minutes` means Atlas stopped waiting, so raise `OLLAMA_TIMEOUT_MS`, send a shorter document, or use a smaller model.
 - Ollama is **not available on Vercel**: a Vercel deployment cannot reach your computer's `127.0.0.1`. Ollama is for local development.
+
+#### 2.7.1 Reasoning models (`qwen3:8b`) are used at full depth
+
+`qwen3:8b` is a **thinking model**: before it writes an answer it writes a chain of thought, and Ollama exposes that as two separate things — `think` on the request, and `message.thinking` next to the answer in `message.content`. Atlas asks for the reasoning on every call and keeps it out of the answer, because the four things below are what separate a deep local answer from a shallow one.
+
+| What Atlas does | Why it matters | Where |
+|---|---|---|
+| Sends `think: true` (or the level you configured) after reading the model's own `/api/show` | A global `/set nothink`, a Modelfile, or an older template would otherwise switch the reasoning off without telling you. A model that has no reasoning control is never sent one — Ollama answers that with HTTP 400 — and a model that refuses it is retried once without it. | `api/ollamaReasoning.js` |
+| Reads `message.thinking`, keeps it out of the answer, and recovers a JSON answer that landed inside it | Some runs put the whole answer in the trace and leave `content` empty. That used to surface as “The AI returned an empty response”; it is now recovered, and `meta.recovered_from_thinking` says so. | `api/invoke-llm.js` |
+| Sets `num_predict` to the answer cap **plus** `OLLAMA_THINK_BUDGET` (and `-1` when no cap was asked for) | Ollama counts reasoning and answer against one budget. A cap written for the answer alone is spent on reasoning, and the answer arrives empty with `done_reason: length`. `-1` also overrides a `num_predict` a Modelfile might set. | `api/invoke-llm.js` |
+| Uses the model's own published sampling while reasoning is on: temperature floor `0.6`, `top_p 0.95`, `top_k 20` | Qwen3 and DeepSeek-R1 both specify those numbers for thinking mode, with an explicit “**DO NOT use greedy decoding**, as it can lead to performance degradation and endless repetitions”. Atlas's cold scoring temperatures (a review asks for `0.15`) sit below that floor, so they are raised — and `meta.sampling.raised_from` records the change instead of hiding it. Set `OLLAMA_MIN_TEMPERATURE=0` to keep Atlas's numbers untouched. | `api/ollamaConfig.js` |
+
+Two more things a local run needs that a hosted provider never did:
+
+- **The call is streamed.** Node's `fetch` (undici) aborts any request whose response headers take more than 300 seconds, so a `stream: false` generation died at five minutes however patient Atlas was willing to be. Atlas now reads Ollama's newline-delimited stream over `node:http` (`api/ollamaChat.js`), and the only deadline in force is `OLLAMA_TIMEOUT_MS`.
+- **`keep_alive` is raised to 30 minutes.** Ollama's own default unloads the model after 5 idle minutes, so every AI action after a short reading pause paid the full model-load cost again.
+
+What Atlas reports back, so none of this is invisible:
+
+- `GET /api/status` → `thinking: { supported, default_on, requested, on, think_budget }`, `context: { requested, model_max, clamped }`, and `notes` for anything that was adjusted. The **AI setup** panel prints it under the model picker.
+- `GET /api/models` → `thinking_models`, so the picker marks which installed models reason.
+- Every answer's `meta` → `thinking`, `reasoning_chars`, `sampling`, and a `warning` when the context window asked for is bigger than the model's own, or when a JSON answer had to be recovered from the trace.
 
 Setup (once):
 
 1. Install Ollama from https://ollama.com/download and open it.
-2. In a terminal: `ollama pull llama3.2` (wait for the download to finish).
+2. In a terminal: `ollama pull qwen3:8b` (wait for the download to finish; ~5 GB).
 3. Check it answers: `curl http://127.0.0.1:11434/api/tags` should print a JSON list containing your model.
-4. In `.env.local` add `LLM_PROVIDER=ollama` (and optionally `OLLAMA_MODEL=llama3.2`).
-5. Run `npm run dev`, open AI setup in Atlas, press **Re-check**, then **Use Ollama**.
+4. In `.env.local` add:
+
+   ```dotenv
+   LLM_PROVIDER=ollama
+   OLLAMA_MODEL=qwen3:8b
+   OLLAMA_NUM_CTX=32768
+   ```
+
+5. Run `npm run dev`, open AI setup in Atlas, press **Re-check**, then **Use Ollama**. The panel should read **“Reasoning is on for qwen3:8b”**.
 
 ---
 
