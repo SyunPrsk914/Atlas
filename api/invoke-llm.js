@@ -403,6 +403,10 @@ async function callOllama({ prompt, responseJsonSchema, model, maxTokens, temper
     options.top_p = cfg.topP;
     options.top_k = cfg.topK;
   }
+  // Opt-in only: Ollama decides how much of the model to put on the GPU unless
+  // the machine's owner says otherwise. On a GPU too small for the whole model
+  // plus the KV cache, fewer layers on the GPU leaves room for the cache.
+  if (cfg.numGpu !== null) options.num_gpu = cfg.numGpu;
 
   const body = {
     model: requested,
@@ -452,7 +456,11 @@ async function callOllama({ prompt, responseJsonSchema, model, maxTokens, temper
   function failOllama(failed) {
     const raw = String(failed.error || failed.rawPreview || '').trim();
     let message;
-    if (/context length|exceeds.*context|input length/i.test(raw)) {
+    // Checked first: an out-of-memory report usually mentions "the context"
+    // too, and the fix for the two is the opposite of each other.
+    if (/out[- ]of[- ]memory|failed to allocate|kv cache|ErrorOutOfDeviceMemory|insufficient memory|more system memory|VRAM/i.test(raw)) {
+      message = `Ollama ran out of memory while starting ${requested}. The usual cause is the context window: Ollama reserves the KV cache up front for all ${cfg.numCtx} tokens, however short the prompt is. Try these in order — (1) lower OLLAMA_NUM_CTX in .env.local (8192 is a good test) and restart \`npm run dev\`; (2) set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 for Ollama and restart Ollama, which roughly halves the cache; (3) free memory — \`ollama stop ${requested}\` unloads a model Atlas is keeping resident, set OLLAMA_KEEP_ALIVE=0 to unload after every call, and close other apps that use the GPU; (4) set OLLAMA_NUM_GPU to a smaller number (0 runs it on the CPU), or use a smaller model. Ollama said: ${raw}`;
+    } else if (/context length|exceeds.*context|input length/i.test(raw)) {
       message = `The prompt is larger than Ollama's context window (${cfg.numCtx} tokens). Raise OLLAMA_NUM_CTX in .env.local (for example 32768, if the computer has the memory) or send fewer or shorter materials. Atlas does not cut prompts silently.`;
     } else if (failed.status === 404 || /not found/i.test(raw)) {
       message = `Ollama does not have the model "${requested}". Run \`ollama pull ${requested}\` in a terminal, or choose a model you already have in AI setup (or set OLLAMA_MODEL).`;

@@ -69,7 +69,23 @@ const MIN_TIMEOUT_MS = 15000;
  * the full model-load cost again.
  */
 export const OLLAMA_DEFAULT_KEEP_ALIVE = '30m';
-const KEEP_ALIVE_PATTERN = /^(-1|\d+(?:ns|us|µs|ms|s|m|h))$/;
+// `0` (unload as soon as the call ends) and `-1` (never unload) are both valid
+// Ollama values and both matter on a machine short of video memory.
+const KEEP_ALIVE_PATTERN = /^(-1|0|\d+(?:ns|us|µs|ms|s|m|h))$/;
+
+/**
+ * An optional whole number: '' means "do not send it at all", which for
+ * `num_gpu` means Ollama decides how much of the model to put on the GPU.
+ */
+function optionalCountSetting(raw, { min, name }) {
+  const text = String(raw ?? '').trim();
+  if (text === '') return { value: null, note: '' };
+  const parsed = Number.parseInt(text, 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return { value: null, note: `${name}="${raw}" is not a whole number of ${min} or more, so Atlas leaves the choice to Ollama.` };
+  }
+  return { value: parsed, note: '' };
+}
 
 function numberSetting(raw, { fallback, min, max, name }) {
   const text = String(raw ?? '').trim();
@@ -110,7 +126,7 @@ function thinkSetting(raw) {
  *   baseUrl: string, model: string, numCtx: number, problem: string,
  *   think: true | false | string | null, thinkBudget: number,
  *   minTemperature: number, topP: number, topK: number,
- *   timeoutMs: number, keepAlive: string, warnings: string[]
+ *   timeoutMs: number, numGpu: number|null, keepAlive: string, warnings: string[]
  * }}
  */
 export function ollamaConfig(env = {}) {
@@ -143,6 +159,7 @@ export function ollamaConfig(env = {}) {
   const timeout = numberSetting(env.OLLAMA_TIMEOUT_MS, {
     fallback: OLLAMA_DEFAULT_TIMEOUT_MS, min: MIN_TIMEOUT_MS, name: 'OLLAMA_TIMEOUT_MS',
   });
+  const numGpu = optionalCountSetting(env.OLLAMA_NUM_GPU, { min: 0, name: 'OLLAMA_NUM_GPU' });
   const keepAlive = String(env.OLLAMA_KEEP_ALIVE ?? OLLAMA_DEFAULT_KEEP_ALIVE).trim() || OLLAMA_DEFAULT_KEEP_ALIVE;
   const keepAliveOk = KEEP_ALIVE_PATTERN.test(keepAlive);
 
@@ -157,6 +174,7 @@ export function ollamaConfig(env = {}) {
     topP: topP.value,
     topK: Math.floor(topK.value),
     timeoutMs: Math.floor(timeout.value),
+    numGpu: numGpu.value,
     keepAlive: keepAliveOk ? keepAlive : OLLAMA_DEFAULT_KEEP_ALIVE,
     // A bad value is never used silently: it is reported by /api/status and
     // appended to the AI answer's warning, and the default takes its place.
@@ -167,6 +185,7 @@ export function ollamaConfig(env = {}) {
       topP.note,
       topK.note,
       timeout.note,
+      numGpu.note,
       keepAliveOk ? '' : `OLLAMA_KEEP_ALIVE="${keepAlive}" is not an Ollama duration (for example 30m, 1h, -1), so Atlas used ${OLLAMA_DEFAULT_KEEP_ALIVE}.`,
     ].filter(Boolean),
   };

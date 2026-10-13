@@ -259,20 +259,21 @@ For a full, beginner-safe walkthrough — GitHub Desktop, Node, Ollama, `qwen3:8
 | `LLM_PROVIDER=ollama` | Use the local Ollama instead of NaraRouter (wins even if `NARAROUTER_API_KEY` is set) | — |
 | `OLLAMA_MODEL` | Model name you pulled with `ollama pull` (`qwen3:8b` is the recommended reasoning model) | `llama3.2` |
 | `OLLAMA_BASE_URL` | Where Ollama listens | `http://127.0.0.1:11434` |
-| `OLLAMA_NUM_CTX` | Context window requested per call, in tokens (16384 is a practical minimum for Atlas prompts; a reasoning model keeps its trace inside this same window, so 32768 suits `qwen3:8b`) | `16384` |
+| `OLLAMA_NUM_CTX` | Context window requested per call, in tokens (16384 is a practical minimum for Atlas prompts; a reasoning model keeps its trace inside this same window). Ollama reserves the KV cache for the whole window up front on every call, so raise it only as far as the machine's memory allows | `16384` |
 | `OLLAMA_THINK` | `on` \| `off` \| `auto` \| `low` \| `medium` \| `high` \| `max` — whether Atlas asks a reasoning model to think | `on` |
 | `OLLAMA_THINK_BUDGET` | Output tokens reserved for the reasoning trace, on top of the answer | `8192` |
 | `OLLAMA_MIN_TEMPERATURE` | Floor applied to a requested temperature while reasoning is on (`0` disables the floor) | `0.6` |
 | `OLLAMA_TOP_P` / `OLLAMA_TOP_K` | Sampling used while reasoning is on | `0.95` / `20` |
 | `OLLAMA_TIMEOUT_MS` | Wall-clock ceiling for one call | `1800000` (30 min) |
-| `OLLAMA_KEEP_ALIVE` | How long Ollama keeps the model loaded between AI actions | `30m` |
+| `OLLAMA_KEEP_ALIVE` | How long Ollama keeps the model loaded between AI actions; `0` unloads after each call, `-1` never unloads | `30m` |
+| `OLLAMA_NUM_GPU` | Model layers to offload to the GPU, sent with every call. Unset = Ollama decides; `0` = CPU only, for when model plus context will not fit | *(Ollama decides)* |
 
 What happens, and what does not:
 
 - The **Atlas server** calls Ollama. The browser never talks to Ollama, and no API key is used.
 - Prompts stay on your computer, unless you deliberately pick an Ollama cloud model.
 - Atlas never swaps a missing model for another one. If the model is not pulled, the error gives the exact `ollama pull …` command.
-- A prompt larger than `OLLAMA_NUM_CTX` is **refused with a message**, not cut silently. Raise `OLLAMA_NUM_CTX` (for example `32768`) if your computer has the memory.
+- A prompt larger than `OLLAMA_NUM_CTX` is **refused with a message**, not cut silently. Raise `OLLAMA_NUM_CTX` (for example `32768`) if your computer has the memory — and if a call then fails with *out of memory*, that is the KV cache refusing to fit in what the model left behind, not Atlas cutting anything; see the ladder in LOCAL_SETUP.md.
 - Speed depends on your hardware. A long document on a laptop CPU can take many minutes; `Ollama did not finish within N minutes` means Atlas stopped waiting, so raise `OLLAMA_TIMEOUT_MS`, send a shorter document, or use a smaller model.
 - Ollama is **not available on Vercel**: a Vercel deployment cannot reach your computer's `127.0.0.1`. Ollama is for local development.
 
@@ -290,7 +291,8 @@ What happens, and what does not:
 Two more things a local run needs that a hosted provider never did:
 
 - **The call is streamed.** Node's `fetch` (undici) aborts any request whose response headers take more than 300 seconds, so a `stream: false` generation died at five minutes however patient Atlas was willing to be. Atlas now reads Ollama's newline-delimited stream over `node:http` (`api/ollamaChat.js`), and the only deadline in force is `OLLAMA_TIMEOUT_MS`.
-- **`keep_alive` is raised to 30 minutes.** Ollama's own default unloads the model after 5 idle minutes, so every AI action after a short reading pause paid the full model-load cost again.
+- **`keep_alive` is raised to 30 minutes.** Ollama's own default unloads the model after 5 idle minutes, so every AI action after a short reading pause paid the full model-load cost again. Set `OLLAMA_KEEP_ALIVE=0` if you would rather hand the memory back between calls.
+- **Memory is reported, not guessed at.** Weights and the KV cache are two separate reservations, so a model can load and still fail to start with `failed to allocate buffer for kv cache` — the cache is sized for the whole context window and reserved up front, whatever the prompt's size. Atlas turns that failure into the order worth trying (lower `OLLAMA_NUM_CTX`, then quantize the cache with `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0`, then unload the model, then fewer GPU layers via `OLLAMA_NUM_GPU`) and still prints Ollama's own words at the end.
 
 What Atlas reports back, so none of this is invisible:
 
@@ -308,7 +310,7 @@ Setup (once):
    ```dotenv
    LLM_PROVIDER=ollama
    OLLAMA_MODEL=qwen3:8b
-   OLLAMA_NUM_CTX=32768
+   OLLAMA_NUM_CTX=16384
    ```
 
 5. Run `npm run dev`, open AI setup in Atlas, press **Re-check**, then **Use Ollama**. The panel should read **“Reasoning is on for qwen3:8b”**.
@@ -402,6 +404,7 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 | AI setup says Ollama is not running / `Could not reach Ollama` | Ollama is not started, or `OLLAMA_BASE_URL` points elsewhere | Open the Ollama app (or run `ollama serve`), check `curl http://127.0.0.1:11434/api/tags`, then press **Re-check** |
 | `Ollama does not have the model "…"` | The model named in `OLLAMA_MODEL` (or picked in AI setup) was never pulled | Run the `ollama pull <model>` command shown in the message, or pick an installed model |
 | `The prompt is larger than Ollama's context window` | `OLLAMA_NUM_CTX` is smaller than the prompt | Raise `OLLAMA_NUM_CTX` in `.env.local` (e.g. `32768`), restart `npm run dev`, or send fewer materials |
+| `Ollama ran out of memory while starting …` / `failed to allocate buffer for kv cache` | The model loaded, but the KV cache for `OLLAMA_NUM_CTX` did not fit in the memory left over | Lower `OLLAMA_NUM_CTX`; set `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0` in **Ollama's** environment and restart it; `ollama stop <model>`; or lower `OLLAMA_NUM_GPU` |
 | `Unknown LLM_PROVIDER "…"` | Typo in `LLM_PROVIDER` | Use one of `nararouter`, `ollama`, `gemini`, `groq`, `openrouter`, `openai`, `anthropic` |
 | The model list in AI setup is empty | Your NaraRouter plan does not list models, or the key is not entitled | Check `GET /api/models` for its `message`, then run the `curl` in Part 2.3 with your own key; `NARAROUTER_MODEL` still works as a default |
 | University Research fetch fails | Public page is unavailable or blocks browser CORS | Atlas does not proxy or bypass the block. Paste the publicly visible page text and keep its official URL in the source field |

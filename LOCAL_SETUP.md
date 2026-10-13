@@ -110,7 +110,7 @@ named exactly `.env.local` — with the dot, and no `.txt` at the end — contai
 ```dotenv
 LLM_PROVIDER=ollama
 OLLAMA_MODEL=qwen3:8b
-OLLAMA_NUM_CTX=32768
+OLLAMA_NUM_CTX=16384
 ```
 
 What each line does:
@@ -119,7 +119,7 @@ What each line does:
 |---|---|
 | `LLM_PROVIDER=ollama` | Tells the Atlas server to call your local Ollama. Without it, Atlas stays in labeled **demo mode** and never calls a model. |
 | `OLLAMA_MODEL=qwen3:8b` | The model to run. It must match `ollama list` exactly, including the `:8b`. |
-| `OLLAMA_NUM_CTX=32768` | The context window per call. A reasoning model keeps its chain of thought inside this same window, so 32768 leaves room for a document, the instructions, the reasoning and the answer. `qwen3:8b`'s own limit is 40960 tokens — Atlas reads the real number from the model and shows it in AI setup. Lower it to `16384` if the machine runs short of memory. |
+| `OLLAMA_NUM_CTX=16384` | The context window per call. A reasoning model keeps its chain of thought inside this same window, so this is room for a document, the instructions, the reasoning and the answer. `qwen3:8b`'s own limit is 40960 tokens — Atlas reads the real number from the model and shows it in AI setup. Start here rather than higher: the window costs video memory on every call whether the prompt is long or not (see *Not enough memory for the model* below). Lower it to `8192` if your machine is short of memory. |
 
 Reasoning is **on by default** — you do not need a line for it. The knobs that
 exist if you ever want them (`OLLAMA_THINK`, `OLLAMA_THINK_BUDGET`,
@@ -182,6 +182,96 @@ ollama ps
 
 ---
 
+## Not enough memory for the model
+
+This is the most common failure on a local setup, and it reads like a bug when
+it is arithmetic. Ollama reports it roughly as:
+
+```text
+Ollama returned HTTP 500: llama-server reported out-of-memory during startup:
+ggml_backend_buft_alloc_buffer_n_default: failed to allocate Vulkan0 buffer of
+size 1073741824
+llama_init_from_model: failed to initialize the context: failed to allocate
+buffer for kv cache
+```
+
+Read the last line: **`kv cache`**. Weights and the KV cache are two separate
+reservations, so a model can load and still fail to start. The cache is sized
+`layers × KV heads × head size × 2 × bytes × context length` and it is reserved
+**up front for the whole window** — not for the size of what you happened to
+send. So `OLLAMA_NUM_CTX=32768` costs four times what `8192` costs, on every
+call, for as long as the model stays loaded.
+
+Work down this list and stop as soon as the call succeeds. Each step gives
+something different away, and they stack.
+
+**1. Lower the context window.** This is the only lever that costs your results
+nothing, because the reasoning budget Atlas asks for (8192 tokens) still fits
+inside a window this size.
+
+```dotenv
+# .env.local
+OLLAMA_NUM_CTX=8192
+```
+
+Restart `npm run dev` — environment files are read at startup. A 16K–32K window
+is a comfort for very long documents; it is not required for Atlas to answer
+well.
+
+**2. Make the cache smaller instead of shorter** by quantizing it. These belong
+to the environment **Ollama itself** runs in — not `.env.local`, because Atlas
+never reads them:
+
+```bash
+OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0
+```
+
+`q8_0` roughly halves the KV cache and is very close to lossless at these
+lengths; `q4_0` roughly quarters it, and that is where quality can start to
+slip. `OLLAMA_KV_CACHE_TYPE` only takes effect with flash attention on, so set
+both, then **restart Ollama** (quit the tray app on Windows, or stop
+`ollama serve`) — the server reads its environment at startup.
+
+**3. Free memory that is already spoken for.**
+
+```bash
+ollama ps               # anything resident that you are not using?
+ollama stop qwen3:8b    # unload it now
+```
+
+Atlas keeps the model loaded for 30 minutes between calls, because reloading an
+8B model on every call is slow. If you would rather have that memory back
+between calls:
+
+```dotenv
+# .env.local
+OLLAMA_KEEP_ALIVE=0
+```
+
+Close browsers, games and anything else holding the GPU as well — on a small
+card they are competing for the same memory.
+
+**4. Keep part of the model off the GPU.** Ollama normally splits the model
+across GPU and system memory itself. If its choice leaves no room for the
+cache, override it:
+
+```dotenv
+# .env.local
+OLLAMA_NUM_GPU=28    # offload 28 layers; 0 = run entirely on the CPU
+```
+
+Fewer layers on the GPU means slower generation, but a model that actually
+starts. Atlas sends this with every call; leave it unset to let Ollama decide.
+
+**5. Rule out a driver or Ollama regression.** If it still fails at
+`OLLAMA_NUM_CTX=4096` with `OLLAMA_NUM_GPU=0`, the model is not the problem.
+Update Ollama and your GPU driver; integrated GPUs in particular have open
+reports of allocation failures on newer builds (ollama/ollama issues #18531 and
+#17748). As a last resort, `ollama pull qwen3:4b` and set
+`OLLAMA_MODEL=qwen3:4b` — a smaller model that answers beats a bigger one that
+cannot start.
+
 ## When something is wrong
 
 | What you see | What it means | What to do |
@@ -189,7 +279,7 @@ ollama ps
 | “Ollama is not running at http://127.0.0.1:11434 (connection refused…)” | The Ollama server is not up. | Open the Ollama app or run `ollama serve`, then press **Re-check**. |
 | `Ollama does not have the model "qwen3:8b"` | The model name does not match anything pulled. | `ollama pull qwen3:8b`, or set `OLLAMA_MODEL` to a name from `ollama list`. |
 | “The prompt is larger than Ollama's context window” | The document plus instructions did not fit. | Raise `OLLAMA_NUM_CTX` (up to the limit AI setup shows for your model), or send fewer/shorter materials. Atlas never cuts a prompt silently. |
-| “Ollama returned HTTP 500: model requires more system memory” | Not enough RAM for the model plus that context window. | Lower `OLLAMA_NUM_CTX`, close other apps, or use a smaller model. |
+| “Ollama ran out of memory while starting qwen3:8b… failed to allocate buffer for kv cache” (or “model requires more system memory”) | The model loaded, but the KV cache for the context window did not fit in the memory left over. | Work through *Not enough memory for the model* below, in that order. |
 | “Ollama did not finish within 30 minute(s)” | Your hardware could not finish that generation in the time allowed. | Send a shorter document, or set `OLLAMA_THINK=off` for a fast, shallower answer. |
 | “The model wrote only its reasoning and never reached the answer” | The trace and the answer did not both fit. | Raise `OLLAMA_NUM_CTX`, or send less text. |
 | Atlas says “Demo output” | `LLM_PROVIDER=ollama` is missing, or the dev server was started before you created `.env.local`. | Check the file, then **restart `npm run dev`** — environment files are read at startup. |

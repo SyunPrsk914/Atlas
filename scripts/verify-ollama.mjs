@@ -205,6 +205,10 @@ const server = createServer((req, res) => {
           return fail(400, 'input length exceeds maximum context length');
         case 'oom-model':
           return fail(500, 'model requires more system memory (12.0 GiB) than is available');
+        case 'kv-oom':
+          // Verbatim from a real machine: an 8B model with a large context on a
+          // GPU that cannot hold weights and cache at once.
+          return fail(500, 'llama-server reported out-of-memory during startup: ggml_backend_buft_alloc_buffer_n_default: failed to allocate Vulkan0 buffer of size 1073741824 llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache');
         default:
           return fail(404, `model "${body.model}" not found, try pulling it first`);
       }
@@ -337,6 +341,19 @@ await test('config: a value that cannot be used is reported, not applied silentl
   assert.equal(cfg.warnings.length, 4, cfg.warnings.join(' | '));
   // A floor of 0 is a real choice: "never touch Atlas's temperature".
   assert.equal(ollamaConfig({ OLLAMA_MIN_TEMPERATURE: '0' }).minTemperature, 0);
+});
+
+await test('config: the video-memory levers are opt-in, and 0 is a real keep-alive', async () => {
+  assert.equal(ollamaConfig({}).numGpu, null, 'unset means Ollama decides');
+  assert.equal(ollamaConfig({ OLLAMA_NUM_GPU: '0' }).numGpu, 0);
+  assert.equal(ollamaConfig({ OLLAMA_NUM_GPU: '20' }).numGpu, 20);
+  const bad = ollamaConfig({ OLLAMA_NUM_GPU: 'lots' });
+  assert.equal(bad.numGpu, null);
+  assert.match(bad.warnings.join(' '), /OLLAMA_NUM_GPU="lots"/);
+  // Unloading straight after a call is the escape hatch on a small GPU.
+  assert.equal(ollamaConfig({ OLLAMA_KEEP_ALIVE: '0' }).keepAlive, '0');
+  assert.equal(ollamaConfig({ OLLAMA_KEEP_ALIVE: '-1' }).keepAlive, '-1');
+  assert.deepEqual(ollamaConfig({ OLLAMA_KEEP_ALIVE: '0' }).warnings, []);
 });
 
 await test('network errors: connection refused is named in plain words', async () => {
@@ -655,11 +672,41 @@ await test('chat: prompt larger than the context window -> explains OLLAMA_NUM_C
   assert.match(body.error, /OLLAMA_NUM_CTX/);
 });
 
-await test('chat: out-of-memory from Ollama is shown verbatim with its HTTP code', async () => {
+await test('chat: out-of-memory is turned into a fix, and still shows what Ollama said', async () => {
   setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
   const { status, body } = await invoke({ prompt: 'Hello.', model: 'oom-model' });
   assert.equal(status, 500);
-  assert.match(body.error, /Ollama returned HTTP 500: model requires more system memory/);
+  assert.match(body.error, /ran out of memory/);
+  assert.match(body.error, /OLLAMA_NUM_CTX/);
+  assert.match(body.error, /model requires more system memory/, "Ollama's own words are never dropped");
+});
+
+await test('chat: the KV-cache failure names the context window first, not the prompt', async () => {
+  setEnv({
+    LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_MODEL: 'kv-oom', OLLAMA_NUM_CTX: '32768',
+  });
+  const { status, body } = await invoke({ prompt: 'Hello.' });
+  assert.equal(status, 500);
+  assert.match(body.error, /reserves the KV cache up front for all 32768 tokens/);
+  assert.match(body.error, /OLLAMA_NUM_CTX/);
+  assert.match(body.error, /OLLAMA_FLASH_ATTENTION=1/);
+  assert.match(body.error, /OLLAMA_KV_CACHE_TYPE=q8_0/);
+  assert.match(body.error, /ollama stop kv-oom/);
+  assert.match(body.error, /OLLAMA_KEEP_ALIVE=0/);
+  assert.match(body.error, /OLLAMA_NUM_GPU/);
+  assert.match(body.error, /failed to allocate buffer for kv cache/, "the real error is still there to read");
+  assert.doesNotMatch(body.error, /larger than Ollama's context window/, 'this is not a prompt-too-large error');
+});
+
+await test('chat: OLLAMA_NUM_GPU is only sent when it is set, so Ollama keeps choosing by default', async () => {
+  seen.length = 0;
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase });
+  await invoke({ prompt: 'Hello.' });
+  assert.equal(lastChatFor('llama3.2').body.options.num_gpu, undefined);
+
+  setEnv({ LLM_PROVIDER: 'ollama', OLLAMA_BASE_URL: mockBase, OLLAMA_NUM_GPU: '0' });
+  await invoke({ prompt: 'Hello.' });
+  assert.equal(lastChatFor('llama3.2').body.options.num_gpu, 0, 'CPU only, when the GPU cannot hold the model');
 });
 
 await test('chat: a model that refuses `think` is retried once without it, and still answers', async () => {
