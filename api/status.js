@@ -9,6 +9,7 @@
 // GET /api/status -> { ok, configured, provider, model, grounding, ... }
 
 import { resolveSupabaseConfig } from './supabaseConfig.js';
+import { ollamaConfig, describeOllamaNetworkError } from './ollamaConfig.js';
 
 function send(res, status, payload) {
   res.statusCode = status;
@@ -17,7 +18,30 @@ function send(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function readEnvStatus() {
+/**
+ * Ollama has no key to check, so "configured" means "a local Ollama answers".
+ * The probe is a single GET to the local server, with a short timeout, and it
+ * never reports the base URL's credentials (there are none).
+ */
+async function probeOllama() {
+  const cfg = ollamaConfig(process.env);
+  if (cfg.problem) return { ok: false, message: cfg.problem, model: cfg.model };
+  try {
+    const response = await fetch(`${cfg.baseUrl}/api/tags`, { signal: AbortSignal.timeout(2000) });
+    if (!response.ok) {
+      return { ok: false, model: cfg.model, message: `Ollama answered HTTP ${response.status} at ${cfg.baseUrl}. Check that it is the Ollama server.` };
+    }
+    return { ok: true, model: cfg.model, message: '' };
+  } catch (error) {
+    return {
+      ok: false,
+      model: cfg.model,
+      message: `Ollama is not running at ${cfg.baseUrl} (${describeOllamaNetworkError(error)}). Start Ollama on this computer, then press Re-check.`,
+    };
+  }
+}
+
+async function readEnvStatus() {
   const keys = {
     gemini: !!process.env.GEMINI_API_KEY,
     nararouter: !!process.env.NARAROUTER_API_KEY,
@@ -32,6 +56,18 @@ function readEnvStatus() {
   // reported only when a deployment already has one of those keys.
   const preference = ['nararouter', 'gemini', 'groq', 'openrouter', 'openai', 'anthropic'];
   const provider = explicit || preference.find((name) => keys[name]) || '';
+
+  if (provider === 'ollama') {
+    const probe = await probeOllama();
+    return {
+      configured: probe.ok,
+      provider,
+      model: probe.model,
+      grounding: false,
+      message: probe.message,
+      available_providers: Object.keys(keys).filter((p) => keys[p]),
+    };
+  }
 
   return {
     configured: !!provider && keys[provider] === true,
@@ -63,7 +99,7 @@ export async function handleStatus(req, res) {
       ? null
       : (supabaseConfig.invalidReason || supabaseConfig.problems[0] || null),
     llm_allow_anon: process.env.LLM_ALLOW_ANON === 'true',
-    ...readEnvStatus(),
+    ...(await readEnvStatus()),
   });
 }
 

@@ -5,6 +5,10 @@
 // The key is configured server-side and the provider's own quotas and prices
 // remain in force — Atlas adds none of its own.
 //
+// Providers: NaraRouter is the default (chosen when NARAROUTER_API_KEY is set).
+// Ollama runs a model on this computer and is used ONLY when LLM_PROVIDER=ollama
+// is set explicitly; see api/ollamaConfig.js and DEPLOYMENT.md.
+//
 // Request body (POST):
 //   {
 //     prompt: string,                     // required
@@ -29,6 +33,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { resolveSupabaseConfig } from './supabaseConfig.js';
+import { ollamaConfig, describeOllamaNetworkError } from './ollamaConfig.js';
 
 // ---------------------------------------------------------------------------
 // Model aliases used in the frontend (kept compatible with the old Base44
@@ -56,6 +61,8 @@ const PROVIDER_DEFAULTS = {
   groq: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
   openrouter: process.env.OPENROUTER_MODEL || 'openrouter/auto',
 };
+
+const KNOWN_PROVIDERS = ['nararouter', 'ollama', 'gemini', 'groq', 'openrouter', 'openai', 'anthropic'];
 
 function detectProvider() {
   const explicit = (process.env.LLM_PROVIDER || '').toLowerCase();
@@ -333,6 +340,75 @@ async function callAnthropic({ prompt, responseJsonSchema, model, maxTokens, tem
   };
 }
 
+// Local Ollama (opt-in: LLM_PROVIDER=ollama). Uses Ollama's native /api/chat so
+// the context window can be set explicitly (num_ctx) and a prompt that does not
+// fit is refused (truncate: false) instead of being cut silently. No key is sent
+// and no fallback to another model is attempted: a missing model is reported.
+async function callOllama({ prompt, responseJsonSchema, model, maxTokens, temperature }) {
+  const cfg = ollamaConfig(process.env);
+  if (cfg.problem) {
+    throw Object.assign(new Error(cfg.problem), { status: 503, provider: 'ollama', userMessage: cfg.problem });
+  }
+  const requested = model || cfg.model;
+
+  const options = { num_ctx: cfg.numCtx };
+  if (maxTokens) options.num_predict = maxTokens;
+  if (Number.isFinite(temperature)) options.temperature = temperature;
+
+  const body = {
+    model: requested,
+    messages: [{ role: 'user', content: prompt }],
+    stream: false,
+    truncate: false,
+    options,
+  };
+  // Generic JSON mode: the schema is already spelled out in the prompt, and
+  // Ollama's schema-constrained decoding is not needed for these answers.
+  if (responseJsonSchema) body.format = 'json';
+
+  const unreachable = (reason) => {
+    const message = `Could not reach Ollama at ${cfg.baseUrl} (${reason}). Start Ollama on this computer (open the Ollama app, or run \`ollama serve\` in a terminal), then press Re-check in AI setup.`;
+    return Object.assign(new Error(message), { status: 503, provider: 'ollama', userMessage: message });
+  };
+
+  let res;
+  try {
+    res = await fetch(`${cfg.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw unreachable(describeOllamaNetworkError(e));
+  }
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const raw = String(data?.error || '').trim();
+    let message;
+    if (/context length|exceeds.*context|input length/i.test(raw)) {
+      message = `The prompt is larger than Ollama's context window (${cfg.numCtx} tokens). Raise OLLAMA_NUM_CTX in .env.local (for example 32768, if the computer has the memory) or send fewer or shorter materials. Atlas does not cut prompts silently.`;
+    } else if (res.status === 404 || /not found/i.test(raw)) {
+      message = `Ollama does not have the model "${requested}". Run \`ollama pull ${requested}\` in a terminal, or choose a model you already have in AI setup (or set OLLAMA_MODEL).`;
+    } else if (res.status === 401 || res.status === 403) {
+      message = `Ollama refused the request (HTTP ${res.status}): ${raw || 'access denied'}. If this is a cloud model, sign in with \`ollama signin\`.`;
+    } else {
+      message = `Ollama returned HTTP ${res.status}${raw ? `: ${raw}` : ''}`;
+    }
+    throw Object.assign(new Error(message), { status: res.status, provider: 'ollama', userMessage: message });
+  }
+
+  // done_reason "length" = Ollama stopped at the output cap; surface it the way
+  // the other adapters do so the client sends the answer back for a retry.
+  const finishReason = data?.done_reason === 'length' ? 'length' : (data?.done_reason || '');
+  return {
+    text: data?.message?.content || '',
+    model: data?.model || requested,
+    finishReason,
+    promptEvalCount: data?.prompt_eval_count,
+  };
+}
+
 // Providers retire model IDs on their own schedule. If a caller-supplied model
 // is no longer offered, retry once with the provider default so a stale
 // preference degrades to "slightly different model" rather than a hard failure.
@@ -434,9 +510,16 @@ export async function handleInvokeLLM(req, res) {
   const groundingRequested = !!addContext;
   const groundingPossible = groundingRequested && provider === 'gemini' && !!process.env.GEMINI_API_KEY;
 
-  if (!provider || !apiKeyFor(provider)) {
+  // An explicit but unknown LLM_PROVIDER is a configuration error: name it,
+  // rather than reporting a generic "no provider" that hides the typo.
+  if (provider && !KNOWN_PROVIDERS.includes(provider)) {
+    send(res, 503, { error: `Unknown LLM_PROVIDER "${provider}". Use nararouter | ollama | gemini | groq | openrouter | openai | anthropic.` });
+    return;
+  }
+  // Ollama needs no key: it is a local server, selected explicitly.
+  if (!provider || (provider !== 'ollama' && !apiKeyFor(provider))) {
     send(res, 503, {
-      error: 'No AI provider is configured for this deployment. Set NARAROUTER_API_KEY (see DEPLOYMENT.md) and redeploy, or use demo mode until then.',
+      error: 'No AI provider is configured for this deployment. Set NARAROUTER_API_KEY (see DEPLOYMENT.md) and redeploy, set LLM_PROVIDER=ollama to use a local Ollama, or use demo mode until then.',
     });
     return;
   }
@@ -479,6 +562,9 @@ export async function handleInvokeLLM(req, res) {
           model || PROVIDER_DEFAULTS[provider],
           PROVIDER_DEFAULTS[provider],
         );
+    } else if (provider === 'ollama') {
+      // No fallback model: a missing Ollama model is reported, never swapped.
+      out = await callOllama({ prompt: finalPrompt, responseJsonSchema, model, maxTokens, temperature });
     } else if (provider === 'anthropic') {
       out = await callWithModelFallback(
         (m) => callAnthropic({ prompt: finalPrompt, responseJsonSchema, model: m, maxTokens, temperature }),
@@ -486,14 +572,14 @@ export async function handleInvokeLLM(req, res) {
         PROVIDER_DEFAULTS.anthropic,
       );
     } else {
-      send(res, 503, { error: `Unknown LLM_PROVIDER "${provider}". Use gemini | nararouter | groq | openrouter | openai | anthropic.` });
+      send(res, 503, { error: `Unknown LLM_PROVIDER "${provider}". Use nararouter | ollama | gemini | groq | openrouter | openai | anthropic.` });
       return;
     }
 
     const text = out.text || '';
     if (!text.trim()) {
       send(res, 502, {
-        error: out.finishReason === 'MAX_TOKENS'
+        error: ['MAX_TOKENS', 'length'].includes(out.finishReason)
           ? 'The AI ran out of output space before finishing. Shorten the request or raise max_tokens.'
           : 'The AI returned an empty response. This usually means the provider blocked the prompt — try rephrasing, or raise max_tokens.',
       });
@@ -507,8 +593,12 @@ export async function handleInvokeLLM(req, res) {
     } else if (groundingRequested && !actuallyGrounded) {
       warnings.push('Gemini completed this call without web-grounding metadata. Treat the answer as not web-grounded.');
     }
-    if (out.finishReason === 'MAX_TOKENS') {
-      warnings.push('The response hit the hosted model output cap and may be incomplete.');
+    if (['MAX_TOKENS', 'length'].includes(out.finishReason)) {
+      warnings.push('The response hit the model output cap and may be incomplete.');
+    }
+    if (provider === 'ollama' && out.promptEvalCount && out.promptEvalCount >= ollamaConfig(process.env).numCtx) {
+      // Defensive: Ollama refuses an oversized prompt, so this should not happen.
+      warnings.push(`The prompt filled the Ollama context window (${ollamaConfig(process.env).numCtx} tokens); the answer may ignore part of it. Raise OLLAMA_NUM_CTX.`);
     }
     const meta = {
       provider,
@@ -536,7 +626,8 @@ export async function handleInvokeLLM(req, res) {
   } catch (e) {
     const status = Number.isInteger(e.status) && e.status >= 400 && e.status <= 599 ? e.status : 502;
     send(res, status, {
-      error: explainProviderError(e.provider || provider, e.message, e.status),
+      // Ollama errors arrive already written for the applicant; do not re-map them.
+      error: e.userMessage || explainProviderError(e.provider || provider, e.message, e.status),
       provider: e.provider || provider,
       ...(e.providerCode ? { code: e.providerCode } : {}),
     });

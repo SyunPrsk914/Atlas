@@ -285,7 +285,7 @@ export default function KnowledgeBase() {
     const mode = getAIMode();
     if (!hasLiveModel()) {
       toast.error('University research needs a connected AI model', {
-        description: 'Demo mode produces placeholder text, which Atlas does not save as research. Nothing was changed. Connect NaraRouter in AI setup (AI status in the sidebar), then research again.',
+        description: 'Demo mode produces placeholder text, which Atlas does not save as research. Nothing was changed. Connect an AI provider in AI setup (AI status in the sidebar), then research again.',
         duration: 9000,
       });
       return;
@@ -478,7 +478,7 @@ export default function KnowledgeBase() {
           <div>
             <p className="text-sm font-medium text-amber-800">Demo AI is active</p>
             <p className="text-sm text-amber-700/80 mt-0.5">
-              Reports and other AI outputs are clearly labeled placeholders until NaraRouter is connected in the AI setup panel. Nothing here is saved as if it were real research.
+              Reports and other AI outputs are clearly labeled placeholders until an AI provider is connected in the AI setup panel. Nothing here is saved as if it were real research.
             </p>
           </div>
         </div>
@@ -488,7 +488,7 @@ export default function KnowledgeBase() {
           <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-medium text-amber-800">Selected AI provider is unavailable</p>
-            <p className="text-sm text-amber-700/80 mt-0.5">{aiStatus.message || 'Open AI setup to re-check the NaraRouter key on this deployment.'}</p>
+            <p className="text-sm text-amber-700/80 mt-0.5">{aiStatus.message || 'Open AI setup to re-check the AI provider on this deployment.'}</p>
           </div>
         </div>
       )}
@@ -631,7 +631,7 @@ export default function KnowledgeBase() {
                 className="text-xs"
               />
               <p className="text-[11px] text-foreground/40 leading-relaxed">
-                Atlas fetches this URL directly in your browser without cookies or a proxy. If cross-origin access fails, paste the public text. The model reads this text; NaraRouter cannot label an answer web-grounded, so Atlas never claims it did.
+                Atlas fetches this URL directly in your browser without cookies or a proxy. If cross-origin access fails, paste the public text. The model reads this text; the model provider cannot label an answer web-grounded, so Atlas never claims it did.
               </p>
             </div>
 
@@ -882,15 +882,15 @@ function AIStatusPill({ status }) {
   }
   if (status.mode === 'demo' || !status.configured) {
     return (
-      <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title="Demo output is labeled. Connect NaraRouter in AI setup for real model output.">
+      <Badge variant="outline" className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50" title="Demo output is labeled. Connect an AI provider in AI setup for real model output.">
         <AlertTriangle className="w-3 h-3" /> Demo AI
       </Badge>
     );
   }
   return (
-    <Badge variant="outline" className="gap-1.5 text-green-700 border-green-300 bg-green-50" title="NaraRouter. Not web-grounded; the provider's own plan limits apply.">
+    <Badge variant="outline" className="gap-1.5 text-green-700 border-green-300 bg-green-50" title={`${status.providerLabel || 'AI provider'}. Not web-grounded; the provider's own limits apply.`}>
       <CheckCircle2 className="w-3 h-3" />
-      {status.providerLabel || 'NaraRouter'}{status.model ? ` · ${status.model}` : ''}
+      {status.providerLabel || 'AI'}{status.model ? ` · ${status.model}` : ''}
     </Badge>
   );
 }

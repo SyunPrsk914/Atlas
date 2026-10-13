@@ -702,7 +702,7 @@ export default function EssayBuilder() {
   const guardLive = (action) => {
     if (hasLiveModel()) return true;
     toast.error(`${action} needs a connected AI model`, {
-      description: 'Demo mode shows placeholder text, so Atlas will not write, review, or edit an essay with it. Nothing was changed. Connect NaraRouter in AI setup (AI status in the sidebar).',
+      description: 'Demo mode shows placeholder text, so Atlas will not write, review, or edit an essay with it. Nothing was changed. Connect an AI provider in AI setup (AI status in the sidebar).',
       duration: 9000,
     });
     return false;
@@ -747,7 +747,7 @@ export default function EssayBuilder() {
 
   /** Why the drafting actions are unavailable right now, in one sentence. */
   const actionHintFor = (essay) => {
-    if (!hasLiveModel()) return 'Demo mode: connect NaraRouter in AI setup to generate, review, or edit.';
+    if (!hasLiveModel()) return 'Demo mode: connect an AI provider in AI setup to generate, review, or edit.';
     if (!essay?.content?.trim()) return 'Review and Apply edits read the essay text. Write or generate the essay first.';
     return '';
   };

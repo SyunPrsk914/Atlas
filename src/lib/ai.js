@@ -1,12 +1,13 @@
 // Central AI routing and honest status/error reporting for Atlas.
 //
-// One real-model path: NaraRouter, reached through `/api/invoke-llm`, which
-// holds the key server-side. With no key configured on the deployment, Atlas
-// returns clearly labeled demo output and refuses to save it.
+// One real-model path: the provider the server reports, reached through
+// `/api/invoke-llm`, which holds any key server-side. NaraRouter is the default;
+// a local Ollama is used only when the server is set to LLM_PROVIDER=ollama.
+// With no provider configured, Atlas returns clearly labeled demo output and
+// refuses to save it.
 //
-// There is deliberately no second provider path: every failure mode, status
-// message, and setting describes this one provider, so nothing can disagree
-// with anything else. The former on-device model path is removed.
+// Every status message and error names the provider that is actually in use,
+// taken from the server's answer, never a hard-coded name.
 
 import { toast } from 'sonner';
 import { base44 } from '@/api/base44Client';
@@ -16,10 +17,19 @@ import {
   getAIMode,
   getModelOverride,
   providerLabel,
+  rememberedProvider,
   setHostedAvailable,
 } from '@/api/aiProvider';
 
 export { hasLiveModel, isLiveOutcome } from './aiOutcome';
+
+/** What to do when no provider is configured, for the provider the user expects. */
+function setupHint(provider) {
+  if (provider === 'ollama') {
+    return 'Set LLM_PROVIDER=ollama in .env.local, start Ollama on this computer, and press Re-check in AI setup (see DEPLOYMENT.md).';
+  }
+  return 'Set NARAROUTER_API_KEY on the deployment (see DEPLOYMENT.md), or set LLM_PROVIDER=ollama to use a local Ollama.';
+}
 
 /**
  * Human-readable explanation for anything that can go wrong between the
@@ -49,7 +59,7 @@ export function explainAIError(error, fallbackTitle = 'AI request failed') {
     // response and never converts a provider failure into a success.
     return {
       title: `${providerName} is rate-limiting this key`,
-      message: `${message} Wait a moment and try again — Atlas sends AI calls one at a time in the order you clicked them, so a burst of clicks is not the cause. The free NaraRouter plan is limited per minute; its live pricing page lists the current numbers.`,
+      message: `${message} Wait a moment and try again — Atlas sends AI calls one at a time in the order you clicked them, so a burst of clicks is not the cause.${error?.provider === 'nararouter' ? ' The free NaraRouter plan is limited per minute; its live pricing page lists the current numbers.' : ''}`,
     };
   }
   if (status === 402) {
@@ -58,19 +68,22 @@ export function explainAIError(error, fallbackTitle = 'AI request failed') {
   if (error?.code === 'research_fetch_failed' || error?.code === 'research_login_required') {
     return { title: 'Could not fetch the public source page', message };
   }
+  if (error?.provider === 'ollama' && status === 503) {
+    return { title: 'Ollama is not running', message };
+  }
   if (error?.code === 'unreachable' || error?.code === 'bad_response') {
     return { title: 'AI endpoint not reachable', message };
   }
   if (/Missing Authorization|No API key configured|No hosted AI provider|Could not find the column/i.test(message)) {
     return {
       title: 'AI is not connected yet',
-      message: `${message} Set NARAROUTER_API_KEY on the deployment (see DEPLOYMENT.md), then reopen AI setup.`,
+      message: `${message} ${setupHint(error?.provider)} Then reopen AI setup.`,
     };
   }
   if (/fetch failed|Failed to fetch|NetworkError|Load failed/i.test(message)) {
     return {
       title: 'Network error',
-      message: `${message}. Check your connection, then reopen AI setup to confirm NaraRouter is still selected.`,
+      message: `${message}. Check your connection, then reopen AI setup to confirm your AI provider is still selected.`,
     };
   }
   return { title: fallbackTitle, message };
@@ -109,13 +122,18 @@ export async function refreshAIStatus() {
     const hosted = await checkAIStatus();
     setHostedAvailable(!!hosted?.configured, hosted?.provider || null);
     if (mode === 'hosted') {
+      // The server names the provider it will actually call; before it answers
+      // (or if the server is unreachable) the last provider seen is shown.
+      const provider = hosted?.provider || rememberedProvider() || null;
+      const label = providerLabel(provider || 'nararouter');
       statusValue = {
         ...hosted,
         mode: 'hosted',
-        providerLabel: providerLabel(hosted?.provider),
+        provider,
+        providerLabel: label,
         message: hosted?.configured
           ? (hosted.message || '')
-          : 'NaraRouter is selected but this deployment has no API key. Add NARAROUTER_API_KEY, or switch to demo mode in AI setup.',
+          : `${label} is selected but it is not connected. ${hosted?.message || setupHint(provider)} Or switch to demo mode in AI setup.`,
       };
     } else {
       statusValue = {
@@ -124,16 +142,19 @@ export async function refreshAIStatus() {
         provider: 'demo',
         providerLabel: 'Demo',
         message: hosted?.configured
-          ? 'Demo output is active. Select NaraRouter in AI setup for real generation.'
-          : 'Demo output is active — this deployment has no AI key configured yet.',
+          ? 'Demo output is active. Select your AI provider in AI setup for real generation.'
+          : (hosted?.message
+            // The server's own reason, e.g. "Ollama is not running at …".
+            ? `Demo output is active. ${hosted.message}`
+            : 'Demo output is active — no AI provider is connected yet.'),
       };
     }
   } catch (error) {
     statusValue = {
       reachable: false,
       configured: false,
-      provider: mode === 'hosted' ? 'nararouter' : 'demo',
-      providerLabel: mode === 'hosted' ? 'NaraRouter' : 'Demo',
+      provider: mode === 'hosted' ? (rememberedProvider() || null) : 'demo',
+      providerLabel: mode === 'hosted' ? providerLabel(rememberedProvider() || null) : 'Demo',
       mode,
       model: null,
       message: String(error?.message || error),
@@ -169,7 +190,7 @@ function demoValue(schema, demoText, depth = 0) {
 }
 
 function demoResponse(params) {
-  const demoText = 'DEMO OUTPUT — no AI key is configured on this deployment. Open AI setup to select NaraRouter. This is placeholder text, not an AI answer.';
+  const demoText = 'DEMO OUTPUT — no AI provider is connected to this deployment. Open AI setup to connect one. This is placeholder text, not an AI answer.';
   return {
     result: params.response_json_schema ? demoValue(params.response_json_schema, demoText) : demoText,
     meta: {
@@ -177,7 +198,7 @@ function demoResponse(params) {
       model: null,
       grounded: false,
       demo: true,
-      warning: 'DEMO OUTPUT — this is placeholder text, not a model-generated answer. Select NaraRouter in AI setup to generate real output.',
+      warning: 'DEMO OUTPUT — this is placeholder text, not a model-generated answer. Connect an AI provider in AI setup to generate real output.',
     },
   };
 }

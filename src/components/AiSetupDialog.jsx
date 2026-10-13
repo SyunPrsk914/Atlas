@@ -10,17 +10,76 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { checkAIStatus, listAIModels } from '@/api/llmClient';
-import { getAIMode, getModelOverride, setAIMode, setModelOverride, providerLabel } from '@/api/aiProvider';
+import {
+  getAIMode, getModelOverride, providerLabel, setAIMode, setModelOverride,
+} from '@/api/aiProvider';
 
 const DEFAULT_MODEL = '__deployment_default__';
 
+/** What the setup panel says for each provider the server can report. */
+const NARAROUTER_COPY = {
+  short: 'NaraRouter',
+  title: 'NaraRouter',
+  blurb: (
+    <>
+      OpenAI-compatible gateway at <code>router.bynara.id/v1</code>. Requests go from this
+      deployment&apos;s server function to the gateway — never from your browser with a key in it.
+    </>
+  ),
+  notConnected: 'No AI key is configured on this deployment, so Atlas is returning labeled demo output. Set NARAROUTER_API_KEY (Vercel → Environment Variables, then redeploy) to turn on real generation.',
+  modelHelpOk: 'This list is read from the provider with your deployment key, so it shows only the aliases your plan can actually call.',
+  steps: [
+    <>Create a key at <a className="underline inline-flex items-center gap-1" href="https://router.bynara.id/keys" target="_blank" rel="noreferrer">router.bynara.id/keys<ExternalLink className="h-3 w-3" /></a> — keys start with <code>sk-nry-</code> and the secret is shown only once.</>,
+    <>Add <code>NARAROUTER_API_KEY</code> to the deployment (Vercel → Project → Settings → Environment Variables). For local development put it in <code>.env.local</code>, which is git-ignored.</>,
+    <>Optionally set <code>NARAROUTER_MODEL</code> to the alias you want by default; otherwise Atlas uses <code>agnes-3-flash</code>.</>,
+    <>Redeploy, then press “Re-check” above and select NaraRouter.</>,
+  ],
+};
+
+const OLLAMA_COPY = {
+  short: 'Ollama',
+  title: 'Ollama (local)',
+  blurb: (
+    <>
+      A model that runs on this computer through Ollama. The Atlas server calls Ollama at
+      <code> OLLAMA_BASE_URL</code> (default <code>http://127.0.0.1:11434</code>); the browser never
+      talks to it, and no API key is used.
+    </>
+  ),
+  notConnected: 'Ollama is selected but it is not reachable. Start Ollama on this computer, then press Re-check.',
+  modelHelpOk: 'These are the models installed in Ollama on this computer (the same list as `ollama list`).',
+  steps: [
+    <>Install Ollama from <a className="underline inline-flex items-center gap-1" href="https://ollama.com/download" target="_blank" rel="noreferrer">ollama.com/download<ExternalLink className="h-3 w-3" /></a> and open it. It keeps running in the background.</>,
+    <>In a terminal run <code>ollama pull llama3.2</code> (or another model; bigger models need more memory).</>,
+    <>In <code>.env.local</code> (git-ignored) add <code>LLM_PROVIDER=ollama</code>. Optional: <code>OLLAMA_MODEL</code> (the model name) and <code>OLLAMA_NUM_CTX</code> (context size, default 16384).</>,
+    <>Restart <code>npm run dev</code>, press “Re-check” here, then choose Ollama.</>,
+  ],
+  note: 'Runs on this computer: no key and no provider quota. Prompts go to your local Ollama, not to NaraRouter, unless you pick an Ollama cloud model. Speed depends on your hardware, so a long document can take many minutes. A prompt larger than the context window is refused with a message; Atlas never cuts it silently.',
+};
+
+/** Copy for the provider the server reports. Unknown providers get neutral wording. */
+function copyFor(provider) {
+  if (!provider || provider === 'nararouter') return NARAROUTER_COPY;
+  if (provider === 'ollama') return OLLAMA_COPY;
+  const label = providerLabel(provider);
+  return {
+    short: label,
+    title: label,
+    blurb: <>Connected through this deployment&apos;s server. The key stays on the server.</>,
+    notConnected: `${label} is selected but it is not connected. Check its key and the deployment environment variables.`,
+    modelHelpOk: 'This provider does not expose a model list Atlas can read, so the deployment default is used.',
+    steps: [<>Set the provider&apos;s key on the deployment (see DEPLOYMENT.md), redeploy, then press “Re-check”.</>],
+  };
+}
+
 /**
- * AI setup: one provider, NaraRouter, plus demo mode.
+ * AI setup: one provider is active for the deployment (NaraRouter by default, or a
+ * local Ollama when the server is set to LLM_PROVIDER=ollama), plus demo mode.
  *
- * The key is a server-side environment variable — it is never typed into this
- * dialog and never reaches the browser bundle. What this dialog does is show
- * honestly whether the deployment has a key, let the applicant pick a model
- * alias their key is actually entitled to, and let them choose demo mode.
+ * Keys are server-side environment variables: they are never typed into this
+ * dialog and never reach the browser. This dialog shows honestly whether the
+ * deployment's provider is connected, lets the applicant pick a model the
+ * provider actually has, and lets them choose demo mode.
  */
 export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
   const [activeMode, setActiveMode] = useState('demo');
@@ -37,7 +96,20 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
       const [statusResult, models] = await Promise.all([checkAIStatus(), listAIModels()]);
       setStatus(statusResult);
       setModelList(models);
-      if (models?.default_model && !getModelOverride()) setModel(DEFAULT_MODEL);
+      // A model saved for another provider (or an alias the key no longer has)
+      // would fail every call. When the provider's list is readable and does
+      // not contain the saved model, go back to the deployment default and say so.
+      const saved = getModelOverride();
+      const listed = Array.isArray(models?.models) ? models.models : [];
+      if (saved && models?.ok && models?.listable && listed.length && !listed.includes(saved)) {
+        setModelOverride('');
+        setModel(DEFAULT_MODEL);
+        toast.warning('Saved model is no longer available', {
+          description: `“${saved}” is not in this provider's list, so Atlas uses the deployment default.`,
+        });
+      } else if (models?.default_model && !saved) {
+        setModel(DEFAULT_MODEL);
+      }
     } catch (e) {
       setError(e?.message || 'Could not read the AI configuration.');
     } finally {
@@ -53,14 +125,20 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  const provider = status?.provider || modelList?.provider || null;
+  const copy = copyFor(provider);
+  const isOllama = provider === 'ollama';
+  const configured = !!status?.configured;
+  const entitled = Array.isArray(modelList?.models) ? modelList.models : [];
+
   const activate = async (mode) => {
     try {
       setAIMode(mode);
       setActiveMode(mode);
       await onStatusChange?.();
-      toast.success(mode === 'hosted' ? 'NaraRouter selected' : 'Demo mode selected', {
+      toast.success(mode === 'hosted' ? `${copy.short} selected` : 'Demo mode selected', {
         description: mode === 'hosted'
-          ? 'Every AI action now goes through NaraRouter. Atlas sends calls one at a time, in the order you clicked them.'
+          ? `Every AI action now goes through ${copy.short}. Atlas sends calls one at a time, in the order you clicked them.`
           : 'AI actions return clearly labeled placeholder text and nothing is saved. Switch back any time.',
       });
       if (mode === 'demo') onOpenChange(false);
@@ -75,13 +153,11 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
     toast.success(value === DEFAULT_MODEL ? 'Using the deployment default model' : `Model set to ${value}`, {
       description: value === DEFAULT_MODEL
         ? `Atlas will use ${modelList?.default_model || status?.model || 'the model configured on this deployment'}.`
-        : 'If your plan stops entitling this alias, Atlas falls back to the deployment default instead of failing.',
+        : isOllama
+          ? 'Atlas runs exactly this model. If Ollama does not have it, the error names the command to pull it.'
+          : 'If your plan stops entitling this alias, Atlas falls back to the deployment default instead of failing.',
     });
   };
-
-  const configured = !!status?.configured;
-  const name = providerLabel(status?.provider || modelList?.provider);
-  const entitled = Array.isArray(modelList?.models) ? modelList.models : [];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -91,9 +167,10 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
             <Sparkles className="h-5 w-5" /> AI setup
           </DialogTitle>
           <DialogDescription>
-            Atlas runs on NaraRouter. The API key is a server-side environment variable, so it is never
-            typed into this page and never reaches your browser. Atlas adds no quota of its own; the
-            provider&apos;s plan limits apply.
+            Atlas uses one AI provider for this deployment: NaraRouter by default, or a local Ollama
+            when the server is set to <code>LLM_PROVIDER=ollama</code>. Keys are server-side environment
+            variables, so they are never typed into this page and never reach your browser. Atlas adds
+            no quota of its own; the provider&apos;s own limits apply.
           </DialogDescription>
         </DialogHeader>
 
@@ -101,11 +178,8 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
           <section className="rounded-lg border border-border p-4 space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <h3 className="text-sm font-semibold">NaraRouter</h3>
-                <p className="text-xs text-foreground/55 mt-1">
-                  OpenAI-compatible gateway at <code>router.bynara.id/v1</code>. Requests go from this
-                  deployment&apos;s server function to the gateway — never from your browser with a key in it.
-                </p>
+                <h3 className="text-sm font-semibold">{copy.title}</h3>
+                <p className="text-xs text-foreground/55 mt-1">{copy.blurb}</p>
               </div>
               {activeMode === 'hosted' && (
                 <span className="shrink-0 inline-flex items-center gap-1 text-xs text-green-700">
@@ -121,17 +195,16 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
                 <>
                   <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />
                   <span className="text-foreground/70">
-                    Connected: <span className="font-medium">{name}</span>
+                    Connected: <span className="font-medium">{providerLabel(provider)}</span>
                     {status?.model || modelList?.default_model ? <> · default model <code>{status.model || modelList.default_model}</code></> : null}
-                    {entitled.length ? <> · {entitled.length} alias(es) your key can call</> : null}
+                    {entitled.length ? <> · {entitled.length} model(s) available</> : null}
                   </span>
                 </>
               ) : (
                 <>
                   <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
                   <span className="text-amber-900">
-                    No AI key is configured on this deployment, so Atlas is returning labeled demo output.
-                    Set <code>NARAROUTER_API_KEY</code> (Vercel → Environment Variables, then redeploy) to turn on real generation.
+                    {status?.message || copy.notConnected}
                   </span>
                 </>
               )}
@@ -157,7 +230,7 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
                 </Select>
                 <p className="text-[11px] text-foreground/45">
                   {modelList?.listable
-                    ? 'This list is read from the provider with your deployment key, so it shows only the aliases your plan can actually call.'
+                    ? copy.modelHelpOk
                     : (modelList?.message || 'This provider does not expose a model list Atlas can read, so the deployment default is used.')}
                 </p>
               </div>
@@ -165,7 +238,7 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
 
             <div className="flex flex-wrap gap-2">
               <Button type="button" onClick={() => activate('hosted')} disabled={!configured} variant={activeMode === 'hosted' ? 'secondary' : 'default'}>
-                {activeMode === 'hosted' ? 'NaraRouter selected' : 'Use NaraRouter'}
+                {activeMode === 'hosted' ? `${copy.short} selected` : `Use ${copy.short}`}
               </Button>
               <Button type="button" variant="ghost" onClick={load} disabled={loading}>
                 <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? 'animate-spin' : ''}`} /> Re-check
@@ -173,43 +246,47 @@ export default function AiSetupDialog({ open, onOpenChange, onStatusChange }) {
             </div>
             {!configured && (
               <p className="text-[11px] text-foreground/45">
-                “Use NaraRouter” is disabled until this deployment has a key — selecting it without one would turn
-                every AI action into an error instead of labeled demo output.
+                “Use {copy.short}” is disabled until this deployment can answer — selecting it without a working
+                provider would turn every AI action into an error instead of labeled demo output.
               </p>
             )}
           </section>
 
           <section className="rounded-lg border border-border p-4 space-y-2">
-            <h3 className="text-sm font-semibold">Setting the key (once, on the deployment)</h3>
+            <h3 className="text-sm font-semibold">
+              {isOllama ? 'Setting up Ollama on this computer' : 'Setting the key (once, on the deployment)'}
+            </h3>
             <ol className="text-xs text-foreground/65 space-y-1.5 list-decimal pl-4">
-              <li>Create a key at <a className="underline inline-flex items-center gap-1" href="https://router.bynara.id/keys" target="_blank" rel="noreferrer">router.bynara.id/keys<ExternalLink className="h-3 w-3" /></a> — keys start with <code>sk-nry-</code> and the secret is shown only once.</li>
-              <li>Add <code>NARAROUTER_API_KEY</code> to the deployment (Vercel → Project → Settings → Environment Variables). For local development put it in <code>.env.local</code>, which is git-ignored.</li>
-              <li>Optionally set <code>NARAROUTER_MODEL</code> to the alias you want by default; otherwise Atlas uses <code>agnes-3-flash</code>.</li>
-              <li>Redeploy, then press “Re-check” above and select NaraRouter.</li>
+              {copy.steps.map((step, index) => <li key={index}>{step}</li>)}
             </ol>
-            <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950" role="note">
-              <p>
-                NaraRouter is hosted, not local. Its live pricing page currently lists 7M tokens per day and
-                15 requests per minute on the Free plan, and not every public alias is callable on every plan —
-                available models and limits can change. Atlas adds no quota of its own and never rewrites a real
-                provider error into a success.
-              </p>
-              <p>
-                Prompts are relayed to the gateway&apos;s upstream model provider. Its privacy policy says upstream
-                retention terms apply and that the service is not directed to people under 18. Read those terms
-                before sending student profiles, essays, or materials — especially data about a minor.
-              </p>
-              <p className="flex flex-wrap gap-x-3 gap-y-1">
-                <a className="underline" href="https://router.bynara.id/docs" target="_blank" rel="noreferrer">API docs</a>
-                <a className="underline" href="https://router.bynara.id/pricing" target="_blank" rel="noreferrer">Plans and limits</a>
-                <a className="underline" href="https://router.bynara.id/privacy" target="_blank" rel="noreferrer">Privacy policy</a>
-              </p>
-            </div>
+            {copy.note && (
+              <p className="rounded-md border border-border bg-muted/30 p-3 text-xs text-foreground/70">{copy.note}</p>
+            )}
+            {(provider === 'nararouter' || !provider) && (
+              <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950" role="note">
+                <p>
+                  NaraRouter is hosted, not local. Its live pricing page currently lists 7M tokens per day and
+                  15 requests per minute on the Free plan, and not every public alias is callable on every plan —
+                  available models and limits can change. Atlas adds no quota of its own and never rewrites a real
+                  provider error into a success.
+                </p>
+                <p>
+                  Prompts are relayed to the gateway&apos;s upstream model provider. Its privacy policy says upstream
+                  retention terms apply and that the service is not directed to people under 18. Read those terms
+                  before sending student profiles, essays, or materials — especially data about a minor.
+                </p>
+                <p className="flex flex-wrap gap-x-3 gap-y-1">
+                  <a className="underline" href="https://router.bynara.id/docs" target="_blank" rel="noreferrer">API docs</a>
+                  <a className="underline" href="https://router.bynara.id/pricing" target="_blank" rel="noreferrer">Plans and limits</a>
+                  <a className="underline" href="https://router.bynara.id/privacy" target="_blank" rel="noreferrer">Privacy policy</a>
+                </p>
+              </div>
+            )}
           </section>
 
           <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
             <p className="text-xs text-foreground/45">
-              Current mode: <span className="font-medium text-foreground">{activeMode === 'hosted' ? name : 'Labeled demo'}</span>
+              Current mode: <span className="font-medium text-foreground">{activeMode === 'hosted' ? copy.short : 'Labeled demo'}</span>
             </p>
             {activeMode !== 'demo' && (
               <Button type="button" variant="ghost" size="sm" onClick={() => activate('demo')}>

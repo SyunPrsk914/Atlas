@@ -67,6 +67,8 @@ import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
 import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
 import ActivitiesEditor from '@/components/profile/ActivitiesEditor';
 import ActivityAiPanel from '@/components/profile/ActivityAiPanel';
+import AiStatusPill from '@/components/AiStatusPill';
+import AiSetupDialog from '@/components/AiSetupDialog';
 import { assessLength } from '@/lib/essayLength';
 import { diffText, diffStats } from '@/lib/textDiff';
 
@@ -111,6 +113,9 @@ const getContext = async () => ({ profileText: '', materialsText: '', applicantT
 
 /** Every case is a component plus the props a page really hands it. */
 export const cases = {
+  'AiStatusPill — first paint (checking)': () => <AiStatusPill />,
+  'AiSetupDialog — open while the provider is read': () => <AiSetupDialog open onOpenChange={() => {}} onStatusChange={() => {}} />,
+  'AiSetupDialog — closed': () => <AiSetupDialog open={false} onOpenChange={() => {}} />,
   'LengthMeter — under the band': () => <LengthMeter assessment={assessLength(words(480), personalStatement(''), [])} />,
   'LengthMeter — inside the band': () => <LengthMeter assessment={assessLength(words(620), personalStatement(''), [])} />,
   'LengthMeter — over the ceiling': () => <LengthMeter assessment={assessLength(words(700), personalStatement(''), [])} />,

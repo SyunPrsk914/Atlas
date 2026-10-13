@@ -20,7 +20,7 @@
 // Run with: node --import ./scripts/register-ext.mjs scripts/verify-quality.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -51,6 +51,14 @@ import {
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel) => readFileSync(join(root, rel), 'utf8');
+
+/** Every source file under a directory, as absolute paths. */
+function listFiles(dir) {
+  return readdirSync(dir).flatMap((name) => {
+    const full = join(dir, name);
+    return statSync(full).isDirectory() ? listFiles(full) : [full];
+  }).filter((file) => /\.(js|jsx|mjs|ts)$/.test(file));
+}
 
 const personalStatement = (content = '', extra = {}) => ({
   id: 'ps',
@@ -542,12 +550,14 @@ const HARVARD = { name: 'Harvard University' };
   assert.match(reviewSection, /aria-expanded/);
   assert.match(reviewSection, /setOpen/);
 
-  // The local-Ollama path is gone: one provider, one code path.
-  assert.ok(!existsSync(join(root, 'src/api/ollamaClient.js')), 'the Ollama client is deleted');
-  for (const rel of ['src/lib/ai.js', 'src/lib/aiOutcome.js', 'src/components/AiSetupDialog.jsx',
-    'src/components/AiStatusPill.jsx', 'src/pages/KnowledgeBase.jsx', 'src/pages/AiKnowledge.jsx',
-    '.env.example']) {
-    assert.ok(!/ollama/i.test(src(rel)), `${rel} must not mention Ollama any more`);
+  // Ollama is an opt-in, server-side local provider (LLM_PROVIDER=ollama). The
+  // browser must never call a model or Ollama directly: only /api/invoke-llm does.
+  assert.ok(existsSync(join(root, 'api/ollamaConfig.js')), 'the Ollama configuration lives on the server');
+  assert.ok(!existsSync(join(root, 'src/api/ollamaClient.js')), 'there is no browser-side Ollama client');
+  for (const file of listFiles(join(root, 'src'))) {
+    const text = readFileSync(file, 'utf8');
+    // Help text may name the default address; a request to it may not exist in the browser.
+    assert.ok(!/(fetch|XMLHttpRequest|axios)[\s\S]{0,300}?(11434|\/api\/chat\b)/.test(text), `${file} must not call Ollama from the browser`);
   }
 
   const provider = src('src/api/aiProvider.js');
