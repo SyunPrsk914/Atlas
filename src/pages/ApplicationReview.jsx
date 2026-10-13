@@ -223,7 +223,7 @@ ${university.deadline ? `- Deadline: ${university.deadline}` : '- No deadline se
 MATERIALS USAGE RULES:
 - Personal materials (resume, own essays, notes) are evidence about the applicant — use their concrete details when assessing authenticity and specificity, and to spot a claim in the file that is invented or inflated. They are NOT a list of things the file should have mentioned: never deduct for a detail that appears here but not in the submitted file.
 - Sample essays (successful essays from others) must be treated as craft examples only. Never treat a sample's biography as this applicant's life. Distinguish US Common App/UC samples from UK UCAS samples — do not apply UK structure to US evaluation or vice versa. If a UK sample is present, do not penalize the US application for not following UK conventions, and vice versa.
-- If materials have been analyzed word-by-word, use those analyses to inform your assessment of voice, specificity, and authenticity.
+- If materials have been analyzed word-by-word, their deep analyses are the absorbed reading of those sources: use the concrete items in them (facts, personal signals, guidance, craft moves) when judging evidence, voice, specificity, and authenticity. Anchor every dimension assessment in named evidence — a number, a role, a title, a quoted phrase, or an item from a deep analysis — never a generic statement like "strong academics". An assessment whose evidence you cannot name is a failed assessment.
 
 SCORE EACH OF THESE DIMENSIONS 1-10, WITH A SPECIFIC ASSESSMENT (use exactly these names, in this order):
 ${dimensionList}
@@ -231,7 +231,7 @@ ${dimensionList}
 RETURN FORMAT — use exactly these field names:
 - "acceptance_probability": your single best estimate as a number 0-100.
 - "verdict": one of "Hard Reach", "Reach", "Target", "Likely", "Safety".
-- "dimensions": one entry per dimension above, in that order, each { "name", "score" (1-10), "assessment" }.
+- "dimensions": one entry per dimension above, in that order, each { "name", "score" (1-10), "assessment" }. Every assessment must name the specific evidence it rests on (a number, role, title, quoted phrase, or an item from a deep analysis) and say concretely what would move the score.
 - "key_strengths", "key_weaknesses", "what_would_help", "gaps": arrays of short, concrete sentences. No vague advice — each item must name something the applicant can actually do or check. "key_weaknesses" and "gaps" are only about what is IN the file (weak writing, thin evidence, a missing required component, an inconsistency). Anything that depends on information from outside the file goes in "what_would_help", phrased as an option.
 - "summary": three or four sentences of overall assessment, in the voice of a reader who has just finished the file.
 

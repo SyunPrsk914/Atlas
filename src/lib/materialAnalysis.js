@@ -25,7 +25,8 @@ const GRANULARITY_RULES = `ANALYSIS METHOD — read the text word by word and in
 3. For an applicant's own work, connect observations across the document: why this question, method, example, subject, or detail; what the author persists through; what they notice; how they respond to uncertainty; and what this suggests about the person. Do not invent biography or certainty.
 4. Only a writing draft receives a writing assessment and exact word-level findings. Do not score an internal assessment, transcript, guide, data sheet, or reference document as an essay. For non-writing sources, explain the meaning and usefulness instead.
 5. For every writing finding, quote the EXACT phrase, give its character offset (0-based within this part), and say concretely what to do instead. Never manufacture a finding just to fill a list.
-6. Do not rewrite the whole piece. Return a deep reading that helps the applicant understand what the material means and how it can be used.`;
+6. Do not rewrite the whole piece. Return a deep reading that helps the applicant understand what the material means and how it can be used.
+7. DENSITY AND SPECIFICITY CONTRACT for every item you return (facts, personal_signals, guidance, craft_moves, top_actions): each item must be self-contained and carry the specifics that make it usable later — proper names, numbers, dates, places, roles, exact quantities, and quoted wording. "The applicant worked on a project" is a failed item; "Rebuilt the robotics club budget after two sponsors left, replacing them with three local firms (2024)" is a usable one. Classify every item into exactly the field it belongs to: a fact never lives in guidance, a sample's craft never becomes an applicant fact, and an interpretation is never presented as a fact. Finish every item as a complete sentence. No filler, no restating the question, no generic praise — a later drafter, reviewer, or knowledge-base build will work only from these items, so every word in them must earn its place.`;
 
 const ANALYSIS_ROLES = {
   auto: 'The lens is automatic. Infer the document role from the title, applicant context, and text, then name it in analysis_role.',
@@ -107,10 +108,10 @@ Return JSON only. Use these fields:
 - "document_type": a specific plain-language classification (for example, physics internal assessment, writing guide, personal reflection, college requirements, or past essay).
 - "deep_read": one dense paragraph about what the source is really doing and what its choices imply, beyond a factual summary.
 - "significance": one dense paragraph about why this matters to the applicant's profile or future application, or why it is useful as guidance/reference.
-- "personal_signals": several dense, cautious interpretations in the form signal → textual evidence → why it may matter. Empty for samples, tips, and references.
-- "facts": direct, reusable facts only. Empty for samples, tips, and references; do not turn another person's life or a guide's examples into the applicant's facts.
-- "guidance": reusable rules, requirements, warnings, or practical implications. Use this for tips, guides, and references; it may also contain a next step for another source.
-- "craft_moves": reusable writing technique. Required for samples; empty unless craft is genuinely relevant.
+- "personal_signals": several dense, cautious interpretations in the form signal → exact textual evidence (quote or close paraphrase, keeping the names and numbers) → why it may matter. Empty for samples, tips, and references.
+- "facts": direct, reusable facts only, each self-contained and specific — the names, numbers, dates, places, roles, and outcomes exactly as the source states them, so a later prompt can use the item without seeing the source again. Empty for samples, tips, and references; do not turn another person's life or a guide's examples into the applicant's facts.
+- "guidance": reusable rules, requirements, warnings, or practical implications, each written so a drafter or reviewer can obey it without the source: the rule, its source in substance, and its practical implication. Use this for tips, guides, and references; it may also contain a next step for another source.
+- "craft_moves": reusable writing technique — the move, its effect on a reader, and when it earns its place. Required for samples; empty unless craft is genuinely relevant.
 - "top_actions": at most a few next actions. These are not sentence-by-sentence writing fixes for non-writing sources.
 - "writing_assessment": only for writing_draft; include overall_score, specificity_score, rhythm_score, and voice_score from 0 to 10. For every other role leave it empty.
 - "findings": only for writing_draft; each item has kind, exact quote, offset, note, and suggestion. Leave it empty for every other role.
