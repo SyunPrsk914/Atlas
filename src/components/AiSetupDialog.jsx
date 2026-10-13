@@ -31,7 +31,7 @@ const NARAROUTER_COPY = {
   steps: [
     <>Create a key at <a className="underline inline-flex items-center gap-1" href="https://router.bynara.id/keys" target="_blank" rel="noreferrer">router.bynara.id/keys<ExternalLink className="h-3 w-3" /></a> — keys start with <code>sk-nry-</code> and the secret is shown only once.</>,
     <>Add <code>NARAROUTER_API_KEY</code> to the deployment (Vercel → Project → Settings → Environment Variables). For local development put it in <code>.env.local</code>, which is git-ignored.</>,
-    <>Optionally set <code>NARAROUTER_MODEL</code> to the alias you want by default; otherwise Atlas uses <code>agnes-3-flash</code>.</>,
+    <>Optionally set <code>NARAROUTER_MODEL</code> to the alias you want by default; otherwise Atlas uses <code>agnes-2.5-flash</code> — the alias its analysis prompts are tuned around.</>,
     <>Redeploy, then press “Re-check” above and select NaraRouter.</>,
   ],
 };
@@ -41,7 +41,9 @@ const OLLAMA_COPY = {
   title: 'Ollama (local)',
   blurb: (
     <>
-      A model that runs on this computer through Ollama. The Atlas server calls Ollama at
+      A model that runs on this computer through Ollama — optional and opt-in. NaraRouter is
+      the recommended path: it needs no downloads and does not use this machine&apos;s disk or
+      memory. The Atlas server calls Ollama at
       <code> OLLAMA_BASE_URL</code> (default <code>http://127.0.0.1:11434</code>); the browser never
       talks to it, and no API key is used.
     </>
@@ -50,11 +52,11 @@ const OLLAMA_COPY = {
   modelHelpOk: 'These are the models installed in Ollama on this computer (the same list as `ollama list`). A model marked “reasons first” writes a chain of thought before it answers, which is where the depth of an essay review or a research report comes from.',
   steps: [
     <>Install Ollama from <a className="underline inline-flex items-center gap-1" href="https://ollama.com/download" target="_blank" rel="noreferrer">ollama.com/download<ExternalLink className="h-3 w-3" /></a> and open it. It keeps running in the background.</>,
-    <>In a terminal run <code>ollama pull qwen3:8b</code> (a reasoning model — the recommended one; bigger models need more memory).</>,
+    <>In a terminal run <code>ollama pull qwen3:8b</code> (a reasoning model — the recommended one; bigger models need more memory). Every model is a multi-gigabyte download that stays on disk until you run <code>ollama rm &lt;model&gt;</code> — pull only what you will use.</>,
     <>In <code>.env.local</code> (git-ignored) add <code>LLM_PROVIDER=ollama</code> and <code>OLLAMA_MODEL=qwen3:8b</code>. Optional: <code>OLLAMA_NUM_CTX</code> (context window, default 16384 — Ollama reserves the whole window in video memory on every call, so raise it only as far as this machine can afford, and lower it to 8192 if a call reports out of memory), <code>OLLAMA_THINK</code> (on | off | auto, default on), <code>OLLAMA_THINK_BUDGET</code> (output room for the reasoning trace, default 8192).</>,
     <>Restart <code>npm run dev</code>, press “Re-check” here, then choose Ollama.</>,
   ],
-  note: 'Runs on this computer: no key and no provider quota. Prompts go to your local Ollama, not to NaraRouter, unless you pick an Ollama cloud model. A reasoning model is asked to think on every call, its trace is kept out of the answer, and its output room is enlarged to fit both — so an answer is never cut short by the thinking that produced it. Speed depends on your hardware, so a long document can take many minutes. A prompt larger than the context window is refused with a message; Atlas never cuts it silently.',
+  note: 'Runs on this computer: no key and no provider quota — but a real cost in disk and memory. Each pulled model is several GB on disk and more in RAM while loaded, so a machine can fill up; delete unused models with `ollama rm <model>`, or stop setting LLM_PROVIDER=ollama if you switch back to NaraRouter. Prompts go to your local Ollama, not to NaraRouter, unless you pick an Ollama cloud model. A reasoning model is asked to think on every call, its trace is kept out of the answer, and its output room is enlarged to fit both — so an answer is never cut short by the thinking that produced it. Speed depends on your hardware, so a long document can take many minutes. A prompt larger than the context window is refused with a message; Atlas never cuts it silently.',
 };
 
 /** Copy for the provider the server reports. Unknown providers get neutral wording. */

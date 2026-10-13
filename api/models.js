@@ -54,7 +54,7 @@ function defaultModelFor(provider) {
   if (provider === 'ollama') return ollamaConfig(process.env).model;
   const envKey = `${provider.toUpperCase()}_MODEL`;
   if (process.env[envKey]) return process.env[envKey];
-  return provider === 'nararouter' ? 'agnes-3-flash' : '';
+  return provider === 'nararouter' ? 'agnes-2.5-flash' : '';
 }
 
 /**

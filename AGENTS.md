@@ -63,14 +63,17 @@ Vercel + Supabase deployment, environment variables, and key locations.
 ## Working Notes
 
 - NaraRouter is the default AI provider, reached through `/api/invoke-llm` with
-  the key on the server. The only other provider path is local Ollama
+  the key on the server. The default model alias is `agnes-2.5-flash`
+  (`NARAROUTER_MODEL` overrides it). The only other provider path is local Ollama
   (`api/ollamaConfig.js`, `LLM_PROVIDER=ollama`), an explicit opt-in that the
   server calls. Ollama is never auto-selected, never falls back to another
   model (a missing model is reported with its `ollama pull` command), and never
   receives a request from the browser. Do not add a browser-side call to a
   model, a silent provider fallback, or a third provider without the same rules.
   Demo mode is the only fallback and it must keep working with obvious
-  placeholders that are never persisted as real.
+  placeholders that are never persisted as real. Local Ollama is kept working
+  and tested, but docs and onboarding must present NaraRouter as the path:
+  local models are multi-gigabyte downloads that can fill a machine's disk.
 - Ollama reasoning models (`qwen3:8b`) are used at full depth, and four rules
   keep that true — do not undo one of them to simplify a call:
   1. `think` is sent only after `api/ollamaReasoning.js` has read the model's
