@@ -8,6 +8,7 @@
 // GET /api/models -> { ok, provider, models: string[], default_model }
 
 import { resolveSupabaseConfig } from './supabaseConfig.js';
+import { ollamaConfig, describeOllamaNetworkError } from './ollamaConfig.js';
 
 function send(res, status, payload) {
   res.statusCode = status;
@@ -46,9 +47,57 @@ function apiKeyFor(provider) {
 }
 
 function defaultModelFor(provider) {
+  if (provider === 'ollama') return ollamaConfig(process.env).model;
   const envKey = `${provider.toUpperCase()}_MODEL`;
   if (process.env[envKey]) return process.env[envKey];
   return provider === 'nararouter' ? 'agnes-3-flash' : '';
+}
+
+/**
+ * Models already pulled into the local Ollama (`GET /api/tags`). Ollama needs
+ * no key; the answer is the list of models on this computer, nothing else.
+ */
+async function listOllamaModels(res, configured) {
+  const cfg = ollamaConfig(process.env);
+  const base = {
+    supabase_configured: configured,
+    provider: 'ollama',
+    default_model: cfg.model,
+    listable: true,
+  };
+  if (cfg.problem) {
+    send(res, 200, { ok: false, ...base, models: [], message: cfg.problem });
+    return;
+  }
+  try {
+    const response = await fetch(`${cfg.baseUrl}/api/tags`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) {
+      send(res, 200, {
+        ok: false, ...base, models: [],
+        message: `Ollama answered HTTP ${response.status} at ${cfg.baseUrl}. Atlas will keep using ${cfg.model}.`,
+      });
+      return;
+    }
+    const body = await response.json().catch(() => null);
+    const models = (Array.isArray(body?.models) ? body.models : [])
+      .map((row) => row?.model || row?.name || '')
+      .filter(Boolean)
+      .sort();
+    send(res, 200, {
+      ok: true, ...base, models,
+      message: models.length
+        ? `${models.length} model(s) installed in Ollama on this computer.`
+        : `Ollama is running but has no models yet. Run \`ollama pull ${cfg.model}\` in a terminal.`,
+    });
+  } catch (error) {
+    send(res, 200, {
+      ok: false, ...base, models: [],
+      message: `Ollama is not reachable at ${cfg.baseUrl} (${describeOllamaNetworkError(error)}). Start Ollama on this computer, then press Re-check.`,
+    });
+  }
 }
 
 export async function handleModels(req, res) {
@@ -63,9 +112,13 @@ export async function handleModels(req, res) {
   }
 
   const provider = detectProvider();
+  const configured = resolveSupabaseConfig(process.env).configured;
+  if (provider === 'ollama') {
+    await listOllamaModels(res, configured);
+    return;
+  }
   const key = apiKeyFor(provider);
   const endpoint = MODEL_LIST_ENDPOINTS[provider];
-  const configured = resolveSupabaseConfig(process.env).configured;
 
   // A provider with no list endpoint (Gemini, Anthropic) is not an error: the
   // deployment's *_MODEL env var is the answer, and the UI says so.

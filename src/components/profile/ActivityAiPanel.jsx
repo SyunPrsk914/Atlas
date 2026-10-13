@@ -100,7 +100,7 @@ export default function ActivityAiPanel({
   const guard = (action) => {
     if (hasLiveModel()) return true;
     toast.error(`${action} needs a connected AI model`, {
-      description: 'Demo mode returns placeholder text, so Atlas will not suggest anything for your activities list with it. Connect NaraRouter in AI setup.',
+      description: 'Demo mode returns placeholder text, so Atlas will not suggest anything for your activities list with it. Connect an AI provider in AI setup.',
       duration: 9000,
     });
     return false;

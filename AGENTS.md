@@ -18,8 +18,11 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - `src/api/supabaseBackend.js`: Supabase implementation of entities/auth/storage.
 - `src/api/localBackend.js`: localStorage demo backend (no keys required).
 - `api/invoke-llm.js`: serverless AI endpoint — NaraRouter first, then optional
-  Gemini/Groq/OpenRouter/OpenAI/Anthropic adapters. `api/models.js` proxies the
-  provider's authenticated model list so the app can offer only real aliases.
+  Ollama (explicit only), Gemini/Groq/OpenRouter/OpenAI/Anthropic adapters.
+  `api/models.js` proxies the provider's authenticated model list (for Ollama:
+  the local `/api/tags`) so the app can offer only real models. `api/ollamaConfig.js`
+  holds the Ollama settings; `scripts/verify-ollama.mjs` tests the whole path
+  against a mock Ollama.
 - `src/api/aiProvider.js`: AI mode (hosted or demo), the remembered model alias,
   and the FIFO queue that keeps calls one at a time.
 - `src/lib/schoolFit.js`: the eleven-section shape of a university research
@@ -57,10 +60,18 @@ Vercel + Supabase deployment, environment variables, and key locations.
 
 ## Working Notes
 
-- There is ONE AI provider: NaraRouter, reached through `/api/invoke-llm` with
-  the key on the server. Do not add a second provider path, a browser-side call
-  to a model, or a silent fallback — demo mode is the only fallback and it must
-  keep working with obvious placeholders that are never persisted as real.
+- NaraRouter is the default AI provider, reached through `/api/invoke-llm` with
+  the key on the server. The only other provider path is local Ollama
+  (`api/ollamaConfig.js`, `LLM_PROVIDER=ollama`), an explicit opt-in that the
+  server calls. Ollama is never auto-selected, never falls back to another
+  model (a missing model is reported with its `ollama pull` command), and never
+  receives a request from the browser. Do not add a browser-side call to a
+  model, a silent provider fallback, or a third provider without the same rules.
+  Demo mode is the only fallback and it must keep working with obvious
+  placeholders that are never persisted as real.
+- Every status message, error title and setup step names the provider the
+  server actually reports (`/api/status`), never a hard-coded one. Use
+  `providerLabel()` and the `setupHint()` helper in `src/lib/ai.js`.
 - A review reads only the page. Never instruct a model to judge an essay against
   information from the applicant's profile, materials, or knowledge base: that
   produces "you have X but you did not include it", which no admissions officer
@@ -87,8 +98,8 @@ Vercel + Supabase deployment, environment variables, and key locations.
   `created_at`.
 - Never commit secrets. Frontend config uses `VITE_*` env vars; the LLM key is
   server-only (`api/` functions).
-- Run `npm run lint`, `npm run build`, and `npm run verify` before finishing
-  code changes. `verify` includes `verify:render`, so a new component is rendered
+- Run `npm run lint`, `npm run typecheck`, `npm run build`, and `npm run verify`
+  before finishing code changes. The typecheck must report zero errors. `verify` includes `verify:render`, so a new component is rendered
   in Node before it is committed — add a fixture for it in
   `scripts/render-check.mjs`.
 - Keep the essay quality invariants intact: a draft outside its length band is

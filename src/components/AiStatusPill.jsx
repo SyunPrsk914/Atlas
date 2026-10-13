@@ -7,8 +7,9 @@ import AiSetupDialog from '@/components/AiSetupDialog';
 /**
  * Clickable AI status + setup entry point.
  *
- * Two honest states: NaraRouter is connected, or it is not and Atlas is showing
- * labeled demo output. It never says "connected" on a deployment with no key.
+ * Two honest states: the configured AI provider (NaraRouter, or a local Ollama)
+ * is connected, or it is not and Atlas is showing labeled demo output. It never
+ * says "connected" on a deployment with no working provider.
  */
 export default function AiStatusPill() {
   const [status, setStatus] = useState(null);
@@ -35,7 +36,7 @@ export default function AiStatusPill() {
   let Icon = Loader2;
 
   if (status) {
-    const name = status.providerLabel || 'NaraRouter';
+    const name = status.providerLabel || 'AI';
     if (status.mode === 'hosted' && status.configured) {
       label = status.model ? `${name} · ${status.model}` : name;
       detail = status.grounding
@@ -45,14 +46,14 @@ export default function AiStatusPill() {
       Icon = status.grounding ? Globe : CheckCircle2;
     } else if (status.mode === 'hosted') {
       label = 'AI not connected';
-      detail = status.message || 'NaraRouter is selected but this deployment has no API key. Add NARAROUTER_API_KEY and redeploy.';
+      detail = status.message || 'The selected AI provider is not connected. Open AI setup for the steps.';
       tone = 'text-amber-700 border-amber-300 bg-amber-50';
       Icon = AlertTriangle;
     } else {
       label = 'AI setup · Demo';
       detail = status.configured
-        ? 'Demo output is active and clearly labeled. Select NaraRouter in AI setup for real generation.'
-        : 'Demo output is active: this deployment has no AI key yet. Add NARAROUTER_API_KEY (see AI setup), or keep using Atlas with labeled placeholder output.';
+        ? 'Demo output is active and clearly labeled. Select your AI provider in AI setup for real generation.'
+        : 'Demo output is active: no AI provider is connected yet. Open AI setup for the steps, or keep using Atlas with labeled placeholder output.';
       tone = 'text-amber-700 border-amber-300 bg-amber-50';
       Icon = Sparkles;
     }

@@ -1,9 +1,8 @@
-// The AI provider Atlas uses: NaraRouter through the hosted endpoint.
-//
-// One provider, one code path, one set of failure modes. Requests go to
-// `/api/invoke-llm`, which holds the key server-side, so nothing about the key
-// ever reaches the bundle or the browser. The former on-device model path is
-// gone; this module replaces the mode/config half of it.
+// The AI provider Atlas uses. NaraRouter is the default hosted provider.
+// Ollama is the optional local provider, chosen on the server with
+// LLM_PROVIDER=ollama. The browser never talks to either one: every request
+// goes to `/api/invoke-llm`, which holds any key server-side and calls the
+// selected provider. This module only knows which provider the server reports.
 //
 // Demo mode stays: with no key configured on the deployment, Atlas returns
 // clearly labeled placeholder output and refuses to save it. That is still the
@@ -29,6 +28,7 @@ export const AI_HOSTED_AVAILABLE_KEY = 'atlas_ai_hosted_available_v1';
 
 export const PROVIDER_LABELS = {
   nararouter: 'NaraRouter',
+  ollama: 'Ollama (local)',
   gemini: 'Gemini',
   groq: 'Groq',
   openrouter: 'OpenRouter',
@@ -97,7 +97,7 @@ export function getAIMode() {
 /** @param {'hosted' | 'demo'} mode */
 export function setAIMode(mode) {
   if (!['hosted', 'demo'].includes(mode)) {
-    throw makeError('Unknown AI mode. Choose NaraRouter or demo.', { code: 'ai_bad_mode' });
+    throw makeError('Unknown AI mode. Choose a connected AI provider or demo.', { code: 'ai_bad_mode' });
   }
   const storage = browserStorage();
   if (!storage) throw makeError('AI settings are only available in a browser.', { code: 'ai_no_storage' });

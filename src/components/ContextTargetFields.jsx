@@ -6,7 +6,7 @@ import { CONTEXT_TASKS } from '@/lib/contextTargeting';
 const NONE = '__none__';
 
 /** Reusable, cumulative context targeting for a material or knowledge entry. */
-export default function ContextTargetFields({ value = {}, onChange, universities = [], essays = [] }) {
+export default function ContextTargetFields({ value = /** @type {Record<string, any>} */ ({}), onChange, universities = [], essays = [] }) {
   const update = (patch) => onChange?.(patch);
   const universityId = String(value.target_university_id || '');
   const essayId = String(value.target_essay_id || '');

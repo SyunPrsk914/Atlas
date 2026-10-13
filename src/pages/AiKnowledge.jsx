@@ -207,7 +207,7 @@ export default function AiKnowledge() {
 
   const rebuildBlocker = (() => {
     if (tableMissing) return 'The database table is missing. Run supabase/schema.sql once, then come back.';
-    if (!modelReady) return 'Connect NaraRouter in AI setup (the AI status in the sidebar). Demo mode will not invent a profile.';
+    if (!modelReady) return 'Connect an AI provider in AI setup (the AI status in the sidebar). Demo mode will not invent a profile.';
     if (!inputs || inputs.empty) return 'Add a profile, a material, or an essay draft first. Atlas builds this from what you have entered.';
     return '';
   })();

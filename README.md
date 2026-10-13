@@ -15,6 +15,7 @@ craft patterns from successful samples, and reusable tips/reference guidance.
 - **Frontend:** React 18 + Vite + Tailwind (shadcn/ui) — `src/`
 - **Backend:** Supabase (Postgres + Auth + Storage) — `supabase/schema.sql`
 - **AI:** [NaraRouter](https://router.bynara.id/docs) through `api/invoke-llm.js`, with the key on the server and the model alias chosen in the app from `api/models.js`
+- **Local AI (optional):** [Ollama](https://ollama.com) runs a model on your own computer when `LLM_PROVIDER=ollama` is set (never chosen automatically; see DEPLOYMENT.md, Part 2.7)
 - **Other providers (optional):** a Gemini, Groq, OpenRouter, OpenAI or Anthropic key is still honoured if set; NaraRouter takes precedence
 - **Hosting:** Vercel (static frontend plus the serverless `api/*` functions)
 

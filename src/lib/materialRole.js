@@ -542,7 +542,8 @@ export function formatSampleMaterials(materials, { totalChars = 0, context = {} 
  */
 export function formatMaterialsForAI(materials, opts = {}) {
   const applicable = filterByContextTarget(materials, opts).map((material) => {
-    const label = contextTargetLabel(material, opts);
+    // opts carries the essay/university context; the label reads only its optional lists.
+    const label = contextTargetLabel(material, /** @type {any} */ (opts));
     return { ...material, _atlasTargetLabel: label === 'All applications and tasks' ? '' : label };
   });
   const context = {

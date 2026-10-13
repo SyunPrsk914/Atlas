@@ -248,6 +248,36 @@ Google Search grounding is only requested for an explicitly selected Gemini prov
 
 ---
 
+### 2.7 Local AI with Ollama (optional, runs on your computer)
+
+Ollama runs an open model on your own machine. It is **opt-in**: Atlas uses it only when the server is set to `LLM_PROVIDER=ollama`, and it never picks it automatically. NaraRouter stays the default.
+
+| Setting (`.env.local`) | Meaning | Default |
+|---|---|---|
+| `LLM_PROVIDER=ollama` | Use the local Ollama instead of NaraRouter (wins even if `NARAROUTER_API_KEY` is set) | — |
+| `OLLAMA_MODEL` | Model name you pulled with `ollama pull` | `llama3.2` |
+| `OLLAMA_BASE_URL` | Where Ollama listens | `http://127.0.0.1:11434` |
+| `OLLAMA_NUM_CTX` | Context window requested per call, in tokens (16384 is a practical minimum for Atlas prompts) | `16384` |
+
+What happens, and what does not:
+
+- The **Atlas server** calls Ollama. The browser never talks to Ollama, and no API key is used.
+- Prompts stay on your computer, unless you deliberately pick an Ollama cloud model.
+- Atlas never swaps a missing model for another one. If the model is not pulled, the error gives the exact `ollama pull …` command.
+- A prompt larger than `OLLAMA_NUM_CTX` is **refused with a message**, not cut silently. Raise `OLLAMA_NUM_CTX` (for example `32768`) if your computer has the memory.
+- Speed depends on your hardware. A long document on a laptop CPU can take many minutes; `Ollama did not finish within the wait limit` means Atlas stopped waiting, so try a smaller model or a shorter document.
+- Ollama is **not available on Vercel**: a Vercel deployment cannot reach your computer's `127.0.0.1`. Ollama is for local development.
+
+Setup (once):
+
+1. Install Ollama from https://ollama.com/download and open it.
+2. In a terminal: `ollama pull llama3.2` (wait for the download to finish).
+3. Check it answers: `curl http://127.0.0.1:11434/api/tags` should print a JSON list containing your model.
+4. In `.env.local` add `LLM_PROVIDER=ollama` (and optionally `OLLAMA_MODEL=llama3.2`).
+5. Run `npm run dev`, open AI setup in Atlas, press **Re-check**, then **Use Ollama**.
+
+---
+
 ## Part 3 — Vercel (hosting)
 
 ### 3.1 Push the code to GitHub
@@ -296,7 +326,7 @@ npm run dev                  # http://localhost:5173
 - Without Supabase environment values the app uses its existing browser-only Demo backend.
 - Without a selected AI model, AI buttons produce clearly labeled **Demo output**.
 - Node.js 22.13 or newer is required (pdf.js 6 needs it when a PDF is read).
-- To use real AI in local development, put `LLM_PROVIDER` and `NARAROUTER_API_KEY` in `.env.local` (Part 2) and restart `npm run dev`. The Vite dev server serves the same `api/*` handlers Vercel runs, so the browser never talks to NaraRouter directly and the key never reaches the page.
+- To use real AI in local development, put `LLM_PROVIDER` and `NARAROUTER_API_KEY` in `.env.local` (Part 2) and restart `npm run dev`. For a free local model instead, set `LLM_PROVIDER=ollama` (Part 2.7). The Vite dev server serves the same `api/*` handlers Vercel runs, so the browser never talks to NaraRouter directly and the key never reaches the page.
 - `/api/invoke-llm` remains only for the optional hosted path. Its API keys stay server-side; hosted-provider limits still apply.
 - University Research needs an official public admissions URL and page text. Atlas fetches the page from the browser without cookies. If the site blocks CORS or redirects to login, Atlas says so and lets the user paste public text; it does not proxy around the block or scrape behind a login.
 
@@ -332,6 +362,10 @@ The `base44/` folder remains as **reference only** (the original entity schemas 
 | Google login flashes and returns to login | Redirect URL mismatch | Supabase → Auth → Redirect URLs must include `https://YOUR-APP.vercel.app/**` **and** Google's authorized redirect URI must be exactly `https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback` |
 | Password reset link says "Invalid reset link" | Using the default Supabase email template | Apply the template in 1.5 (`?token={{ .TokenHash }}`) |
 | AI setup says Not connected | `NARAROUTER_API_KEY` is missing on the server, or the deployment was not redeployed after it was added | Set the variables from Part 2, redeploy, then reopen **AI setup**; in local development restart `npm run dev` after editing `.env.local` |
+| AI setup says Ollama is not running / `Could not reach Ollama` | Ollama is not started, or `OLLAMA_BASE_URL` points elsewhere | Open the Ollama app (or run `ollama serve`), check `curl http://127.0.0.1:11434/api/tags`, then press **Re-check** |
+| `Ollama does not have the model "…"` | The model named in `OLLAMA_MODEL` (or picked in AI setup) was never pulled | Run the `ollama pull <model>` command shown in the message, or pick an installed model |
+| `The prompt is larger than Ollama's context window` | `OLLAMA_NUM_CTX` is smaller than the prompt | Raise `OLLAMA_NUM_CTX` in `.env.local` (e.g. `32768`), restart `npm run dev`, or send fewer materials |
+| `Unknown LLM_PROVIDER "…"` | Typo in `LLM_PROVIDER` | Use one of `nararouter`, `ollama`, `gemini`, `groq`, `openrouter`, `openai`, `anthropic` |
 | The model list in AI setup is empty | Your NaraRouter plan does not list models, or the key is not entitled | Check `GET /api/models` for its `message`, then run the `curl` in Part 2.3 with your own key; `NARAROUTER_MODEL` still works as a default |
 | University Research fetch fails | Public page is unavailable or blocks browser CORS | Atlas does not proxy or bypass the block. Paste the publicly visible page text and keep its official URL in the source field |
 | A material says it has no readable text | Scanned or image-only PDF (no text layer); Atlas does not run OCR | Export a text-based PDF from the original, or save the document as `.docx` |
