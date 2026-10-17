@@ -6,9 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger, DialogDescription } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Plus, Trash2, ArrowRight, ArrowUp, ArrowDown, GraduationCap, Calendar, Globe, Search, Info } from 'lucide-react';
+import { Plus, Trash2, ArrowRight, ArrowUp, ArrowDown, GraduationCap, Calendar, Globe, Search, Info, GripVertical } from 'lucide-react';
 import { roadmapTemplates } from '@/lib/roadmapTemplate';
 import { clearEssayArtifacts, getStored, setStored, removeStored } from '@/lib/persist';
+import { useDragReorder, moveItem } from '@/hooks/use-drag-reorder';
 import { daysUntil, startOfLocalDay } from '@/lib/dates';
 import {
   PLATFORMS, PLATFORM_VALUES, US_ROUNDS, UK_ROUNDS,
@@ -238,12 +239,15 @@ export default function Universities() {
     }
   };
 
-  const moveUniversity = async (fromIndex, offset) => {
-    const toIndex = fromIndex + offset;
-    if (reordering || toIndex < 0 || toIndex >= universities.length) return;
-    const next = [...universities];
-    const [moved] = next.splice(fromIndex, 1);
-    next.splice(toIndex, 0, moved);
+  /**
+   * Puts the card at `fromIndex` into slot `toIndex` and persists the order:
+   * to the database when the column exists, to this browser otherwise. Used
+   * by drag-and-drop (any slot in one move) and by the arrow buttons, which
+   * remain for keyboards and touch screens.
+   */
+  const reorderUniversities = async (fromIndex, toIndex) => {
+    if (reordering || fromIndex === toIndex || toIndex < 0 || toIndex >= universities.length) return;
+    const next = moveItem(universities, fromIndex, toIndex);
     const ordered = next.map((uni, index) => ({ ...uni, sort_order: index }));
     setUniversities(ordered);
     const savedIds = ordered.map((uni) => uni.id);
@@ -274,6 +278,10 @@ export default function Universities() {
       setReordering(false);
     }
   };
+
+  const moveUniversity = (fromIndex, offset) => reorderUniversities(fromIndex, fromIndex + offset);
+
+  const { handleProps, itemProps, dragIndex } = useDragReorder({ onMove: reorderUniversities, disabled: reordering });
 
   const getProgress = (uniId) => {
     const uniTasks = tasks.filter((t) => t.university_id === uniId);
@@ -484,14 +492,34 @@ export default function Universities() {
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {universities.length > 1 && (
+            <p className="sm:col-span-2 lg:col-span-3 text-[11px] text-foreground/40 -mb-1">
+              Drag a card by its grip to any position, or use the arrows. The order is yours — Atlas keeps it on every page.
+            </p>
+          )}
           {universities.map((uni, cardIndex) => {
             const progress = getProgress(uni.id);
             const platform = getUniversityPlatform(uni);
             const hasShared = essays.some((e) => e.scope === 'common' && (e.application_platform || 'common_app') === platform);
             const daysLeft = daysUntil(uni.deadline);
             return (
-              <div key={uni.id} className="group bg-card border border-border rounded-xl p-5 hover:border-foreground/20 transition-all relative">
+              <div
+                key={uni.id}
+                {...itemProps(cardIndex)}
+                className={`group bg-card border rounded-xl p-5 hover:border-foreground/20 transition-all relative ${
+                  dragIndex === cardIndex ? 'opacity-50 border-dashed' : 'border-border'
+                } data-[drag-over=true]:border-accent data-[drag-over=true]:bg-accent/5 data-[drag-over=true]:ring-2 data-[drag-over=true]:ring-accent/30`}
+              >
                 <div className="absolute top-3 right-3 flex items-center gap-0.5 opacity-70 group-hover:opacity-100 transition">
+                  <button
+                    type="button"
+                    {...handleProps(cardIndex)}
+                    aria-label={`Drag ${uni.name} to another position`}
+                    title="Drag to another position"
+                    className={`p-1.5 rounded-md text-foreground/35 hover:text-foreground hover:bg-muted ${reordering ? 'cursor-not-allowed opacity-40' : 'cursor-grab active:cursor-grabbing'}`}
+                  >
+                    <GripVertical className="w-3.5 h-3.5" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => moveUniversity(cardIndex, -1)}
@@ -522,7 +550,7 @@ export default function Universities() {
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                <Link to={`/universities/${uni.id}`} className="block">
+                <Link to={`/universities/${uni.id}`} className="block" draggable={false}>
                   <div className="flex items-center gap-2 mb-3 flex-wrap pr-6">
                     <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${statusColors[uni.status] || statusColors.researching}`}>
                       {(uni.status || 'researching').replace('_', ' ')}

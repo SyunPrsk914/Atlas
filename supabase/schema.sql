@@ -60,6 +60,7 @@ create table if not exists public.essays (
   title text not null,
   prompt text,
   draft_anchor text,
+  edit_instructions text,
   word_limit numeric,
   content text,
   status text not null default 'not_started'
@@ -249,6 +250,8 @@ $$;
 --   universities.sort_order           -> applicant-defined ordering of university cards.
 --   essays.draft_anchor               -> applicant-provided roots/non-negotiables
 --                                          the drafter must honor.
+--   essays.edit_instructions          -> the applicant's own change list for the
+--                                          next AI edit; binding, above review advice.
 --   profiles.*                        -> the extra applicant context that makes
 --                                          a review accurate for international
 --                                          applicants (citizenship status,
@@ -262,6 +265,7 @@ create index if not exists universities_sort_order_idx
 
 alter table public.essays add column if not exists limit_unit text;
 alter table public.essays add column if not exists draft_anchor text;
+alter table public.essays add column if not exists edit_instructions text;
 
 alter table public.materials add column if not exists analysis jsonb;
 alter table public.materials add column if not exists analysis_role text not null default 'auto';

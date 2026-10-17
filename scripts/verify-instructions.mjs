@@ -518,7 +518,7 @@ await check('the diff shows what the edit left behind', () => {
 
 await check('the knowledge base page can deepen itself and report its own density', () => {
   const page = src('src/pages/AiKnowledge.jsx');
-  assert.match(page, /extendApplicantKnowledge/, 'there is no way to add what the first pass missed');
+  assert.match(page, /startKnowledgeExtend|extendApplicantKnowledge/, 'there is no way to add what the first pass missed');
   assert.match(page, /knowledgeCoverage/, 'thin builds are never surfaced');
   assert.match(page, /itemLooksCutOff/, 'half-written items are never surfaced');
   assert.match(page, /handleGoDeeper/);

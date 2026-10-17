@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { Outlet, NavLink, Link } from 'react-router-dom';
 import { LayoutDashboard, User, GraduationCap, PenLine, FolderOpen, Library, Compass, Menu, X, Clock, Brain } from 'lucide-react';
 import AiStatusPill from '@/components/AiStatusPill';
+import BackgroundTasksPill from '@/components/BackgroundTasksPill';
+import { startKnowledgeAutoRefresh } from '@/lib/knowledgeAutoRefresh';
 import { getLastUniversityId } from '@/lib/persist';
 import { base44 } from '@/api/base44Client';
 
@@ -53,6 +55,11 @@ export default function Layout() {
     };
   }, [lastUniId]);
 
+  // The knowledge base keeps itself current in the background: materials that
+  // finish reading, a saved profile, and new drafts are folded in without a
+  // Rebuild. Started once per app load; it checks the sources before any call.
+  useEffect(() => startKnowledgeAutoRefresh(), []);
+
   const closeMobile = () => setMobileOpen(false);
 
   return (
@@ -64,6 +71,7 @@ export default function Layout() {
           <span className="font-display text-lg font-semibold tracking-tight">Atlas</span>
         </div>
         <div className="flex items-center gap-2">
+          <div className="max-w-[9rem]"><BackgroundTasksPill /></div>
           <AiStatusPill />
           <button onClick={() => setMobileOpen(true)} className="p-2 -mr-2 text-foreground/70 hover:text-foreground transition">
             <Menu className="w-5 h-5" />
@@ -139,6 +147,7 @@ export default function Layout() {
               <div className="text-[11px] text-foreground/40">Essay Builder →</div>
             </Link>
           )}
+          <BackgroundTasksPill />
           <AiStatusPill />
           <p className="text-[11px] text-foreground/35 leading-relaxed">
             Your private workspace. All data is yours alone. Reviews and essay selections are cached so they survive navigation.

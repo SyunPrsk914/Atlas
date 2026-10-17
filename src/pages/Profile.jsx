@@ -26,6 +26,17 @@ import { parseIbRecord, filledSubjects, hlCount } from '@/lib/ibDiploma';
 import { buildProfileContext } from '@/lib/profileContext';
 import { formatMaterialsForAI } from '@/lib/materialRole';
 import { loadApplicantKnowledgeText } from '@/lib/applicantKnowledgeService';
+import { scheduleKnowledgeAutoRefresh } from '@/lib/knowledgeAutoRefresh';
+import { getStored, setStored, removeStored } from '@/lib/persist';
+
+/**
+ * Unsaved edits are mirrored to localStorage while the applicant types, so an
+ * accidental click on another page, a crashed tab, or a lost connection cannot
+ * throw away ten activity entries. The draft is offered back on the next visit
+ * and deleted the moment a save succeeds.
+ */
+const DRAFT_KEY = 'profileDraft';
+const draftMatches = (draft, row) => JSON.stringify(draft || {}) === JSON.stringify(row || {});
 
 /** @param {{ icon: React.ElementType, title: React.ReactNode, description?: string, children: React.ReactNode }} props */
 function SectionCard({ icon: Icon, title, description, children }) {
@@ -160,16 +171,21 @@ export default function Profile() {
   const [sharpenIndex, setSharpenIndex] = useState(null);
   /** Materials/knowledge are fetched the first time the activities AI is used. */
   const activityContextRef = useRef(null);
+  /** Edits from an earlier visit that were never saved, offered back once. */
+  const [recoveredDraft, setRecoveredDraft] = useState(null);
 
   useEffect(() => {
     (async () => {
       try {
         const profiles = await base44.entities.Profile.list();
-        if (profiles.length > 0) {
-          setProfile(profiles[0]);
-          setFormData(profiles[0]);
-        } else {
-          setFormData({ requires_financial_aid: true, school_system: 'IB World School' });
+        const row = profiles.length > 0 ? profiles[0] : { requires_financial_aid: true, school_system: 'IB World School' };
+        if (profiles.length > 0) setProfile(profiles[0]);
+        setFormData(row);
+        const draft = getStored(DRAFT_KEY, null);
+        if (draft && typeof draft === 'object' && draft.form && !draftMatches(draft.form, row)) {
+          setRecoveredDraft(draft);
+        } else if (draft) {
+          removeStored(DRAFT_KEY);
         }
       } catch (e) {
         console.error(e);
@@ -198,8 +214,25 @@ export default function Profile() {
   }, [dirty]);
 
   const set = (key, value) => {
-    setFormData((prev) => ({ ...prev, [key]: value }));
+    setFormData((prev) => {
+      const next = { ...prev, [key]: value };
+      setStored(DRAFT_KEY, { form: next, savedAt: Date.now() });
+      return next;
+    });
     setDirty(true);
+  };
+
+  const restoreDraft = () => {
+    if (!recoveredDraft?.form) return;
+    setFormData((prev) => ({ ...prev, ...recoveredDraft.form }));
+    setDirty(true);
+    setRecoveredDraft(null);
+    toast.success('Unsaved edits restored', { description: 'Press Save to keep them.' });
+  };
+
+  const discardDraft = () => {
+    removeStored(DRAFT_KEY);
+    setRecoveredDraft(null);
   };
 
   const ibRecord = useMemo(() => parseIbRecord(formData.ib_subjects), [formData.ib_subjects]);
@@ -255,6 +288,10 @@ export default function Profile() {
       setProfile(updated);
       setFormData(updated);
       setDirty(false);
+      removeStored(DRAFT_KEY);
+      setRecoveredDraft(null);
+      // The knowledge base reads the profile; let it catch up on its own.
+      scheduleKnowledgeAutoRefresh('profile saved');
       toast.success('Profile saved', {
         description: 'Every essay, review and university research now uses this.',
       });
@@ -290,11 +327,33 @@ export default function Profile() {
             AI has to guess — or worse, nothing gets said at all.
           </p>
         </div>
-        <Button onClick={handleSave} disabled={saving} className="shrink-0">
-          {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
-          {saving ? 'Saving…' : 'Save'}
-        </Button>
+        <div className="flex items-center gap-3 shrink-0">
+          {dirty && !saving && (
+            <span className="text-xs text-amber-700">Unsaved changes</span>
+          )}
+          <Button onClick={handleSave} disabled={saving} className="shrink-0">
+            {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+            {saving ? 'Saving…' : dirty ? 'Save changes' : 'Save'}
+          </Button>
+        </div>
       </div>
+
+      {recoveredDraft && (
+        <div className="flex items-start justify-between gap-3 p-4 rounded-xl bg-amber-50 border border-amber-200 flex-wrap">
+          <div className="text-sm">
+            <p className="font-medium text-amber-900">You have edits that were never saved</p>
+            <p className="text-xs text-amber-800/80 mt-0.5">
+              Atlas kept a copy of what you typed on an earlier visit
+              {recoveredDraft.savedAt ? ` (${new Date(recoveredDraft.savedAt).toLocaleString()})` : ''}. Restore them to
+              continue where you left off, or discard them to keep the saved profile.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={restoreDraft}>Restore my edits</Button>
+            <Button size="sm" variant="ghost" onClick={discardDraft}>Discard</Button>
+          </div>
+        </div>
+      )}
 
       {missingColumns.length > 0 && (
         <div className="flex items-start gap-3 p-4 rounded-xl bg-slate-50 border border-slate-200">
@@ -551,7 +610,7 @@ export default function Profile() {
         )}
       </SectionCard>
 
-      <SectionCard icon={Briefcase} title="Activities" description="Common App format — up to 10">
+      <SectionCard icon={Briefcase} title="Activities" description="Common App format — up to 10, in the order the reader will see them. Drag the grip or use the arrows to reorder.">
         <ActivityAiPanel
           activities={formData.activities || []}
           onChange={(val) => set('activities', val)}

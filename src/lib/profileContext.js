@@ -44,10 +44,13 @@ export function ibSubjectSummary(profile) {
 
 export function formatActivities(activities, oldText) {
   if (Array.isArray(activities) && activities.length > 0) {
+    // The list is kept in submission order: slot 1 is what the reader sees
+    // first, so the order itself is information for every prompt.
     return activities
       .map((a, i) => {
         const grades = (a.grade_levels || []).join(', ');
-        return `${i + 1}. ${a.position || 'Position not given'} at ${a.organization || 'Organisation not given'} [${a.activity_type || 'Unclassified'}]\n   What you did: ${a.description || 'No description given'}\n   Grades: ${grades || 'n/a'} | Timing: ${a.timing || 'n/a'} | ${a.hours_per_week ?? '?'} hrs/week, ${a.weeks_per_year ?? '?'} weeks/year`;
+        const keywords = String(a.keywords || '').replace(/\s+/g, ' ').trim();
+        return `${i + 1}. ${a.position || 'Position not given'} at ${a.organization || 'Organisation not given'} [${a.activity_type || 'Unclassified'}]\n   What you did: ${a.description || 'No description given'}\n   Grades: ${grades || 'n/a'} | Timing: ${a.timing || 'n/a'} | ${a.hours_per_week ?? '?'} hrs/week, ${a.weeks_per_year ?? '?'} weeks/year${keywords ? `\n   Applicant's private notes on this activity (facts, not submitted): ${keywords}` : ''}`;
       })
       .join('\n');
   }
@@ -127,7 +130,7 @@ export function buildProfileContext(profile, opts = {}) {
 
   // Activities + honours
   const activities = formatActivities(p.activities, p.activities_awards);
-  if (activities) lines.push(`ACTIVITIES (Common App format):\n${activities}`);
+  if (activities) lines.push(`ACTIVITIES (Common App format, in submission order — slot 1 is read first):\n${activities}`);
   const honors = formatHonors(p.honors);
   if (honors) lines.push(`HONORS (Common App format):\n${honors}`);
 

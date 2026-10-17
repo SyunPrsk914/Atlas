@@ -68,6 +68,7 @@ import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
 import ActivitiesEditor from '@/components/profile/ActivitiesEditor';
 import ActivityAiPanel from '@/components/profile/ActivityAiPanel';
 import AiStatusPill from '@/components/AiStatusPill';
+import BackgroundTasksPill from '@/components/BackgroundTasksPill';
 import AiSetupDialog, { OllamaReasoning } from '@/components/AiSetupDialog';
 import { assessLength } from '@/lib/essayLength';
 import { diffText, diffStats } from '@/lib/textDiff';
@@ -114,6 +115,18 @@ const getContext = async () => ({ profileText: '', materialsText: '', applicantT
 /** Every case is a component plus the props a page really hands it. */
 export const cases = {
   'AiStatusPill — first paint (checking)': () => <AiStatusPill />,
+  // The sidebar's record of background AI work: idle renders nothing, and the
+  // list must survive a running task with a stage detail, a finished one, and a
+  // failed one whose error is an Error object.
+  'BackgroundTasksPill — idle': () => <BackgroundTasksPill tasks={[]} />,
+  'BackgroundTasksPill — running, done, and failed': () => (
+    <BackgroundTasksPill tasks={[
+      { id: 't1', kind: 'essay', label: 'Applying edits: Roommate essay', stage: 're_review', state: 'running', startedAt: Date.now() - 65000, scope: { essayId: 'e1' } },
+      { id: 't2', kind: 'knowledge', label: 'Dissecting materials into sections', stage: 'dissect', detail: '2 of 3: Admitted application', state: 'running', startedAt: Date.now() - 5000, scope: { knowledge: true } },
+      { id: 't3', kind: 'application', label: 'Reading the whole application: Stanford', stage: 'application', state: 'done', startedAt: Date.now() - 90000, settledAt: Date.now(), scope: { universityId: 'u1' } },
+      { id: 't4', kind: 'essay', label: 'Writing a draft: Why us', stage: 'generate', state: 'failed', error: new Error('The model returned nothing'), startedAt: Date.now() - 20000, settledAt: Date.now(), scope: { essayId: 'e2' } },
+    ]} />
+  ),
   'AiSetupDialog — open while the provider is read': () => <AiSetupDialog open onOpenChange={() => {}} onStatusChange={() => {}} />,
   'AiSetupDialog — closed': () => <AiSetupDialog open={false} onOpenChange={() => {}} />,
   // The local-model reasoning panel, with the exact shape /api/status returns
@@ -184,6 +197,34 @@ export const cases = {
       onKeep={() => {}} onRestore={() => {}} onFixRemaining={() => {}} disabled={false}
     />
   ),
+  // The applicant's own instructions, checked against the text: one missed, one
+  // verified, one only reported by the model — with a re-score that did not move,
+  // which the view must not paint as an improvement.
+  'EssayDiffView — instructions checked, score unchanged': () => (
+    <EssayDiffView
+      revision={{
+        before, after, ops, stats, unit: 'words', changes: [],
+        scoreBefore: 8.2, scoreAfter: 8.2, scoreDelta: 0,
+        instructionCheck: {
+          total: 3, missed: 1, declined: 0, verified: 1, hadNothing: false,
+          message: '1 of your 3 edit instructions was not carried out.',
+          items: [
+            { instruction: 'Cut "in the end".', status: 'missed', detail: '\u201cin the end\u201d is still in the draft.' },
+            { instruction: 'Keep "solar car".', status: 'done', detail: '\u201csolar car\u201d survives word for word.' },
+            { instruction: 'Make the tone warmer.', status: 'reported', detail: 'The editor reports: softened the verbs.' },
+          ],
+        },
+      }}
+      onKeep={() => {}} onRestore={() => {}} onFixRemaining={() => {}}
+    />
+  ),
+  // A lower score with the automatic restore on: the comparison stays, marked.
+  'EssayDiffView — scored lower and auto-restored': () => (
+    <EssayDiffView
+      revision={{ before, after, ops, stats, unit: 'words', changes: [], scoreBefore: 8.2, scoreAfter: 7.8, scoreDelta: -0.4, autoRestored: true }}
+      onKeep={() => {}} onRestore={() => {}}
+    />
+  ),
   'EssayDiffView — every flagged phrase resolved': () => (
     <EssayDiffView
       revision={{ before, after, ops, stats, unit: 'words', changes: [], unaddressed: [], resolvedPhrases: ['It was hard', 'but I learned'] }}
@@ -239,6 +280,17 @@ export const cases = {
 
   'ActivitiesEditor — over-limit fields': () => (
     <ActivitiesEditor value={[activity]} onChange={() => {}} onSharpen={() => {}} sharpeningIndex={null} />
+  ),
+  // Two entries: the grip, both arrows, and the private keywords box render on
+  // every card, and the first/last arrows are disabled at the ends of the list.
+  'ActivitiesEditor — two entries with keywords': () => (
+    <ActivitiesEditor
+      value={[
+        { ...activity, keywords: 'raised ¥180,000 over two bake sales; 14 volunteers; started it in grade 10' },
+        { ...activity, position: 'Night-shift cook', organization: 'Family restaurant', description: 'Closed the kitchen five nights a week.' },
+      ]}
+      onChange={() => {}} onSharpen={() => {}} sharpeningIndex={1}
+    />
   ),
   'ActivitiesEditor — empty list': () => <ActivitiesEditor value={[]} onChange={() => {}} />,
   'ActivityAiPanel — idle': () => (

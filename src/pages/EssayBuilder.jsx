@@ -8,11 +8,13 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { useBackgroundTasks } from '@/hooks/use-background-tasks';
+import { startBackgroundTask, taskForEssay } from '@/lib/backgroundTasks';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import {
   Sparkles, FileText, Plus, Save, Wand2, ClipboardCheck, Loader2, PenLine,
   Trash2, ChevronDown, ChevronUp, Library, CheckCircle2, CircleDashed,
-  Info, ArrowRight, AlertTriangle, Undo2, FileDiff, RotateCcw, Ruler, Compass,
+  Info, ArrowRight, AlertTriangle, Undo2, FileDiff, RotateCcw, Ruler, Compass, ListChecks,
 } from 'lucide-react';
 import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
 import EssayDiffView from '@/components/essay/EssayDiffView';
@@ -25,11 +27,11 @@ import { buildProfileContext } from '@/lib/profileContext';
 import {
   buildGeneratePrompt, GENERATE_SCHEMA, buildReviewPrompt, REVIEW_SCHEMA, buildPolishPrompt,
   POLISH_SCHEMA, LENGTH_REPAIR_SCHEMA, buildLengthRepairPrompt, AI_TEMPERATURES,
-  extractRevisedEssay, cleanEssayText, withMeasuredLength, buildRootCorrection,
+  extractRevisedEssay, cleanEssayText, withMeasuredLength, buildRootCorrection, splitEditInstructions,
 } from '@/lib/essayPrompts';
 import { assessLength, isBetterLength, lengthSeverity } from '@/lib/essayLength';
 import { checkDraftAgainstRoot, interpretRoot, rootCheckBrief } from '@/lib/essayRoot';
-import { findUnaddressedFindings, unaddressedBrief } from '@/lib/essayEditCheck';
+import { findUnaddressedFindings, unaddressedBrief, checkInstructionsFollowed, instructionsBrief } from '@/lib/essayEditCheck';
 import { diffText, diffStats, isAggressiveRewrite } from '@/lib/textDiff';
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
@@ -50,6 +52,7 @@ import {
   getEssaySnapshot, setEssaySnapshot, clearEssaySnapshot,
   getEssayProgress, pushEssayProgress, clearEssayProgress,
   getAutoReviewAfterEdit, setAutoReviewAfterEdit,
+  getAutoRestoreWorseEdit, setAutoRestoreWorseEdit,
 } from '@/lib/persist';
 
 const statusLabel = (s) => (ESSAY_STATUSES.find((x) => x.value === s) || { label: s }).label;
@@ -80,14 +83,54 @@ function clearLocalDraftAnchor(id) {
   } catch { /* a stale local fallback is still recoverable on this device */ }
 }
 
+// The applicant's edit instructions follow the same path as the root: the
+// database column when it exists, this browser when it does not yet.
+const EDIT_INSTRUCTIONS_KEY = 'atlas_edit_instructions_';
+
+function localEditInstructions(id) {
+  if (!id || typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(`${EDIT_INSTRUCTIONS_KEY}${id}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberEditInstructions(id, value) {
+  if (!id || typeof window === 'undefined') return false;
+  const serialized = String(value ?? '');
+  try {
+    window.localStorage.setItem(`${EDIT_INSTRUCTIONS_KEY}${id}`, serialized);
+    return window.localStorage.getItem(`${EDIT_INSTRUCTIONS_KEY}${id}`) === serialized;
+  } catch { return false; }
+}
+
+function clearLocalEditInstructions(id) {
+  if (!id || typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(`${EDIT_INSTRUCTIONS_KEY}${id}`);
+  } catch { /* a stale local fallback is still recoverable on this device */ }
+}
+
 function hydrateEssay(essay) {
   if (!essay) return essay;
   const local = localDraftAnchor(essay.id);
-  if (local !== null) return { ...essay, draft_anchor: local };
+  const localInstructions = localEditInstructions(essay.id);
+  const withInstructions = {
+    ...essay,
+    edit_instructions: localInstructions !== null ? localInstructions : (essay.edit_instructions || ''),
+  };
+  if (local !== null) return { ...withInstructions, draft_anchor: local };
   return Object.prototype.hasOwnProperty.call(essay, 'draft_anchor')
-    ? { ...essay, draft_anchor: essay.draft_anchor || '' }
-    : { ...essay, draft_anchor: '' };
+    ? { ...withInstructions, draft_anchor: essay.draft_anchor || '' }
+    : { ...withInstructions, draft_anchor: '' };
 }
+
+// The last AI edit of each essay, kept for the session so the comparison is
+// still there when the applicant comes back to the essay — or to the page.
+// A background edit that finishes while another essay is on screen writes
+// here, and the essay shows it the moment it is selected.
+const essayRevisions = new Map();
 
 export default function EssayBuilder() {
   const [searchParams] = useSearchParams();
@@ -96,7 +139,6 @@ export default function EssayBuilder() {
   const [selectedUni, setSelectedUni] = useState(null);
   const [selectedEssay, setSelectedEssay] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(null);
   const [saving, setSaving] = useState(false);
   const [dirtyFields, setDirtyFields] = useState([]);
   const [rootSaving, setRootSaving] = useState(false);
@@ -121,6 +163,9 @@ export default function EssayBuilder() {
   // An AI answer that missed the length contract and could not be repaired.
   const [lengthIssue, setLengthIssue] = useState(null);
   const [autoReview, setAutoReview] = useState(true);
+  // Whether an edit that re-scores LOWER is put back by itself (the snapshot
+  // keeps the edit either way).
+  const [autoRestoreWorse, setAutoRestoreWorse] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [metaExpanded, setMetaExpanded] = useState(true);
@@ -130,8 +175,103 @@ export default function EssayBuilder() {
   const selectedEssayRef = useRef(null);
   const dirtyFieldsRef = useRef([]);
   const essayWriteRef = useRef(Promise.resolve());
+  const mountedRef = useRef(true);
+  // Identifies this page instance to the task registry, so a task started by
+  // an earlier visit can be told apart from one started here.
+  const ownerRef = useRef(null);
+  if (!ownerRef.current) ownerRef.current = `essay-builder-${Date.now().toString(36)}`;
   const dirty = dirtyFields.length > 0;
   const currentSelectedEssay = () => selectedEssayRef.current || selectedEssay;
+
+  // AI work on an essay runs as a background task (see backgroundTasks.js): it
+  // keeps going when the applicant switches essays or leaves the page, and it
+  // locks ONE essay rather than the whole builder. `busy` is the stage of the
+  // task that holds the selected essay — the same word the buttons always used.
+  const backgroundTasks = useBackgroundTasks(useCallback((task) => {
+    // A task started by an earlier visit to this page finished while this
+    // visit is open: its result is in the database and the caches, not in this
+    // instance's state. Re-read that one row (never the whole list, which would
+    // discard what is being typed in another essay) and refresh its panels.
+    if (task.kind !== 'essay' || task.owner === ownerRef.current || (task.state !== 'done' && task.state !== 'failed')) return;
+    const essayId = String(task.scope?.essayId || '');
+    if (!essayId) return;
+    Promise.resolve(base44.entities.Essay.get(essayId)).then((raw) => {
+      if (!raw || !mountedRef.current) return;
+      const row = hydrateEssay(raw);
+      setEssays((prev) => prev.map((item) => (String(item.id) === essayId ? { ...item, ...row } : item)));
+      if (String(selectedEssayRef.current?.id || '') === essayId) {
+        selectedEssayRef.current = row;
+        setSelectedEssay(row);
+        restoreEssayPanels(row);
+      }
+    }).catch(() => undefined);
+  }, []));
+  const essayTask = selectedEssay ? taskForEssay(selectedEssay.id) : null;
+  const busy = essayTask?.stage || null;
+  const runningEssayIds = new Set(backgroundTasks
+    .filter((task) => task.kind === 'essay' && task.state === 'running')
+    .map((task) => String(task.scope?.essayId || '')));
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  /** True while `essayId` is the essay on screen in a mounted builder. */
+  const isShown = (essayId) => mountedRef.current && String(selectedEssayRef.current?.id || '') === String(essayId || '');
+
+  /**
+   * State setters bound to one essay. A background action finishes whether or
+   * not the applicant has moved on, so a result for essay A must never land in
+   * the panels showing essay B. Everything durable (text, review, snapshot,
+   * progress) is persisted by the action itself; these only touch the screen.
+   */
+  const scopedSetters = (essayId) => {
+    const guard = (setter) => (value) => { if (isShown(essayId)) setter(value); };
+    return {
+      setReviewResult: guard(setReviewResult),
+      setReviewCachedAt: guard(setReviewCachedAt),
+      setPreviousScore: guard(setPreviousScore),
+      setGenAnalysis: guard(setGenAnalysis),
+      setGenGaps: guard(setGenGaps),
+      setGenCachedAt: guard(setGenCachedAt),
+      setLengthIssue: guard(setLengthIssue),
+      setSnapshot: guard(setSnapshot),
+      setRevision: (value) => {
+        const key = String(essayId);
+        const next = typeof value === 'function' ? value(essayRevisions.get(key) || null) : value;
+        if (next) essayRevisions.set(key, next); else essayRevisions.delete(key);
+        if (isShown(essayId)) setRevision(next);
+      },
+    };
+  };
+
+  /**
+   * Starts an AI action on an essay as a background task. Returns a promise
+   * that settles when the action does; the UI never awaits it to stay usable.
+   */
+  const runEssayTask = (essay, { stage, label }, run) => {
+    if (!essay?.id) return Promise.resolve(null);
+    const running = taskForEssay(essay.id);
+    if (running) {
+      toast.message(`“${essay.title || 'This essay'}” is still being worked on`, {
+        description: `${running.label} has not finished. You can edit any other essay in the meantime.`,
+      });
+      return Promise.resolve(null);
+    }
+    const { promise } = startBackgroundTask({
+      kind: 'essay',
+      label: `${label}: ${essay.title || 'Untitled essay'}`,
+      stage,
+      owner: ownerRef.current,
+      scope: { essayId: String(essay.id), universityId: essay.university_id ? String(essay.university_id) : '' },
+      run,
+    });
+    return promise.catch((error) => {
+      console.error(error);
+      return null;
+    });
+  };
   const updateDirtyFields = (update) => {
     const next = typeof update === 'function' ? update(dirtyFieldsRef.current) : update;
     dirtyFieldsRef.current = next;
@@ -140,7 +280,10 @@ export default function EssayBuilder() {
 
   useEffect(() => { selectedEssayRef.current = selectedEssay; }, [selectedEssay]);
 
-  useEffect(() => { setAutoReview(getAutoReviewAfterEdit()); }, []);
+  useEffect(() => {
+    setAutoReview(getAutoReviewAfterEdit());
+    setAutoRestoreWorse(getAutoRestoreWorseEdit());
+  }, []);
 
   const platform = useMemo(() => getUniversityPlatform(selectedUni), [selectedUni]);
   const platformInfo = PLATFORMS[platform];
@@ -159,7 +302,7 @@ export default function EssayBuilder() {
    * edit, and the record of what each AI action did to the length and the score.
    */
   const loadEssayLocalState = (essay) => {
-    setRevision(null);
+    setRevision(essay ? essayRevisions.get(String(essay.id)) || null : null);
     setLengthIssue(null);
     setPreviousScore(null);
     if (!essay) {
@@ -171,6 +314,29 @@ export default function EssayBuilder() {
     setProgress(getEssayProgress(essay.id));
   };
 
+  /** Everything the panels show for an essay, read back from its caches. */
+  const restoreEssayPanels = (essay) => {
+    const cachedReview = essay ? getCachedEssayReview(essay.id) : null;
+    if (cachedReview?.result) {
+      setReviewResult(cachedReview.result);
+      setReviewCachedAt(cachedReview.savedAt || null);
+    } else {
+      setReviewResult(null);
+      setReviewCachedAt(null);
+    }
+    const cachedGen = essay ? getCachedEssayGen(essay.id) : null;
+    if (cachedGen) {
+      setGenAnalysis(cachedGen.analysis || null);
+      setGenGaps(cachedGen.gaps || []);
+      setGenCachedAt(cachedGen.savedAt || null);
+    } else {
+      setGenAnalysis(null);
+      setGenGaps([]);
+      setGenCachedAt(null);
+    }
+    loadEssayLocalState(essay);
+  };
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -178,7 +344,7 @@ export default function EssayBuilder() {
         const missing = typeof base44.capabilities?.probe === 'function'
           ? await base44.capabilities.probe()
           : (base44.capabilities?.missingOptionalColumns?.() || []);
-        if (active) setMissingEssayColumns(missing.filter((column) => column === 'draft_anchor'));
+        if (active) setMissingEssayColumns(missing.filter((column) => column === 'draft_anchor' || column === 'edit_instructions'));
       } catch { /* the normal save path still reports database errors */ }
     })();
     return () => { active = false; };
@@ -275,7 +441,9 @@ export default function EssayBuilder() {
   const specificEssays = applicable.filter((e) => !isSharedEssay(e));
 
   const pickEssay = async (essay) => {
-    if (busy !== null || saving || rootSaving) return;
+    // A running AI task locks only its own essay, so switching is always
+    // allowed; only a save in flight has to finish first.
+    if (saving || rootSaving) return;
     const stayingInUcas = isUcasQuestion(essay) && isUcasQuestion(selectedEssay);
     if (dirty && !stayingInUcas) {
       if (!window.confirm('Save the current essay before switching?')) return;
@@ -286,30 +454,12 @@ export default function EssayBuilder() {
     setSelectedEssay(essay);
     setLastEssayId(essay.id);
     // Restore cached results for this essay if we have them
-    const cachedReview = getCachedEssayReview(essay.id);
-    const cachedGen = getCachedEssayGen(essay.id);
-    if (cachedReview?.result) {
-      setReviewResult(cachedReview.result);
-      setReviewCachedAt(cachedReview.savedAt || null);
-    } else {
-      setReviewResult(null);
-      setReviewCachedAt(null);
-    }
-    if (cachedGen) {
-      setGenAnalysis(cachedGen.analysis || null);
-      setGenGaps(cachedGen.gaps || []);
-      setGenCachedAt(cachedGen.savedAt || null);
-    } else {
-      setGenAnalysis(null);
-      setGenGaps([]);
-      setGenCachedAt(null);
-    }
-    loadEssayLocalState(essay);
+    restoreEssayPanels(essay);
     if (!stayingInUcas) updateDirtyFields([]);
   };
 
   const handleSelectUni = async (uniId) => {
-    if (busy !== null || saving || rootSaving) return;
+    if (saving || rootSaving) return;
     if (dirty) {
       if (!window.confirm('Save the current essay before switching universities?')) return;
       const saved = await handleSave();
@@ -379,7 +529,7 @@ export default function EssayBuilder() {
     setSelectedEssay(applyUnchangedFields);
     if (selectedEssayRef.current?.id === essayRow.id) {
       const retryable = Object.keys(fields).filter((field) => [
-        'title', 'prompt', 'draft_anchor', 'word_limit', 'content', 'status', 'type', 'limit_unit', 'review_notes',
+        'title', 'prompt', 'draft_anchor', 'edit_instructions', 'word_limit', 'content', 'status', 'type', 'limit_unit', 'review_notes',
       ].includes(field));
       updateDirtyFields((prev) => {
         const additions = retryable.filter((field) => !prev.includes(field));
@@ -392,6 +542,8 @@ export default function EssayBuilder() {
     if (!essayRow) return null;
     const savesRoot = Object.prototype.hasOwnProperty.call(fields, 'draft_anchor');
     if (savesRoot) rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+    const savesInstructions = Object.prototype.hasOwnProperty.call(fields, 'edit_instructions');
+    if (savesInstructions) rememberEditInstructions(essayRow.id, fields.edit_instructions);
     let rootDurable = true;
     let updated;
     try {
@@ -418,6 +570,21 @@ export default function EssayBuilder() {
         clearLocalDraftAnchor(essayRow.id);
       } else if (rootStillLatest) {
         rootDurable = rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+      }
+    }
+    if (savesInstructions) {
+      // Same contract as the root: the browser copy is dropped only once the
+      // database confirms it holds the latest text.
+      const missing = base44.capabilities?.missingOptionalColumns?.() || [];
+      const latest = selectedEssayRef.current?.id === essayRow.id
+        ? String(selectedEssayRef.current.edit_instructions || '')
+        : String(essayRow.edit_instructions || '');
+      const inDatabase = Object.prototype.hasOwnProperty.call(updated, 'edit_instructions') && !missing.includes('edit_instructions');
+      if (inDatabase && latest === String(fields.edit_instructions || '')) {
+        clearLocalEditInstructions(essayRow.id);
+        setMissingEssayColumns((prev) => prev.filter((column) => column !== 'edit_instructions'));
+      } else if (!inDatabase) {
+        setMissingEssayColumns((prev) => (prev.includes('edit_instructions') ? prev : [...prev, 'edit_instructions']));
       }
     }
     setEssays((prev) => prev.map((row) => mergePersistedFields(row, essayRow, fields, updated)));
@@ -535,6 +702,7 @@ export default function EssayBuilder() {
   const handleFieldChange = (field, value) => {
     const essayId = selectedEssay?.id;
     if (field === 'draft_anchor') rememberDraftAnchor(essayId, value);
+    if (field === 'edit_instructions') rememberEditInstructions(essayId, value);
     if (selectedEssayRef.current?.id === essayId) {
       selectedEssayRef.current = { ...selectedEssayRef.current, [field]: value };
     }
@@ -566,6 +734,7 @@ export default function EssayBuilder() {
     title: essay.title,
     prompt: essay.prompt,
     draft_anchor: essay.draft_anchor || '',
+    edit_instructions: essay.edit_instructions || '',
     word_limit: resolvedEssayLimit(essay),
     content: essay.content,
     status: essay.status,
@@ -581,6 +750,7 @@ export default function EssayBuilder() {
         prompt: essay.prompt,
         title: essay.title,
         draft_anchor: essay.draft_anchor || '',
+        edit_instructions: essay.edit_instructions || '',
         word_limit: resolvedEssayLimit(essay),
         status: essay.status,
         review_notes: essay.review_notes || '',
@@ -653,6 +823,7 @@ export default function EssayBuilder() {
             prompt: target.prompt,
             title: target.title,
             draft_anchor: target.draft_anchor || '',
+            edit_instructions: target.edit_instructions || '',
             word_limit: target.word_limit,
             status: target.status,
             review_notes: target.review_notes || '',
@@ -720,7 +891,8 @@ export default function EssayBuilder() {
   };
 
   const undoLastChange = async () => {
-    if (!undoStep || busy !== null || saving || rootSaving) return;
+    if (!undoStep || saving || rootSaving) return;
+    if (taskForEssay(undoStep.essayId)) return;
     const { essayId, fields, label } = undoStep;
     const target = selectedEssay?.id === essayId ? selectedEssay : essays.find((essay) => essay.id === essayId);
     if (!target) return;
@@ -789,7 +961,7 @@ export default function EssayBuilder() {
   /** Records one AI action against this essay and refreshes the visible history. */
   const recordProgress = (essayId, entry) => {
     const next = pushEssayProgress(essayId, entry);
-    setProgress(next);
+    if (isShown(essayId)) setProgress(next);
     return next;
   };
 
@@ -812,20 +984,23 @@ export default function EssayBuilder() {
       return;
     }
     const before = essayTarget.content || '';
-    setBusy('generate');
-    setReviewResult(null);
-    setGenAnalysis(null);
-    setRevision(null);
-    setLengthIssue(null);
+    const ui = scopedSetters(essayTarget.id);
+    const priorReviewForDraft = reviewResult;
+    ui.setReviewResult(null);
+    ui.setGenAnalysis(null);
+    ui.setRevision(null);
+    ui.setLengthIssue(null);
+    return runEssayTask(essayTarget, { stage: 'generate', label: 'Writing a draft' }, async ({ setStage }) => {
     try {
       const essayForAction = await prepareEssayRoot(essayTarget);
       const context = await gatherContext(essayForAction, 'draft');
+      const editInstructions = essayForAction.edit_instructions || '';
       const outcome = await runAI({
         prompt: buildGeneratePrompt({
           essay: essayForAction, university: universityForEssay(essayForAction), platform,
           profileText: context.profileText, knowledgeText: context.knowledgeText,
           materialsText: context.materialsText, applicantText: context.applicantText,
-          allEssays: essays,
+          allEssays: essays, editInstructions,
         }),
         response_json_schema: GENERATE_SCHEMA,
         temperature: AI_TEMPERATURES.generate,
@@ -847,13 +1022,13 @@ export default function EssayBuilder() {
       let result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
       let rootRetried = false;
       if (!rootCheck.ok && rootCheck.correction) {
-        setBusy('generate');
+        setStage('generate');
         const retry = await runAI({
           prompt: buildGeneratePrompt({
             essay: essayForAction, university: universityForEssay(essayForAction), platform,
             profileText: context.profileText, knowledgeText: context.knowledgeText,
             materialsText: context.materialsText, applicantText: context.applicantText,
-            allEssays: essays, rootCorrection: buildRootCorrection(rootCheck),
+            allEssays: essays, rootCorrection: buildRootCorrection(rootCheck), editInstructions,
           }),
           response_json_schema: GENERATE_SCHEMA,
           temperature: AI_TEMPERATURES.generate,
@@ -878,7 +1053,7 @@ export default function EssayBuilder() {
       let repaired = false;
       let repairNotes = '';
       if (assessment.needsWork || outcome.meta?.truncated) {
-        setBusy('repair');
+        setStage('repair');
         const fix = await repairLength({ essay: essayForAction, context, text, assessment, mode: 'generate' });
         if (fix) {
           repairNotes = `The first answer came back at ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}${outcome.meta?.truncated ? ' and was cut off by the model' : ''}; Atlas sent it back and the model returned ${fix.assessment.count.toLocaleString()}.`;
@@ -891,16 +1066,23 @@ export default function EssayBuilder() {
         }
       }
 
-      const analysis = [result.essay_analysis || '', repairNotes].filter(Boolean).join('\n\n');
-      const gaps = Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : [];
-      setGenAnalysis(analysis);
-      setGenGaps(gaps);
-      setGenCachedAt(new Date().toISOString());
+      // The applicant's own instructions are checked against the draft, not
+      // taken from the model's report: a missed one is listed with the gaps.
+      const instructionCheck = checkInstructionsFollowed(splitEditInstructions(editInstructions), before, text, result);
+      const instructionNote = instructionsBrief(instructionCheck);
+      const analysis = [result.essay_analysis || '', repairNotes, instructionNote].filter(Boolean).join('\n\n');
+      const gaps = [
+        ...(Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : []),
+        ...instructionCheck.items.filter((item) => item.status === 'missed').map((item) => `Your instruction was not carried out: “${item.instruction}” — ${item.detail}`),
+      ];
+      ui.setGenAnalysis(analysis);
+      ui.setGenGaps(gaps);
+      ui.setGenCachedAt(new Date().toISOString());
       setCachedEssayGen(essayForAction.id, { analysis, gaps });
 
       if (before.trim()) {
-        setEssaySnapshot(essayForAction.id, { content: before, label: 'the text before this draft', review: reviewResult });
-        setSnapshot(getEssaySnapshot(essayForAction.id));
+        setEssaySnapshot(essayForAction.id, { content: before, label: 'the text before this draft', review: priorReviewForDraft });
+        ui.setSnapshot(getEssaySnapshot(essayForAction.id));
       }
       rememberForUndo(essayForAction, { content: before, status: essayForAction.status }, 'draft written');
       await persist({ content: text, status: 'drafting' }, essayForAction);
@@ -910,16 +1092,17 @@ export default function EssayBuilder() {
         unit: assessment.unit,
         wordsBefore: assessLength(before, essayForAction, essays).count,
         wordsAfter: assessment.count,
-        scoreBefore: reviewResult?.overall_score ?? null,
+        scoreBefore: priorReviewForDraft?.overall_score ?? null,
         scoreAfter: null,
         rootRetried,
         note: [
           rootRetried ? 're-drafted to follow your required root' : '',
           repaired ? 'length repaired automatically' : '',
           assessment.ok ? 'inside the target band' : 'still outside the target band',
+          instructionCheck.missed ? `${instructionCheck.missed} instruction(s) not carried out` : '',
         ].filter(Boolean).join(' · '),
       });
-      setLengthIssue(assessment.ok ? null : assessment);
+      ui.setLengthIssue(assessment.ok ? null : assessment);
 
       if (!assessment.ok) {
         toast.warning(`Draft written, but it is ${assessment.shortfall ? `${assessment.shortfall.toLocaleString()} ${formatLimit(assessment.unit)} short` : `${assessment.overage.toLocaleString()} ${formatLimit(assessment.unit)} over`}`, {
@@ -931,6 +1114,11 @@ export default function EssayBuilder() {
           description: `The first answer ignored the direction in the root box, so Atlas sent it back. ${rootNote}`,
           duration: 12000,
         });
+      } else if (instructionCheck.missed) {
+        toast.warning(`Draft written, but ${instructionCheck.missed} of your instruction${instructionCheck.missed === 1 ? ' was' : 's were'} not followed`, {
+          description: `${instructionNote} They are listed under “fill these in”; “Apply edits” will hold the editor to them.`,
+          duration: 12000,
+        });
       } else {
         toast.success(`Draft written — ${assessment.count.toLocaleString()} ${formatLimit(assessment.unit)}`, {
           description: gaps.length
@@ -940,9 +1128,8 @@ export default function EssayBuilder() {
       }
     } catch (e) {
       console.error(e);
-    } finally {
-      setBusy(null);
     }
+    });
   };
 
   /**
@@ -970,8 +1157,9 @@ export default function EssayBuilder() {
 
     if (!isLiveOutcome(outcome)) return null;
     const measured = withMeasuredLength(outcome.result, target, rows);
-    setReviewResult(measured);
-    setReviewCachedAt(new Date().toISOString());
+    const ui = scopedSetters(target.id);
+    ui.setReviewResult(measured);
+    ui.setReviewCachedAt(new Date().toISOString());
     setCachedEssayReview(target.id, measured);
     return measured;
   };
@@ -982,15 +1170,16 @@ export default function EssayBuilder() {
     if (!guardLive('The admissions review')) return;
     const target = { ...current };
     const prior = reviewResult;
-    setBusy('review');
-    setReviewResult(null);
+    const ui = scopedSetters(target.id);
+    ui.setReviewResult(null);
+    return runEssayTask(target, { stage: 'review', label: 'Admissions review' }, async () => {
     try {
       const measured = await runReview(target, prior, 'review');
       if (!measured) {
-        if (prior) setReviewResult(prior);
+        if (prior) ui.setReviewResult(prior);
         return;
       }
-      setPreviousScore(prior?.overall_score ?? null);
+      ui.setPreviousScore(prior?.overall_score ?? null);
       rememberForUndo(target, { status: target.status, review_notes: target.review_notes || '' }, 'review saved');
       await persist({ status: 'in_review', review_notes: JSON.stringify(measured, null, 2) }, target);
       recordProgress(target.id, {
@@ -1002,15 +1191,14 @@ export default function EssayBuilder() {
         scoreAfter: measured.overall_score,
       });
       const delta = prior?.overall_score > 0 ? Math.round((measured.overall_score - prior.overall_score) * 10) / 10 : null;
-      toast.success(`Reviewed: ${measured.overall_score}/10${delta === null ? '' : ` (${delta > 0 ? '+' : ''}${delta})`}`, {
+      toast.success(`Reviewed “${target.title || 'essay'}”: ${measured.overall_score}/10${delta === null ? '' : ` (${delta > 0 ? '+' : ''}${delta})`}`, {
         description: `${(measured.weaknesses || []).length} weakness(es) and ${(measured.priority_improvements || []).length} priority fix(es) found.`,
       });
     } catch (e) {
       console.error(e);
-      if (prior) setReviewResult(prior);
-    } finally {
-      setBusy(null);
+      if (prior) ui.setReviewResult(prior);
     }
+    });
   };
 
   /**
@@ -1022,19 +1210,27 @@ export default function EssayBuilder() {
    * conservation diff, the same length contract, and the same re-score, so an
    * applicant never gets a weaker safety net for the second pass than the first.
    */
-  const runPolishAction = async ({ focusPhrases = null, label = 'Apply edits' } = {}) => {
+  const runPolishAction = async ({ focusPhrases = null, focusInstructions = null, label = 'Apply edits' } = {}) => {
     const current = currentSelectedEssay();
     if (!current?.content?.trim()) return;
     if (!guardLive(label)) return;
     const essayTarget = { ...current };
-    if (!focusPhrases?.length && !confirmReplace(essayTarget, 'the edits are applied')) return;
+    const followUp = !!(focusPhrases?.length || focusInstructions?.length);
+    if (!followUp && !confirmReplace(essayTarget, 'the edits are applied')) return;
     const before = essayTarget.content || '';
     const priorReview = reviewResult;
-    setBusy('polish');
-    setLengthIssue(null);
+    const ui = scopedSetters(essayTarget.id);
+    ui.setLengthIssue(null);
+    return runEssayTask(essayTarget, { stage: 'polish', label: followUp ? 'Follow-up edit' : 'Applying edits' }, async ({ setStage }) => {
     try {
       const essayForAction = await prepareEssayRoot(essayTarget);
       const context = await gatherContext(essayForAction, 'polish');
+      // The applicant's own change list. A follow-up narrows it to the
+      // instructions the first pass missed; a first pass carries all of them.
+      const editInstructions = focusInstructions?.length
+        ? focusInstructions.join('\n')
+        : (essayForAction.edit_instructions || '');
+      const instructionList = splitEditInstructions(editInstructions);
       const outcome = await runAI({
         prompt: buildPolishPrompt({
           essay: essayForAction, university: universityForEssay(essayForAction), platform,
@@ -1042,6 +1238,8 @@ export default function EssayBuilder() {
           materialsText: context.materialsText, profileText: context.profileText,
           applicantText: context.applicantText,
           focusPhrases: focusPhrases?.length ? focusPhrases : null,
+          focusInstructions: focusInstructions?.length ? focusInstructions : null,
+          editInstructions,
         }),
         response_json_schema: POLISH_SCHEMA,
         temperature: AI_TEMPERATURES.polish,
@@ -1060,7 +1258,7 @@ export default function EssayBuilder() {
         // An edit that shrinks the essay below its target band is the exact
         // failure this feature exists to prevent, so it is repaired before it
         // is ever shown as finished.
-        setBusy('repair');
+        setStage('repair');
         const firstStats = diffStats(diffText(before, text).ops);
         const fix = await repairLength({
           essay: essayForAction, context, text, assessment, mode: 'edit',
@@ -1080,14 +1278,18 @@ export default function EssayBuilder() {
       // checks the review's own quoted phrases against the text it got back
       // instead of reading the model's change log and hoping.
       const unaddressed = findUnaddressedFindings(priorReview, text, before);
+      // And the applicant's own instructions, checked the same way: against the
+      // text, with the model's report used only where there is nothing to check.
+      const instructionCheck = checkInstructionsFollowed(instructionList, before, text, result);
+      const claim = String(result.improvement_claim || '').toLowerCase();
 
       setEssaySnapshot(essayForAction.id, { content: before, label: 'your version before this edit', review: priorReview });
-      setSnapshot(getEssaySnapshot(essayForAction.id));
+      ui.setSnapshot(getEssaySnapshot(essayForAction.id));
       rememberForUndo(essayForAction, { content: before, status: essayForAction.status },
-        focusPhrases?.length ? 'follow-up edits applied' : 'edits applied');
+        followUp ? 'follow-up edits applied' : 'edits applied');
       await persist({ content: text, status: 'polishing' }, essayForAction);
 
-      setRevision({
+      ui.setRevision({
         before,
         after: text,
         ops,
@@ -1101,17 +1303,24 @@ export default function EssayBuilder() {
         preservedEstimate: Number(result.preserved_estimate) > 0 ? Number(result.preserved_estimate) : null,
         at: new Date().toISOString(),
         repaired,
-        followUp: !!focusPhrases?.length,
+        followUp,
         unaddressed: unaddressed.stillPresent,
         resolvedPhrases: unaddressed.fixed,
         refused: Array.isArray(result.unresolved_phrases) ? result.unresolved_phrases : [],
         unaddressedNote: unaddressedBrief(unaddressed),
+        instructionCheck: instructionCheck.hadNothing ? null : instructionCheck,
+        improvementClaim: claim || null,
       });
-      setLengthIssue(assessment.ok ? null : assessment);
+      ui.setLengthIssue(assessment.ok ? null : assessment);
 
       if (rewritten) {
         toast.warning('The editor rewrote most of your draft', {
           description: `Only ${Math.round(stats.preservedRatio * 100)}% of your words survived, and Atlas asked it to keep at least 80%. The comparison below highlights everything it touched — restore your version if you prefer it.`,
+          duration: 14000,
+        });
+      } else if (instructionCheck.missed) {
+        toast.warning(`Revision applied, but ${instructionCheck.missed} of your instruction${instructionCheck.missed === 1 ? ' was' : 's were'} not carried out`, {
+          description: `${instructionsBrief(instructionCheck)} The comparison lists each one; the follow-up button sends only those back.`,
           duration: 14000,
         });
       } else if (unaddressed.stillPresent.length) {
@@ -1119,9 +1328,14 @@ export default function EssayBuilder() {
           description: `${unaddressed.message} The remaining ones are listed under the comparison — “Fix what is still flagged” edits only those.`,
           duration: 14000,
         });
+      } else if (claim === 'unchanged') {
+        toast.message('Revision applied — the editor itself does not claim an improvement', {
+          description: 'It says it only touched wording that was already working. The re-score below is the measure; restore your version if it does not move.',
+          duration: 12000,
+        });
       } else {
         toast.success('Revision applied', {
-          description: `${stats.kept} of your ${stats.oldTotal} ${formatLimit(assessment.unit)} kept, ${stats.added} added, ${stats.removed} cut${unaddressed.fixed.length ? `, and all ${unaddressed.fixed.length} flagged phrase(s) the review objected to are gone` : ''}. Every change is highlighted below.`,
+          description: `${stats.kept} of your ${stats.oldTotal} ${formatLimit(assessment.unit)} kept, ${stats.added} added, ${stats.removed} cut${unaddressed.fixed.length ? `, and all ${unaddressed.fixed.length} flagged phrase(s) the review objected to are gone` : ''}${instructionCheck.total ? `, and your ${instructionCheck.total} instruction${instructionCheck.total === 1 ? '' : 's'} accounted for` : ''}. Every change is highlighted below.`,
         });
       }
 
@@ -1130,20 +1344,20 @@ export default function EssayBuilder() {
       const updatedEssay = { ...essayForAction, content: text, status: 'polishing' };
       let nextReview = null;
       if (autoReview && hasLiveModel()) {
-        setBusy('re_review');
+        setStage('re_review');
         try {
           nextReview = await runReview(updatedEssay, priorReview, 'review');
           if (nextReview) {
-            setPreviousScore(priorReview?.overall_score ?? null);
+            ui.setPreviousScore(priorReview?.overall_score ?? null);
             await persist({ status: 'in_review', review_notes: JSON.stringify(nextReview, null, 2) }, updatedEssay);
           } else if (priorReview) {
-            setReviewResult(priorReview);
+            ui.setReviewResult(priorReview);
           }
         } catch (e) {
           // The edit itself succeeded and is already on screen; a failed
           // re-review is reported, not allowed to hide the diff.
           console.error(e);
-          if (priorReview) setReviewResult(priorReview);
+          if (priorReview) ui.setReviewResult(priorReview);
           toast.warning('The edit was applied, but the automatic re-score failed', {
             description: 'Use "Admissions review" to score it again.',
             duration: 10000,
@@ -1152,7 +1366,7 @@ export default function EssayBuilder() {
       }
 
       recordProgress(essayForAction.id, {
-        action: focusPhrases?.length ? 'follow-up' : 'edit',
+        action: followUp ? 'follow-up' : 'edit',
         unit: assessment.unit,
         wordsBefore: assessLength(before, essayForAction, essays).count,
         wordsAfter: assessment.count,
@@ -1161,9 +1375,11 @@ export default function EssayBuilder() {
         preservedRatio: stats.preservedRatio,
         note: [
           focusPhrases?.length ? `follow-up on ${focusPhrases.length} flagged phrase(s)` : '',
+          focusInstructions?.length ? `follow-up on ${focusInstructions.length} missed instruction(s)` : '',
           repaired ? 'length repaired automatically' : '',
           rewritten ? 'rewrote more than expected' : '',
           unaddressed.stillPresent.length ? `${unaddressed.stillPresent.length} still unaddressed` : '',
+          instructionCheck.missed ? `${instructionCheck.missed} instruction(s) not carried out` : '',
         ].filter(Boolean).join(' · '),
       });
 
@@ -1174,17 +1390,62 @@ export default function EssayBuilder() {
         // The score belongs on the comparison, not only in a toast that disappears
         // while it is being read: an edit is judged by whether the same rubric now
         // says more, and the applicant must be able to see the number afterwards.
-        setRevision((prev) => (prev ? {
+        ui.setRevision((prev) => (prev ? {
           ...prev, scoreBefore: beforeScore || null, scoreAfter: afterScore || null, scoreDelta: delta,
         } : prev));
         if (delta !== null && delta < 0) {
-          toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
-            description: 'Restore your version below, or apply edits again — the new review says exactly what is wrong now.',
-            duration: 14000,
-          });
-        } else if (delta !== null) {
+          // A lower score is the one outcome that is never an improvement. With
+          // the automatic restore on, the applicant's own text goes back and the
+          // rejected edit becomes the snapshot, so nothing is lost either way.
+          if (autoRestoreWorse) {
+            setStage('restore');
+            try {
+              await persist({ content: before, status: 'polishing' }, updatedEssay);
+              setEssaySnapshot(essayForAction.id, { content: text, label: 'the AI edit that scored lower', review: nextReview });
+              ui.setSnapshot(getEssaySnapshot(essayForAction.id));
+              rememberForUndo(essayForAction, { content: text, status: 'polishing' }, 'the lower-scoring AI edit re-applied');
+              if (priorReview) {
+                const measured = withMeasuredLength(priorReview, { ...essayForAction, content: before }, essays);
+                ui.setReviewResult(measured);
+                setCachedEssayReview(essayForAction.id, measured);
+                await persist({ status: 'in_review', review_notes: JSON.stringify(measured, null, 2) }, { ...updatedEssay, content: before, status: 'polishing' });
+              }
+              ui.setPreviousScore(null);
+              ui.setRevision((prev) => (prev ? { ...prev, autoRestored: true } : prev));
+              recordProgress(essayForAction.id, {
+                action: 'restore',
+                unit: assessment.unit,
+                wordsBefore: assessment.count,
+                wordsAfter: assessLength(before, essayForAction, essays).count,
+                scoreBefore: afterScore || null,
+                scoreAfter: beforeScore || null,
+                note: 'edit scored lower, so your version was put back automatically',
+              });
+              toast.warning(`The edit scored lower (${beforeScore} → ${afterScore}/10), so your version is back`, {
+                description: 'Not an improvement, so it was not kept. The rejected edit is still there under “Compare with the AI edit that scored lower” if you want to look at it.',
+                duration: 14000,
+              });
+            } catch (restoreError) {
+              console.error(restoreError);
+              toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
+                description: 'Atlas could not put your version back by itself. Use “Restore it” below.',
+                duration: 14000,
+              });
+            }
+          } else {
+            toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
+              description: 'This is not an improvement. Restore your version below, or apply edits again — the new review says exactly what is wrong now.',
+              duration: 14000,
+            });
+          }
+        } else if (delta !== null && delta > 0) {
           toast.success(`Re-scored after the edit: ${beforeScore} → ${afterScore}/10 (+${delta})`, {
             description: 'Same rubric, same scale, measured on the text now in the editor.',
+          });
+        } else if (delta === 0) {
+          toast.message(`Re-scored after the edit: still ${afterScore}/10`, {
+            description: 'No measured improvement. Keep the edit only if you can see a change you want; otherwise restore your version.',
+            duration: 12000,
           });
         } else {
           toast.success(`Re-scored after the edit: ${afterScore}/10`);
@@ -1192,9 +1453,8 @@ export default function EssayBuilder() {
       }
     } catch (e) {
       console.error(e);
-    } finally {
-      setBusy(null);
     }
+    });
   };
 
   /** The normal "Apply edits" action. */
@@ -1211,13 +1471,20 @@ export default function EssayBuilder() {
     const still = (revision?.unaddressed?.length
       ? revision.unaddressed
       : findUnaddressedFindings(reviewResult, selectedEssay?.content || '').stillPresent);
-    if (!still?.length) {
+    const missedInstructions = (revision?.instructionCheck?.items || [])
+      .filter((item) => item.status === 'missed')
+      .map((item) => item.instruction);
+    if (!still?.length && !missedInstructions.length) {
       toast.message('There is nothing left to fix', {
-        description: 'Every phrase the review flagged is already out of the draft. Run an admissions review to look for new ones.',
+        description: 'Every phrase the review flagged is already out of the draft, and your instructions were carried out. Run an admissions review to look for new ones.',
       });
       return;
     }
-    return runPolishAction({ focusPhrases: still, label: 'The follow-up edit' });
+    return runPolishAction({
+      focusPhrases: still?.length ? still : null,
+      focusInstructions: missedInstructions.length ? missedInstructions : null,
+      label: 'The follow-up edit',
+    });
   };
 
   /** Brings the current text to its length contract on demand. */
@@ -1233,7 +1500,9 @@ export default function EssayBuilder() {
       setLengthIssue(null);
       return;
     }
-    setBusy('repair');
+    const ui = scopedSetters(essayTarget.id);
+    const priorReview = reviewResult;
+    return runEssayTask(essayTarget, { stage: 'repair', label: 'Finishing the length' }, async () => {
     try {
       const essayForAction = await prepareEssayRoot(essayTarget);
       const context = await gatherContext(essayForAction, 'length');
@@ -1247,21 +1516,21 @@ export default function EssayBuilder() {
       }
       const { ops } = diffText(before, fix.text);
       const stats = diffStats(ops);
-      setEssaySnapshot(essayForAction.id, { content: before, label: 'before the length fix', review: reviewResult });
-      setSnapshot(getEssaySnapshot(essayForAction.id));
+      setEssaySnapshot(essayForAction.id, { content: before, label: 'before the length fix', review: priorReview });
+      ui.setSnapshot(getEssaySnapshot(essayForAction.id));
       rememberForUndo(essayForAction, { content: before, status: essayForAction.status }, 'length fixed');
       await persist({ content: fix.text, status: essayForAction.status === 'not_started' ? 'drafting' : essayForAction.status }, essayForAction);
-      setRevision({
+      ui.setRevision({
         before, after: fix.text, ops, stats, unit: fix.assessment.unit,
         changes: [], why: fix.notes || '', gaps: fix.gaps || [], at: new Date().toISOString(),
       });
-      setLengthIssue(fix.assessment.ok ? null : fix.assessment);
+      ui.setLengthIssue(fix.assessment.ok ? null : fix.assessment);
       recordProgress(essayForAction.id, {
         action: 'repair',
         unit: fix.assessment.unit,
         wordsBefore: assessment.count,
         wordsAfter: fix.assessment.count,
-        scoreBefore: reviewResult?.overall_score ?? null,
+        scoreBefore: priorReview?.overall_score ?? null,
         scoreAfter: null,
         note: 'length fixed',
       });
@@ -1270,9 +1539,8 @@ export default function EssayBuilder() {
       });
     } catch (e) {
       console.error(e);
-    } finally {
-      setBusy(null);
     }
+    });
   };
 
   /** Puts the applicant's own pre-edit text back, and the review that went with it. */
@@ -1283,36 +1551,37 @@ export default function EssayBuilder() {
     const target = { ...current };
     const replaced = target.content || '';
     const restored = snapshot.content;
-    setBusy('restore');
+    const restoredReview = snapshot.review || null;
+    const ui = scopedSetters(target.id);
+    return runEssayTask(target, { stage: 'restore', label: 'Restoring your version' }, async () => {
     try {
       rememberForUndo(target, { content: replaced, status: target.status }, 'AI revision re-applied');
       await persist({ content: restored, status: 'polishing' }, target);
       const assessment = assessLength(restored, target, essays);
-      if (snapshot.review) {
-        const measured = withMeasuredLength(snapshot.review, { ...target, content: restored }, essays);
-        setReviewResult(measured);
+      if (restoredReview) {
+        const measured = withMeasuredLength(restoredReview, { ...target, content: restored }, essays);
+        ui.setReviewResult(measured);
         setCachedEssayReview(target.id, measured);
-        setPreviousScore(null);
+        ui.setPreviousScore(null);
       }
       clearEssaySnapshot(target.id);
-      setSnapshot(null);
-      setRevision(null);
-      setLengthIssue(assessment.ok ? null : assessment);
+      ui.setSnapshot(null);
+      ui.setRevision(null);
+      ui.setLengthIssue(assessment.ok ? null : assessment);
       recordProgress(target.id, {
         action: 'restore',
         unit: assessment.unit,
         wordsBefore: assessLength(replaced, target, essays).count,
         wordsAfter: assessment.count,
         scoreBefore: reviewResult?.overall_score ?? null,
-        scoreAfter: snapshot.review?.overall_score ?? null,
+        scoreAfter: restoredReview?.overall_score ?? null,
         note: 'your own version put back',
       });
       toast.success('Your version is back in the editor');
     } catch (e) {
       toast.error('Could not restore that version', { description: e.message });
-    } finally {
-      setBusy(null);
     }
+    });
   };
 
   /** Rebuilds the comparison from the stored snapshot, e.g. after a reload. */
@@ -1333,7 +1602,11 @@ export default function EssayBuilder() {
   };
 
   const handleDeleteEssay = async (essay) => {
-    if (busy !== null || saving || rootSaving) return;
+    if (saving || rootSaving) return;
+    if (taskForEssay(essay.id)) {
+      toast.message('This essay is still being worked on', { description: 'Wait for the running AI step to finish before deleting it.' });
+      return;
+    }
     if (!window.confirm(`Delete "${essay.title}"? This cannot be undone.`)) return;
     try {
       await essayWriteRef.current.catch(() => undefined);
@@ -1345,6 +1618,8 @@ export default function EssayBuilder() {
       clearCachedEssayReview(essay.id);
       clearCachedEssayGen(essay.id);
       clearLocalDraftAnchor(essay.id);
+      clearLocalEditInstructions(essay.id);
+      essayRevisions.delete(String(essay.id));
       if (selectedEssay?.id === essay.id) {
         selectedEssayRef.current = null;
         setSelectedEssay(null);
@@ -1361,7 +1636,7 @@ export default function EssayBuilder() {
 
   // --- creation -----------------------------------------------------------
   const createEssays = async (drafts, label) => {
-    if (busy !== null || saving || rootSaving) throw new Error('Wait for the current essay action to finish before creating another essay.');
+    if (saving || rootSaving) throw new Error('Wait for the current save to finish before creating another essay.');
     if (dirty && selectedEssay) {
       const saved = await handleSave();
       if (!saved) throw new Error('The current essay was not confirmed as saved, so no new essay was created. Your changes remain in the editor.');
@@ -1482,7 +1757,7 @@ export default function EssayBuilder() {
       <div key={essay.id} className="group relative">
         <button
           onClick={() => pickEssay(essay)}
-          disabled={busy !== null || saving || rootSaving}
+          disabled={saving || rootSaving}
           className={`w-full text-left p-3 rounded-xl border transition-all pr-8 ${
             selectedEssay?.id === essay.id
               ? 'border-foreground/20 bg-card shadow-sm'
@@ -1490,9 +1765,11 @@ export default function EssayBuilder() {
           }`}
         >
           <div className="flex items-center gap-2 mb-1">
-            {essay.status === 'final' || essay.status === 'polishing'
-              ? <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
-              : <CircleDashed className="w-3.5 h-3.5 text-foreground/25 shrink-0" />}
+            {runningEssayIds.has(String(essay.id))
+              ? <span title="AI is working on this essay" className="shrink-0 inline-flex"><Loader2 className="w-3.5 h-3.5 text-accent animate-spin" /></span>
+              : essay.status === 'final' || essay.status === 'polishing'
+                ? <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+                : <CircleDashed className="w-3.5 h-3.5 text-foreground/25 shrink-0" />}
             <span className="text-sm font-medium truncate">{essay.title}</span>
           </div>
           <div className="flex items-center gap-1.5 text-xs text-foreground/40">
@@ -1507,7 +1784,7 @@ export default function EssayBuilder() {
         </button>
         <button
           onClick={() => handleDeleteEssay(essay)}
-          disabled={busy !== null || saving || rootSaving}
+          disabled={runningEssayIds.has(String(essay.id)) || saving || rootSaving}
           className="absolute top-2.5 right-2 p-1 rounded text-foreground/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
         >
           <Trash2 className="w-3.5 h-3.5" />
@@ -1528,7 +1805,7 @@ export default function EssayBuilder() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={selectedUni?.id} onValueChange={handleSelectUni} disabled={rootSaving || saving || busy !== null}>
+          <Select value={selectedUni?.id} onValueChange={handleSelectUni} disabled={rootSaving || saving}>
             <SelectTrigger className="w-64"><SelectValue placeholder="Select university..." /></SelectTrigger>
             <SelectContent>
               {universities.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
@@ -1807,6 +2084,41 @@ export default function EssayBuilder() {
                 )}
               </div>
 
+              <div className="bg-card border border-border rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <label htmlFor="essay-edit-instructions" className="text-sm font-medium text-foreground/70 inline-flex items-center gap-1.5">
+                      <ListChecks className="w-4 h-4 text-accent" />
+                      Edit instructions — exactly what to change
+                    </label>
+                    <p className="text-[11px] text-foreground/50 mt-0.5">
+                      One instruction per sentence or line. “Apply edits” and “Generate draft” carry out every one of them, above anything the review suggests; the root above still outranks these.
+                    </p>
+                  </div>
+                  {splitEditInstructions(selectedEssay.edit_instructions).length > 0 && (
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] shrink-0">
+                      {splitEditInstructions(selectedEssay.edit_instructions).length} instruction{splitEditInstructions(selectedEssay.edit_instructions).length === 1 ? '' : 's'}
+                    </Badge>
+                  )}
+                </div>
+                <Textarea
+                  id="essay-edit-instructions"
+                  value={selectedEssay.edit_instructions || ''}
+                  disabled={rootSaving || saving || busy !== null}
+                  onChange={(e) => handleFieldChange('edit_instructions', e.target.value)}
+                  placeholder={'e.g. Cut the second paragraph about the robotics club.\nReplace "I was passionate" with what I actually did that night.\nKeep the last line exactly as it is.'}
+                  rows={3}
+                />
+                <p className="text-[11px] text-foreground/45 leading-relaxed">
+                  Quote the words you mean (“cut ‘in the end’”, “keep ‘the clinic door’”) and Atlas checks the result against the text itself, not the editor&apos;s word. Saved with the essay; clear it when the changes are done.
+                </p>
+                {missingEssayColumns.includes('edit_instructions') && (
+                  <p className="text-[11px] text-amber-700 leading-relaxed">
+                    Your database is missing the edit_instructions field. Atlas is keeping these in this browser for now; run <span className="font-mono">supabase/schema.sql</span> to persist them across devices.
+                  </p>
+                )}
+              </div>
+
               <div className="flex items-center gap-2 flex-wrap">
                 <Button onClick={handleGenerate} disabled={busy !== null || saving || rootSaving}>
                   {busy === 'generate' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
@@ -1846,6 +2158,16 @@ export default function EssayBuilder() {
                 </div>
               </div>
 
+              {essayTask && (
+                <div className="flex items-start gap-2.5 p-3 rounded-xl bg-accent/5 border border-accent/20 text-xs text-foreground/65 leading-relaxed">
+                  <Loader2 className="w-4 h-4 text-accent shrink-0 mt-0.5 animate-spin" />
+                  <p>
+                    <span className="font-medium text-foreground/80">{essayTask.label}</span> — this runs in the background.
+                    You can switch to another essay, open another page, or keep working elsewhere; the result is saved to this essay when it finishes, and the sidebar shows the progress.
+                  </p>
+                </div>
+              )}
+
               <div className="flex items-center gap-4 flex-wrap text-xs">
                 <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                   <Switch
@@ -1855,8 +2177,16 @@ export default function EssayBuilder() {
                   />
                   <span className="text-foreground/55">Re-score automatically after an edit</span>
                 </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer select-none" title="An edit that re-scores lower is never an improvement. With this on, your previous text is put back by itself and the rejected edit is kept as the comparison.">
+                  <Switch
+                    checked={autoRestoreWorse}
+                    onCheckedChange={(value) => { setAutoRestoreWorse(value); setAutoRestoreWorseEdit(value); }}
+                    disabled={!autoReview || busy !== null || saving || rootSaving}
+                  />
+                  <span className="text-foreground/55">Put my version back if the edit scores lower</span>
+                </label>
                 <span className="text-foreground/30 hidden sm:inline">
-                  So you can see whether the edit actually raised the score.
+                  An edit counts as an improvement only when the same rubric scores it higher.
                 </span>
                 {snapshot?.content && snapshot.content !== (selectedEssay.content || '') && !revision && (
                   <div className="flex items-center gap-3 ml-auto">
@@ -2000,7 +2330,7 @@ export default function EssayBuilder() {
                   restoring={busy === 'restore'}
                   disabled={busy !== null}
                   onKeep={() => setRevision(null)}
-                  onFixRemaining={revision?.unaddressed?.length ? handleFinishFlagged : null}
+                  onFixRemaining={(revision?.unaddressed?.length || revision?.instructionCheck?.missed) ? handleFinishFlagged : null}
                   onRestore={revision.fromSnapshot ? null : (snapshot?.content ? handleRestoreSnapshot : null)}
                 />
               )}
