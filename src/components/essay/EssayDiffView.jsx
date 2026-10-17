@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
-  AlertTriangle, Check, CornerUpLeft, Eye, EyeOff, FileDiff, ShieldCheck, Target, Wand2,
+  AlertTriangle, Check, CornerUpLeft, Eye, EyeOff, FileDiff, ListChecks, ShieldCheck, Target, Wand2,
 } from 'lucide-react';
 import { isAggressiveRewrite } from '@/lib/textDiff';
 import { formatLimit } from '@/lib/essayScope';
@@ -27,7 +27,8 @@ function Stat({ label, value, tone = '' }) {
  *
  * @param {object} revision { before, after, ops, stats, changes, notes,
  *   preservedEstimate, why, protectedItems, gaps, at, unit, unaddressed,
- *   resolvedPhrases, refused, unaddressedNote }
+ *   resolvedPhrases, refused, unaddressedNote, instructionCheck, scoreBefore,
+ *   scoreAfter, scoreDelta, autoRestored }
  */
 export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemaining, restoring = false, disabled = false }) {
   const [showRemoved, setShowRemoved] = useState(true);
@@ -44,6 +45,20 @@ export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemain
   const unaddressed = (revision.unaddressed || []).filter(Boolean);
   const resolved = (revision.resolvedPhrases || []).filter(Boolean);
   const refused = (revision.refused || []).filter((item) => item && (item.phrase || item.reason));
+  // The applicant's own instructions, checked against the text where they quote
+  // words, and shown as the editor's claim (marked) where they do not.
+  const instructionItems = (revision.instructionCheck?.items || []).filter((item) => item && item.instruction);
+  const instructionsMissed = instructionItems.filter((item) => item.status === 'missed');
+  // A re-score that did not move is not an improvement, whatever the editor
+  // says; a lower one is a regression. Only a higher score earns green.
+  const delta = revision.scoreDelta;
+  const scoreTone = delta == null
+    ? 'border-border bg-muted/30 text-foreground/70'
+    : delta < 0
+      ? 'border-red-200 bg-red-50 text-red-800'
+      : delta === 0
+        ? 'border-amber-200 bg-amber-50 text-amber-800'
+        : 'border-green-200 bg-green-50 text-green-800';
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -131,19 +146,64 @@ export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemain
           </div>
         )}
 
+        {instructionItems.length > 0 && (
+          <div className={`rounded-lg border px-3 py-2.5 text-xs ${instructionsMissed.length
+            ? 'border-amber-200 bg-amber-50 text-amber-900'
+            : 'border-border bg-muted/30 text-foreground/70'}`}>
+            <p className="font-medium flex items-center gap-1.5">
+              <ListChecks className="w-3.5 h-3.5 shrink-0" />
+              Your edit instructions — {instructionsMissed.length
+                ? `${instructionsMissed.length} of ${instructionItems.length} not carried out`
+                : `${instructionItems.length} checked`}
+            </p>
+            <ul className="mt-1.5 space-y-1">
+              {instructionItems.slice(0, 12).map((item, index) => {
+                const tone = item.status === 'missed' ? 'text-red-700' : item.status === 'done' ? 'text-green-700' : item.status === 'declined' ? 'text-amber-700' : 'text-foreground/50';
+                const mark = item.status === 'missed' ? 'Not done' : item.status === 'done' ? 'Done' : item.status === 'declined' ? 'Declined' : item.status === 'reported' ? 'Reported done' : 'Unverified';
+                return (
+                  <li key={index} className="flex items-start gap-2">
+                    <span className={`shrink-0 font-semibold uppercase tracking-wide text-[10px] mt-px ${tone}`}>{mark}</span>
+                    <span className="min-w-0">
+                      <span className="text-foreground/80">{item.instruction}</span>
+                      {item.detail && <span className="text-foreground/45"> — {item.detail}</span>}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            {instructionsMissed.length > 0 && onFixRemaining && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {unaddressed.length === 0 && (
+                  <Button size="sm" onClick={onFixRemaining} disabled={disabled}>
+                    <Wand2 className="w-3.5 h-3.5 mr-1.5" />
+                    Carry out the missed instructions
+                  </Button>
+                )}
+                <p className="text-[11px]">
+                  {unaddressed.length
+                    ? '“Fix what is still flagged” sends these back to the editor together with the flagged phrases.'
+                    : 'A follow-up edit that does only these, and leaves everything else word for word.'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         {revision.scoreAfter != null && (
-          <div className={`flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2 ${revision.scoreDelta < 0
-            ? 'border-red-200 bg-red-50 text-red-800'
-            : 'border-green-200 bg-green-50 text-green-800'}`}>
+          <div className={`flex flex-wrap items-center gap-2 text-xs rounded-lg border px-3 py-2 ${scoreTone}`}>
             <span className="font-medium">
               Re-scored on the same rubric: {revision.scoreBefore ?? '—'} → {revision.scoreAfter}/10
-              {revision.scoreDelta != null && revision.scoreDelta !== 0
-                ? ` (${revision.scoreDelta > 0 ? '+' : ''}${revision.scoreDelta})` : ''}
+              {delta != null && delta !== 0
+                ? ` (${delta > 0 ? '+' : ''}${delta})` : ''}
             </span>
             <span className="text-[11px] opacity-80">
-              {revision.scoreDelta < 0
-                ? 'The revision scored lower. Restore your version, or fix what is still flagged below.'
-                : 'Measured by Atlas on the text now in the editor, not by the editor itself.'}
+              {delta < 0
+                ? (revision.autoRestored
+                  ? 'The revision scored lower, so Atlas put your previous version back. The edit is kept here for reference.'
+                  : 'The revision scored lower — this is not an improvement. Restore your version, or fix what is still flagged below.')
+                : delta === 0
+                  ? 'No measured improvement: the score did not move. Keep it only if you can see a change you want.'
+                  : 'Measured by Atlas on the text now in the editor, not by the editor itself.'}
             </span>
           </div>
         )}

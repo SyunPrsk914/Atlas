@@ -222,6 +222,39 @@ export function setAutoReviewAfterEdit(value) {
   setStored(AUTO_REVIEW_KEY, !!value);
 }
 
+const AUTO_RESTORE_WORSE_KEY = 'pref:autoRestoreWorseEdit';
+
+/**
+ * Whether an AI edit that re-scores LOWER than the text it replaced is put
+ * back by itself. On by default: the applicant asked for edits that make the
+ * essay better, and a lower score is the one outcome that must never be kept
+ * silently. The snapshot stays either way, so nothing is lost in either mode.
+ */
+export function getAutoRestoreWorseEdit() {
+  const saved = getStored(AUTO_RESTORE_WORSE_KEY, null);
+  return saved === null ? true : saved === true || saved === 'true';
+}
+
+export function setAutoRestoreWorseEdit(value) {
+  setStored(AUTO_RESTORE_WORSE_KEY, !!value);
+}
+
+const KNOWLEDGE_AUTO_KEY = 'pref:knowledgeAutoUpdate';
+
+/**
+ * Whether the AI knowledge base keeps itself current in the background (new
+ * materials are filed, stale items re-examined) without pressing Rebuild.
+ * On by default; the AI Knowledge Base page has the switch.
+ */
+export function getKnowledgeAutoUpdate() {
+  const saved = getStored(KNOWLEDGE_AUTO_KEY, null);
+  return saved === null ? true : saved === true || saved === 'true';
+}
+
+export function setKnowledgeAutoUpdate(value) {
+  setStored(KNOWLEDGE_AUTO_KEY, !!value);
+}
+
 /**
  * Removes everything this browser has cached for an essay that no longer exists.
  *

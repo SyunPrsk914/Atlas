@@ -69,6 +69,30 @@ const FIELD_RULES = `HARD FIELD LIMITS (the Common App form itself enforces thes
 - Description: ${ACTIVITY_LIMITS.description} characters. This is the field that carries the impact.
 Count the characters in every field you return, including spaces, and stay inside them.`;
 
+/**
+ * How one entry is rated, on the scale the list review returns. Shared with
+ * the UI so the applicant sees the same words the model was given.
+ */
+export const ACTIVITY_RATING_RUBRIC = `RATING EACH ENTRY (1-5, as the reader would):
+5 — Proves initiative AND impact with a number a reader believes; sustained over years or clearly progressing; vividly specific (a reader could picture it). Belongs in the first three slots.
+4 — Proves impact or initiative with specifics, but one element is missing: the number, the progression, or the vividness.
+3 — Real commitment, honestly described, but the description lists what the role involves rather than what changed; a reader learns the activity, not the applicant.
+2 — Names a club or a role with no evidence of what the applicant did; or repeats the position/organization inside the description; or reads as padding.
+1 — Empty, over a limit, inconsistent with its hours/weeks, or claims nothing checkable.
+"Vivid" means a concrete verb, a concrete object, and a concrete scale ("rebuilt the 40-year-old pump that waters the school garden; 3 beds back in use") — not an adjective ("passionate", "impactful").`;
+
+/**
+ * The applicant's private note for one entry: the facts an AI rewrite may draw
+ * on. Keywords outrank every other source for that entry, because they are the
+ * applicant's own statement of what happened.
+ */
+export function activityKeywordsBrief(activity) {
+  const keywords = String(activity?.keywords || '').trim();
+  if (!keywords) return '';
+  return `THE APPLICANT'S OWN KEYWORDS & FACTS FOR THIS ENTRY (the ground truth for this entry — build the fields from these; never contradict them; a fact that is in neither these notes, the entry, the profile, nor the materials does not exist):
+${keywords}`;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Sharpen one entry
 // ---------------------------------------------------------------------------
@@ -94,14 +118,15 @@ THE ENTRY TO IMPROVE (entry ${index + 1} of ${(activities || []).length || 1}):
 - Organization: ${current.organization || '(empty)'}
 - Description: ${current.description || '(empty)'}
 - Grades: ${(current.grade_levels || []).join(', ') || '(none)'} | Timing: ${current.timing || '(none)'} | ${current.hours_per_week ?? '?'} hrs/week, ${current.weeks_per_year ?? '?'} weeks/year
-${others ? `\nTHE REST OF THE LIST (do not repeat what another entry already says):\n${others}\n` : ''}${universityName ? `\nThis list is being read by ${universityName} among others.\n` : ''}
+${activityKeywordsBrief(current) ? `\n${activityKeywordsBrief(current)}\n` : ''}${others ? `\nTHE REST OF THE LIST (do not repeat what another entry already says):\n${others}\n` : ''}${universityName ? `\nThis list is being read by ${universityName} among others.\n` : ''}
 ${profileText ? `APPLICANT PROFILE (context only — never add a fact that is not already in this entry, the profile, or the materials):\n${profileText}\n` : ''}
 ${materialsText ? `SUPPORTING MATERIALS (use only to recover a number, a scope, or a detail this student really has; a sample essay's life is never this student's):\n${materialsText}\n` : ''}
 ${applicantText ? `WHAT ATLAS KNOWS ABOUT THIS APPLICANT:\n${applicantText}\n` : ''}
 Do this:
 1. Read the entry as an admissions officer skimming at speed. What does it currently prove? Usually less than the student thinks.
 2. Rewrite the three text fields so they carry the maximum evidence per character: verb first, numbers where they are real, no repetition of the other fields, no duty-listing.
-3. Keep every fact exactly as given. You may reword, compress, reorder, and choose a stronger verb. You may NOT invent a number, a scope, an award, a title, or an outcome. If the entry is missing the number that would make it land, ask for it in "missing_facts" instead of writing one.
+3. Keep every fact exactly as given. You may reword, compress, reorder, and choose a stronger verb. You may NOT invent a number, a scope, an award, a title, or an outcome. If the entry is missing the number that would make it land, ask for it in "missing_facts" instead of writing one.${activityKeywordsBrief(current) ? ' The applicant\'s keywords above are the first place to look for the missing number, name, or result: use them before anything else, and say in "changes" which keyword each addition came from.' : ''}
+3b. Make it vivid without making it up: a concrete verb, a concrete object, a concrete scale. "Led outreach" becomes "Taught 12 Saturday coding sessions to 40 middle-schoolers; 9 built a working site" ONLY when those facts are in the entry, the keywords, the profile, or the materials.
 4. Do not return hours_per_week, weeks_per_year, or grade_levels — those are facts only the applicant knows, and changing them would falsify the application.
 5. Check each field's character count before you answer.
 
@@ -146,12 +171,13 @@ export const ACTIVITY_POLISH_SCHEMA = {
 // ---------------------------------------------------------------------------
 export function buildActivitySuggestPrompt({
   activities = [], profileText = '', materialsText = '', applicantText = '',
-  slots = ACTIVITY_LIMITS.maxActivities,
+  slots = ACTIVITY_LIMITS.maxActivities, hints = '',
 }) {
   const used = (activities || []).length;
   const current = (activities || [])
-    .map((item, i) => `${i + 1}. [${item.activity_type || '?'}] ${item.position || '?'} at ${item.organization || '?'} — ${item.description || '(no description)'}`)
+    .map((item, i) => `${i + 1}. [${item.activity_type || '?'}] ${item.position || '?'} at ${item.organization || '?'} — ${item.description || '(no description)'}${item.keywords ? ` (applicant's notes: ${String(item.keywords).replace(/\s+/g, ' ').trim()})` : ''}`)
     .join('\n');
+  const hintText = String(hints || '').trim();
 
   return `You are a college admissions counsellor building a Common App activities list from this applicant's own evidence. Everything you suggest must be traceable to something Atlas has actually read about them.
 
@@ -168,11 +194,11 @@ ${profileText || '(no profile saved)'}
 SUPPORTING MATERIALS — this is where the evidence comes from:
 ${materialsText || '(no materials added)'}
 
-${applicantText ? `WHAT ATLAS KNOWS ABOUT THIS APPLICANT:\n${applicantText}\n` : ''}
+${applicantText ? `WHAT ATLAS KNOWS ABOUT THIS APPLICANT:\n${applicantText}\n` : ''}${hintText ? `\nTHE APPLICANT'S OWN KEYWORDS FOR WHAT IS MISSING (activities they did that are not on the list yet, in shorthand — the ground truth for the entries you suggest; build from these first, and never contradict them):\n${hintText}\n` : ''}
 Do this:
-1. Read the profile and the materials for anything that is an activity: paid work, family responsibilities, caring, a project, research, sport, music, art, volunteering, a club, an independent study, something built, something organised, something taught, something maintained over time.
+1. Read ${hintText ? 'the applicant\'s keywords first, then ' : ''}the profile and the materials for anything that is an activity: paid work, family responsibilities, caring, a project, research, sport, music, art, volunteering, a club, an independent study, something built, something organised, something taught, something maintained over time.
 2. Extract up to ${Math.max(1, slots - used)} entries that are NOT already on the list, ranked by what they prove to a reader — initiative, impact, commitment, skill.
-3. For each one, quote the evidence in "evidence": which material or profile field it came from, and the words in it that support the entry. An entry with no evidence in the applicant's own material must not be suggested.
+3. For each one, quote the evidence in "evidence": which material, profile field, or applicant keyword it came from, and the words in it that support the entry. An entry with no evidence in the applicant's own keywords or material must not be suggested.
 4. Write the description to the rules above: verb first, numbers where the source states them, no repetition of the position or organization fields.
 5. NEVER invent. No numbers, no awards, no titles, no outcomes, no organizations that are not in the source. Where a number would make the entry land and the source does not have it, leave it out and put it in "missing_facts".
 6. hours_per_week, weeks_per_year, grade_levels, and timing: fill them ONLY when the source states them. Otherwise return null / an empty list and name what to confirm in "missing_facts". These are the fields an admissions office can check.
@@ -221,31 +247,38 @@ export const ACTIVITY_SUGGEST_SCHEMA = {
 // 3. Review the list as a whole
 // ---------------------------------------------------------------------------
 export function buildActivityListReviewPrompt({
-  activities = [], profileText = '', universityName = '', materialsText = '',
+  activities = [], profileText = '', universityName = '', materialsText = '', applicantText = '',
 }) {
   const list = (activities || [])
-    .map((item, i) => `${i + 1}. [${item.activity_type || '?'}] ${item.position || '(no position)'} — ${item.organization || '(no organization)'}\n   Description (${String(item.description || '').length}/${ACTIVITY_LIMITS.description} chars): ${item.description || '(EMPTY)'}\n   Grades: ${(item.grade_levels || []).join(', ') || '(none)'} | Timing: ${item.timing || '(none)'} | ${item.hours_per_week ?? '?'} hrs/week, ${item.weeks_per_year ?? '?'} weeks/year`)
+    .map((item, i) => `${i + 1}. [${item.activity_type || '?'}] ${item.position || '(no position)'} — ${item.organization || '(no organization)'}\n   Description (${String(item.description || '').length}/${ACTIVITY_LIMITS.description} chars): ${item.description || '(EMPTY)'}\n   Grades: ${(item.grade_levels || []).join(', ') || '(none)'} | Timing: ${item.timing || '(none)'} | ${item.hours_per_week ?? '?'} hrs/week, ${item.weeks_per_year ?? '?'} weeks/year${item.keywords ? `\n   Applicant's private notes (not submitted; facts the description could draw on): ${String(item.keywords).replace(/\s+/g, ' ').trim()}` : ''}`)
     .join('\n');
 
-  return `You are the admissions officer reading this activities list inside a full application${universityName ? ` at ${universityName}` : ''}. Judge the list as a list, not entry by entry.
+  return `You are the admissions officer reading this activities list inside a full application${universityName ? ` at ${universityName}` : ''}. Judge the list as a list, in the order it is given, exactly as it would be read: the first entries set the impression and the rest confirm or dilute it.
 
 ${ACTIVITY_SECTION_BRIEF}
 
 ${FIELD_RULES}
 
-THE LIST AS IT WOULD BE SUBMITTED:
+${ACTIVITY_RATING_RUBRIC}
+
+THE LIST AS IT WOULD BE SUBMITTED (slot 1 is read first):
 ${list || '(empty)'}
 
-${profileText ? `APPLICANT PROFILE (use it to spot activities the student never listed, and descriptions that undersell what the profile says):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS:\n${materialsText}\n` : ''}
+${profileText ? `APPLICANT PROFILE (use it to spot activities the student never listed, and descriptions that undersell what the profile says):\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS — the applicant's own documents about these activities are evidence of what really happened; guides and references about activities lists are rules for judging; a sample list is craft only, never this applicant's life:\n${materialsText}\n` : ''}${applicantText ? `WHAT ATLAS KNOWS ABOUT THIS APPLICANT (the person the list should add up to):\n${applicantText}\n` : ''}
 Judge:
-1. ORDER. The first three slots carry the list. Is the most impressive, most characteristic work first, or is the list chronological / alphabetical / padded? Return "ordering" as the 1-based positions of the current list in the order you would submit them.
-2. REDUNDANCY. Do two entries prove the same thing? Is a description repeating its own position or organization field, or another entry?
-3. WEAKNESS. Which entries list duties instead of impact? Which are missing the number that would make them land? Which read as filler?
-4. FIELDS. Anything over a character limit, empty that should not be, or a timing/hours/weeks entry that looks inconsistent with the description.
-5. GAPS. What does this list fail to show that the profile or materials suggest is true?
+1. ORDER, FIRST. Read slots 1-3 as the reader does — as the applicant's own claim about what matters most. Does the opening carry the strongest, most characteristic evidence, or is the list chronological / alphabetical / padded, with the best entry buried at 6? Return "ordering" as the 1-based positions of the current list in the order you would submit them, and say in "ordering_rationale" what the current order tells the reader and what the recommended order would tell them instead.
+2. RATE EVERY ENTRY on the 1-5 scale above, in "ratings", with one sentence of "why" that quotes the entry. Rate the entry as written, not the activity behind it: a great activity with a duty-list description is a 3. Where the applicant's private notes or the materials hold a fact that would raise the rating, name it in the fix.
+3. REDUNDANCY. Do two entries prove the same thing? Is a description repeating its own position or organization field, or another entry?
+4. WEAKNESS. Which entries list duties instead of impact? Which are missing the number that would make them land? Which read as filler? For each, give the fix as a rewritten description that uses only facts present in the entry, the notes, the profile, or the materials — never invented.
+5. FIELDS. Anything over a character limit, empty that should not be, or a timing/hours/weeks entry that looks inconsistent with the description.
+6. GAPS. What does this list fail to show that the profile, the materials, or Atlas's knowledge of the applicant suggest is true?
+7. THE WHOLE. "list_score" is the 1-10 impression the list leaves in a fifteen-minute file read — as a list, in this order — with the single change that would move it most.
 
 Be specific and quote the entry you are talking about. Return JSON only:
 - "ordering": array of the 1-based current positions in your recommended order.
+- "ordering_rationale": two or three sentences.
+- "ratings": array of { "entry" (1-based), "score" (1-5), "why" }.
+- "list_score": number 1-10.
 - "findings": array of { "entry" (1-based), "issue", "fix", "severity" ("high" | "medium" | "low") }.
 - "redundant_pairs": array of strings naming entries that overlap.
 - "missing_themes": array of strings.
@@ -257,6 +290,19 @@ export const ACTIVITY_LIST_SCHEMA = {
   type: 'object',
   properties: {
     ordering: { type: 'array', items: { type: 'number' } },
+    ordering_rationale: { type: 'string' },
+    ratings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          entry: { type: 'number' },
+          score: { type: 'number' },
+          why: { type: 'string' },
+        },
+      },
+    },
+    list_score: { type: 'number' },
     findings: {
       type: 'array',
       items: {

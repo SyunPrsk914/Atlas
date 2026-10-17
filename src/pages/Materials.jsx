@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { hasLiveModel } from '@/lib/aiOutcome';
 import { materialJobs } from '@/lib/materialService';
+import { scheduleKnowledgeAutoRefresh } from '@/lib/knowledgeAutoRefresh';
 import { needsWork } from '@/lib/materialJobs';
 import { FINDING_KINDS, localSignals } from '@/lib/materialAnalysis';
 import { MAX_DOCUMENT_CHARS } from '@/lib/documentReader';
@@ -744,12 +745,16 @@ export default function Materials() {
       setDialogOpen(false);
 
       if (nextSource && (documentChanged || analysisContextChanged)) {
-        // A new or replaced document is read, then analysed, with no further step.
+        // A new or replaced document is read, then analysed, with no further
+        // step; the knowledge base picks it up when that job finishes.
         queueRead(saved, { file: file || null, force: true, notify: true });
         toast.success(editing ? 'Material updated' : 'Material added', {
           description: 'Atlas is reading the document now. The analysis starts automatically.',
         });
       } else {
+        // Notes or targets changed without a new document: the knowledge base
+        // still reads both, so let it catch up quietly.
+        scheduleKnowledgeAutoRefresh('material saved');
         toast.success(editing ? 'Material updated' : 'Material added');
       }
     } catch (e) {
@@ -767,6 +772,9 @@ export default function Materials() {
     try {
       await base44.entities.Material.delete(row.id);
       setRows((prev) => prev.filter((r) => r.id !== row.id));
+      // Knowledge items that cited this material are re-examined, not deleted
+      // outright: the applicant may have confirmed them since.
+      scheduleKnowledgeAutoRefresh('material removed');
       toast.success('Material removed');
     } catch (e) {
       toast.error('Could not remove this material', { description: e.message });

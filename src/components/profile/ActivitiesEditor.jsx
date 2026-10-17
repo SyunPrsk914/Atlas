@@ -1,5 +1,6 @@
-import { Plus, Trash2, Wand2, Scissors } from 'lucide-react';
+import { Plus, Trash2, Wand2, Scissors, GripVertical, ArrowUp, ArrowDown, KeyRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useDragReorder, moveItem } from '@/hooks/use-drag-reorder';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -73,12 +74,32 @@ function CappedField({ label, value, limit, onChange, onTrim, placeholder, hint,
   );
 }
 
+/**
+ * The activities list as the Common App shows it: ten slots, read top to bottom.
+ *
+ * Order is part of the content. Admissions readers weigh the first entries
+ * most, so an applicant can drag an entry to a new slot (the grip on the left)
+ * or nudge it with the arrows. Reordering changes nothing but the order; the
+ * entries themselves, including the private keywords, travel with their slot.
+ *
+ * `keywords` is the applicant's own note for the AI — the facts, numbers, and
+ * names an entry should be built from. It is never submitted and never counted
+ * against a limit; it exists so "Sharpen with AI" works from what actually
+ * happened instead of inventing it.
+ */
 export default function ActivitiesEditor({ value = [], onChange, onSharpen, sharpeningIndex = null }) {
   const update = (index, field, val) => {
     const next = [...value];
     next[index] = { ...next[index], [field]: val };
     onChange(next);
   };
+
+  const move = (from, to) => {
+    if (to < 0 || to >= value.length || from === to) return;
+    onChange(moveItem(value, from, to));
+  };
+
+  const { handleProps, itemProps, dragIndex } = useDragReorder({ onMove: move, disabled: sharpeningIndex !== null });
 
   /** Cuts one field to its limit at a word boundary, on the applicant's click. */
   const trim = (index, field, limit) => {
@@ -113,15 +134,56 @@ export default function ActivitiesEditor({ value = [], onChange, onSharpen, shar
     <div className="space-y-3">
       {value.length > 0 && (
         <p className="text-[11px] text-foreground/40 leading-relaxed">
-          Ten slots, read top to bottom — the first two or three carry the argument.
+          Ten slots, read top to bottom — the first two or three carry the argument, so put your strongest entries first.
+          Drag the grip (or use the arrows) to change the order.
           Position {POSITION_LIMIT} characters, organization {ORG_LIMIT}, description {DESC_LIMIT}.
           Lead with the verb, keep the number, and do not repeat the position or the organization inside the description.
         </p>
       )}
       {value.map((activity, i) => (
-        <div key={i} className="border border-border rounded-lg p-4 space-y-3 bg-muted/20 relative">
+        <div
+          key={i}
+          {...itemProps(i)}
+          className={`border rounded-lg p-4 space-y-3 bg-muted/20 relative transition-colors ${
+            dragIndex === i ? 'opacity-50 border-dashed' : 'border-border'
+          } data-[drag-over=true]:border-accent data-[drag-over=true]:bg-accent/5`}
+        >
           <div className="flex items-center justify-between mb-1 gap-2">
-            <span className="text-xs font-medium text-foreground/40">Activity {i + 1}</span>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                {...handleProps(i)}
+                role="button"
+                tabIndex={-1}
+                aria-label={`Drag to move activity ${i + 1}`}
+                title="Drag to another slot"
+                className={`p-0.5 -ml-1 rounded text-foreground/25 hover:text-foreground/60 ${sharpeningIndex !== null ? 'cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'}`}
+              >
+                <GripVertical className="w-4 h-4" />
+              </span>
+              <span className="text-xs font-medium text-foreground/40">Activity {i + 1}{i === 0 ? ' · read first' : ''}</span>
+              <span className="inline-flex items-center ml-1">
+                <button
+                  type="button"
+                  onClick={() => move(i, i - 1)}
+                  disabled={i === 0 || sharpeningIndex !== null}
+                  aria-label={`Move activity ${i + 1} up`}
+                  title="Move up"
+                  className="p-0.5 rounded text-foreground/30 hover:text-foreground hover:bg-muted disabled:opacity-25 disabled:hover:bg-transparent"
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => move(i, i + 1)}
+                  disabled={i === value.length - 1 || sharpeningIndex !== null}
+                  aria-label={`Move activity ${i + 1} down`}
+                  title="Move down"
+                  className="p-0.5 rounded text-foreground/30 hover:text-foreground hover:bg-muted disabled:opacity-25 disabled:hover:bg-transparent"
+                >
+                  <ArrowDown className="w-3.5 h-3.5" />
+                </button>
+              </span>
+            </div>
             <div className="flex items-center gap-1.5">
               {onSharpen && (
                 <button
@@ -185,6 +247,25 @@ export default function ActivitiesEditor({ value = [], onChange, onSharpen, shar
             multiline
             hint="Impact first, then scope: the number of people, the money, the result. No “responsible for”."
           />
+
+          <div className="min-w-0">
+            <div className="flex items-baseline justify-between gap-2 mb-1">
+              <label className="text-xs font-medium text-foreground/50 inline-flex items-center gap-1">
+                <KeyRound className="w-3 h-3 text-accent" />
+                Keywords &amp; facts for the AI
+              </label>
+              <span className="text-[11px] text-foreground/30 shrink-0">private · not submitted · no limit</span>
+            </div>
+            <Textarea
+              value={activity.keywords || ''}
+              onChange={(e) => update(i, 'keywords', e.target.value)}
+              rows={2}
+              placeholder="e.g. founded it in Grade 10; 40 members by Grade 12; raised ¥180,000 for the shelter; taught the Saturday sessions myself"
+            />
+            <p className="text-[11px] text-foreground/30 mt-1 leading-snug">
+              What actually happened, in shorthand: names, numbers, dates, your role, the result. “Sharpen with AI” builds the entry from these and will not invent a fact that is not here or in your materials.
+            </p>
+          </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-foreground/50 mr-1">Grades:</span>

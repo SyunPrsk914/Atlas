@@ -48,7 +48,7 @@ const TABLES = {
 // (idempotent) to turn the extra persistence on.
 const OPTIONAL_COLUMNS = {
   materials: ['analysis', 'analysis_role', 'target_university_id', 'target_essay_id', 'target_platform', 'target_task'],
-  essays: ['limit_unit', 'draft_anchor'],
+  essays: ['limit_unit', 'draft_anchor', 'edit_instructions'],
   universities: ['application_platform', 'sort_order'],
   college_knowledge: ['source_url', 'source_text', 'research_provider', 'research_model', 'grounded'],
   applicant_knowledge: ['target_university_id', 'target_essay_id', 'target_platform', 'target_task'],
@@ -66,7 +66,7 @@ const COLUMNS = {
   },
   essays: {
     university_id: 'text', university_name: 'text', title: 'text', prompt: 'text',
-    draft_anchor: 'text', word_limit: 'number', content: 'text', status: 'text', type: 'text',
+    draft_anchor: 'text', edit_instructions: 'text', word_limit: 'number', content: 'text', status: 'text', type: 'text',
     scope: 'text', application_platform: 'text', review_notes: 'text',
     limit_unit: 'text',
   },

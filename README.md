@@ -48,15 +48,18 @@ Atlas itself does not impose an AI request, token, or daily quota — your NaraR
 | `npm run build` | Production build to `dist/` |
 | `npm run preview` | Preview the production build |
 | `npm run lint` / `npm run typecheck` | Quality checks |
-| `npm run verify` | Offline checks of document reading, Materials analysis, the AI Knowledge Base, IB subject handling, the AI instruction rules (the shared clipping rule, material relevance and prompt budgets, knowledge-base density, the root check, the flagged-phrase edit loop), the essay/activity quality rules (length bands, repair acceptance, the diff, the prompts, Common App field limits), the local Ollama provider (its request shape, reasoning models, and every failure a local user can hit), and a render check of every component (no browser or model needed) |
+| `npm run verify` | Offline checks of document reading, Materials analysis, the AI Knowledge Base, IB subject handling, the AI instruction rules (the shared clipping rule, material relevance and prompt budgets, knowledge-base density, the root check, the flagged-phrase edit loop), the essay/activity quality rules (length bands, repair acceptance, the diff, the prompts, Common App field limits), the local Ollama provider (its request shape, reasoning models, and every failure a local user can hit), the background layer (the task ledger, edit instructions and their check, activity keywords/ratings/order, drag reordering, refresh-not-rebuild and the person-first filter), and a render check of every component (no browser or model needed) |
 | `npm run verify:render` | Just the render check: builds the essay/activity components with Vite's SSR pipeline and renders 30 fixtures, so a component that would crash on real props is caught before it reaches the browser |
 
 ## Materials and the AI Knowledge Base
 
 - **Materials** accept a PDF, Word (`.docx`), RTF, HTML or text file, or a web link. Atlas reads the whole document in the browser and starts the analysis as soon as the file is added; there is no Analyze button. Documents up to 200,000 characters (roughly 30 to 40 pages) are analysed in full, one model call per part of about 6,000 characters, so a long document can take many minutes. AI requests run one at a time through a shared queue, so other AI actions wait until an analysis finishes. Old `.doc` files and scanned or image-only PDFs cannot be read; Atlas says so and asks for another copy. Each material also has an **analysis lens**: Atlas can infer the purpose, or you can mark it as applicant evidence, a writing draft, academic work, personal context, a sample, tips/guide, or a college/application reference. The deep reader extracts literal facts, implied patterns, and what the source is useful for. Only a writing draft receives a writing score and line-level findings; an internal assessment, transcript, guide, or college data sheet is not treated as a personal essay. A sample contributes craft only, never another person's life.
 - The **context box** of each material holds your notes. Text that older versions kept in a "Content" box was moved there, under its own heading, without overwriting your notes. Context helps Atlas understand why a source matters but is never analyzed as document text.
-- **AI Knowledge Base** (`/ai-knowledge`) keeps dense, evidence-grounded items about you, concrete personal points, craft patterns from samples, and a separate tips/reference guidance layer. Rebuilding needs a connected provider. Items you write yourself are never removed by a rebuild, and you can edit or delete any item.
-- **How many items it should hold** is derived from how much you gave it: each kind has a floor per source and a ceiling per build, so forty documents are not allowed to produce one personality trait and four facts. The page shows the counts per category, says which part is thinner than the sources support, and flags any item that ends mid-sentence. **Go deeper** reads the same sources again and only appends what the first pass missed; a rebuild rewrites, so a half-built portrait is never destroyed by trying to finish it.
+- **AI Knowledge Base** (`/ai-knowledge`) keeps dense, evidence-grounded items about you, concrete personal points, craft patterns from samples, and a separate tips/reference guidance layer. Every item is held to a **person-first** standard: what kind of person you are, your core mindset, how you act, what you like, and what drives you — with the evidence attached — never a summary of a document or a grade. Explicit statements of your values in your own materials are treated as the most valuable evidence there is. An item that reads like assessment mechanics ("in the IA, annotates Trial 21 as an outlier…") is marked on the page and re-examined first. Items you write yourself are never changed by any AI job, and you can edit or delete any item.
+- **Refresh, not rebuild.** **Refresh** re-examines the saved items one by one against the sources as they are now and keeps, rewrites, or removes each (removals are capped per pass), then adds only what is missing. **Go deeper** reads the same sources again and only appends what the first pass missed. **Rebuild** starts the portrait over and asks before it does. The base is kept compact: a refresh may not leave it longer unless the sources grew.
+- **It keeps itself current.** When your profile, a material, or a draft changes, Atlas waits for your own AI work to finish, then files new materials into sections and refreshes the items in the background (`src/lib/knowledgeAutoRefresh.js`). The switch, an **Update now** button, and the outcome of the last automatic pass are on the page. Automatic passes never run in Demo mode.
+- **Materials are dissected into sections.** A long material — a full successful application, say — is split into the parts that belong to one school, one essay type, one platform, or one task (a "Stanford" school section, a "Roommate essay" section, an "Activities list" section), and each part is filed with that scope. A draft reads only the sections that match its school and essay kind; the full application review reads the school sections to judge fit; a sample's life is never treated as yours. The page lists the filed sections by material, and a section follows its material: it is replaced when the material changes, removed when the material is removed, and left alone by a rebuild.
+- **How many items it should hold** is derived from how much you gave it: each kind has a floor per source and a ceiling per build, so forty documents are not allowed to produce one personality trait and four facts. The page shows the counts per category, says which part is thinner than the sources support, and flags any item that ends mid-sentence.
 - Sections collapse, items are grouped under their category heading, and one search box filters every kind at once. An item scoped to one university, essay, platform, or task is offered only to that context: drafting a Stanford supplement never reads a UCAS item, and a UCAS item never reaches a US review.
 
 - **University Research** (`/knowledge-base`) stores one structured report per school in eleven fixed sections — admission overview, academic requirements, ideal student profile, essay requirements, programmes and majors, aid, interview, international notes, campus life and traditions, what the school's readers reward, and sources. The section list is defined once in `src/lib/schoolFit.js`: the research prompt is built from it, and every AI job receives only the sections it should judge or draft against, so a review sees the reader's lens while a draft also sees the named programmes, labs, buildings and clubs an applicant can truthfully mention.
@@ -65,6 +68,9 @@ Atlas itself does not impose an AI request, token, or daily quota — your NaraR
 - Every essay has a **required root / direction** field. Use it for the moments, interests, questions, relationships, or qualities the draft must grow from. Generation treats it as a hard constraint and uses the materials to deepen it instead of choosing a random activity.
 - Atlas reads that direction as an instruction, not as a keyword list: `src/lib/essayRoot.js` decides whether it asks for ONE of several options or requires all of them, lists the options it found, and shows you that reading under the box while you type. The model is told the same reading, then the finished draft is checked against it word by word. A draft that ignored the direction, or that crammed every listed option in anyway, is sent back once for a correction before you ever see it.
 - An edit is measured the same way: the phrases the last review quoted are looked for in the text that comes back. Whatever is still there is listed under the comparison, with a **Fix what is still flagged** button that runs a second edit on those phrases only. A phrase the editor deliberately kept appears with its reason, and the score before and after the edit is printed on the comparison instead of only in a toast.
+- Under the root there is an **edit instructions** box: your own list of exactly what to change ("cut the sentence about…", "keep 'the smell of solder' word for word", "replace 'very big' with 'forty-metre'"). Every sentence in it is binding, ranked below the root and above the review's suggestions, and never "interpreted" into something easier. After the edit Atlas checks each instruction against the text itself — a phrase you asked to cut must be gone, a phrase you asked to keep must survive — and lists the ones that were missed, with a button to run them again.
+- **An edit has to be better.** The re-score after an edit is compared with the score before it. An edit that scores the same is reported as unchanged, never as "improved"; an edit that scores lower is restored to your previous version automatically (a switch next to the editor turns that off), and the comparison says so.
+- **AI work runs in the background.** Drafting, reviewing, editing, the full application review, the activities list jobs, and every knowledge-base job are tasks that keep running when you open another page. The sidebar shows what is running; the essay list marks the essay being worked on while every other essay stays editable; a result that lands while you are elsewhere is waiting when you come back.
 
 ## Essay quality: what Atlas enforces
 
@@ -126,12 +132,24 @@ offline by `npm run verify` (`scripts/verify-quality.mjs`).
   platform is still allowed to name the school.
 - **Activities suggestions are suggestions.** The Profile page can read your
   materials and propose Common App activity entries, sharpen one entry's wording,
-  or review the order of the list. Each result shows the evidence it came from, a
+  or review the list. Each result shows the evidence it came from, a
   confidence level, and the character count it would take; nothing is written
   until you press Add or Apply. Fields are cut to the real Common App limits
   (10 entries, 50 / 100 / 150 characters) at word boundaries, and the cut is
   reported rather than silent. The editor itself no longer truncates as you type:
   a field past its limit turns red and offers a deliberate Trim.
+- **The order is yours, and it is read.** Drag an activity by its grip (or use
+  the arrows) to any slot; an admissions reader reads the first entries properly
+  and skims the rest, so every prompt sees the list in submission order and the
+  list review judges the opening first, rates each entry 1–5 on the rubric it is
+  given (initiative, impact, commitment, skill, vividness), scores the list as a
+  whole, and explains the order it recommends. University cards drag the same way.
+- **Keywords, so nothing is invented.** Each activity has a private keywords box
+  (facts, numbers, names in shorthand) that is never submitted and never shown
+  to a reader. Sharpening builds from those keywords before anything else;
+  "Suggest activities" has its own keywords box for what is missing from the
+  list. A fact that is in neither the keywords, the entry, the profile, nor the
+  materials does not exist to the model.
 
 ## Layout
 
@@ -155,7 +173,11 @@ offline by `npm run verify` (`scripts/verify-quality.mjs`).
 | `src/lib/textDiff.js` | Lossless word diff, preservation statistics, and the aggressive-rewrite test |
 | `src/lib/textClip.js` | The one clipping rule every prompt uses: cut at a sentence boundary, say how much was left out, and drop or keep whole items rather than half an item |
 | `src/lib/essayRoot.js` | Reads the applicant's direction as an instruction (choose one / include all / one idea), then checks a finished draft against it |
-| `src/lib/essayEditCheck.js` | Which phrases the review objected to are still in the text after an edit |
+| `src/lib/essayEditCheck.js` | Which phrases the review objected to are still in the text after an edit, and which of the applicant's edit instructions were carried out |
+| `src/lib/backgroundTasks.js` | The ledger of AI work that outlives its page (essay jobs, the full review, activities jobs, knowledge-base jobs); the sidebar pill and the per-essay lock read it |
+| `src/lib/knowledgeService.js` | The knowledge-base jobs as background tasks: rebuild, go deeper, item-by-item refresh, and filing materials into sections |
+| `src/lib/knowledgeAutoRefresh.js` | Keeps the knowledge base current on its own: debounced, never in Demo mode, never in front of the applicant's own AI work, refresh rather than rebuild |
+| `src/hooks/use-drag-reorder.js` | Drag-and-drop reordering on the browser's own drag events, shared by the activities list and the university cards |
 | `src/lib/materialRole.js` | What each material is for, how strongly it belongs to the current school/essay/task, and how much of it a prompt may hold |
 | `src/lib/activityPrompts.js` | Common App activities limits, the prompts behind the suggestions, and validation that cuts a suggestion to the real form |
 | `src/lib/persist.js` | Browser-local cache: last selection, reviews, draft analyses, pre-edit snapshots, per-essay progress history, and preferences |

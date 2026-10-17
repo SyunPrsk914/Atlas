@@ -1,19 +1,43 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Sparkles, Loader2, Wand2, ListOrdered, Plus, X, Check, AlertTriangle,
-  ScanSearch, CornerUpLeft, Quote,
+  ScanSearch, CornerUpLeft, Quote, KeyRound, Star,
 } from 'lucide-react';
 import { runAI } from '@/lib/ai';
 import { hasLiveModel, isLiveOutcome } from '@/lib/aiOutcome';
 import { diffText, diffStats } from '@/lib/textDiff';
+import { startBackgroundTask, findRunningTask } from '@/lib/backgroundTasks';
+import { useBackgroundTasks } from '@/hooks/use-background-tasks';
+import { getStored, setStored } from '@/lib/persist';
 import {
   ACTIVITY_LIMITS, ACTIVITY_SUGGEST_SCHEMA, ACTIVITY_POLISH_SCHEMA, ACTIVITY_LIST_SCHEMA,
   buildActivitySuggestPrompt, buildActivityPolishPrompt, buildActivityListReviewPrompt,
   sanitizeActivitySuggestion, isUsableSuggestion, activityFieldCounts,
 } from '@/lib/activityPrompts';
+
+const HINTS_KEY = 'activityHints';
+
+/**
+ * Results outlive the page. The AI work itself runs as a background task, so
+ * opening another page mid-review neither cancels it nor loses the answer:
+ * the finished result is parked here and shown again when the panel remounts.
+ */
+const memory = { suggestions: null, polish: null, listReview: null };
+
+const RATING_TONE = {
+  5: 'bg-green-50 text-green-800 border-green-200',
+  4: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+  3: 'bg-amber-50 text-amber-800 border-amber-200',
+  2: 'bg-orange-50 text-orange-800 border-orange-200',
+  1: 'bg-red-50 text-red-700 border-red-200',
+};
+
+const sameEntryText = (a, b) => ['position', 'organization', 'description']
+  .every((field) => String(a?.[field] || '').trim() === String(b?.[field] || '').trim());
 
 const CONFIDENCE_TONE = {
   certain: 'bg-green-50 text-green-700 border-green-200',
@@ -92,10 +116,45 @@ export default function ActivityAiPanel({
   activities = [], onChange, getContext, universityName = '',
   sharpenIndex = null, onSharpenDone = () => {},
 }) {
-  const [busy, setBusy] = useState(null);
-  const [suggestions, setSuggestions] = useState(null);
-  const [polish, setPolish] = useState(null);
-  const [listReview, setListReview] = useState(null);
+  const [suggestions, setSuggestions] = useState(() => memory.suggestions);
+  const [polish, setPolish] = useState(() => memory.polish);
+  const [listReview, setListReview] = useState(() => memory.listReview);
+  // Stored as an object so a note that happens to look like JSON ("[2024]
+  // regional final") is read back exactly as it was typed.
+  const [hints, setHints] = useState(() => String(getStored(HINTS_KEY, null)?.text || ''));
+  const [hintsOpen, setHintsOpen] = useState(() => Boolean(getStored(HINTS_KEY, null)?.text));
+
+  useEffect(() => { memory.suggestions = suggestions; }, [suggestions]);
+  useEffect(() => { memory.polish = polish; }, [polish]);
+  useEffect(() => { memory.listReview = listReview; }, [listReview]);
+
+  // A job started on an earlier visit finishes while this panel is mounted:
+  // pick its result up from the shared memory instead of showing a stale view.
+  const onTaskChange = useCallback((task) => {
+    if (task.kind !== 'activities' || task.state === 'running') return;
+    setSuggestions(memory.suggestions);
+    setPolish(memory.polish);
+    setListReview(memory.listReview);
+  }, []);
+  const tasks = useBackgroundTasks(onTaskChange);
+  const runningTask = tasks.find((task) => task.kind === 'activities' && task.state === 'running') || null;
+  const busy = runningTask ? (runningTask.stage === 'activity_polish' ? `polish-${runningTask.scope?.index}` : runningTask.stage) : null;
+
+  const updateHints = (value) => {
+    setHints(value);
+    setStored(HINTS_KEY, { text: value });
+  };
+
+  /** One queued job at a time for this section; the sidebar pill shows it. */
+  const runActivityTask = ({ label, stage, scope = {}, work }) => {
+    if (findRunningTask((task) => task.kind === 'activities')) {
+      toast.error('Atlas is still working on this list', { description: 'Wait for the running job to finish — its result will appear here.' });
+      return null;
+    }
+    return startBackgroundTask({
+      kind: 'activities', label, stage, scope: { activities: true, ...scope }, run: work,
+    }).promise;
+  };
 
   const guard = (action) => {
     if (hasLiveModel()) return true;
@@ -129,90 +188,115 @@ export default function ActivityAiPanel({
 
   const handleSuggest = async () => {
     if (!guard('Suggesting activities')) return;
-    setBusy('suggest');
+    const snapshot = activities;
+    const hintText = hints.trim();
+    const promise = runActivityTask({
+      label: 'Suggesting activities from your materials',
+      stage: 'suggest',
+      work: async () => {
+        const context = await getContext();
+        const outcome = await runAI({
+          prompt: buildActivitySuggestPrompt({
+            activities: snapshot,
+            profileText: context.profileText,
+            materialsText: context.materialsText,
+            applicantText: context.applicantText,
+            slots: ACTIVITY_LIMITS.maxActivities,
+            hints: hintText,
+          }),
+          response_json_schema: ACTIVITY_SUGGEST_SCHEMA,
+          temperature: 0.35,
+        }, { fallbackTitle: 'Could not read your materials for activities', quiet: true });
+
+        if (!isLiveOutcome(outcome)) {
+          toast.error('No suggestions came back', { description: 'The model did not return a usable answer. Nothing was changed.' });
+          return null;
+        }
+        const raw = Array.isArray(outcome.result?.activities) ? outcome.result.activities : [];
+        const cleaned = raw
+          .map((item) => sanitizeActivitySuggestion(item))
+          .filter(isUsableSuggestion);
+        memory.suggestions = {
+          items: cleaned,
+          ordering: String(outcome.result?.ordering_rationale || ''),
+          missingFacts: Array.isArray(outcome.result?.missing_facts) ? outcome.result.missing_facts : [],
+          missingThemes: Array.isArray(outcome.result?.missing_themes) ? outcome.result.missing_themes : [],
+          rawCount: raw.length,
+          fromHints: Boolean(hintText),
+        };
+        if (!cleaned.length) {
+          toast.warning('Nothing to suggest yet', {
+            description: 'Atlas only suggests an activity it can point to in your own keywords, materials or profile. Add a resume, a certificate, or a few keywords describing what you have done, then try again.',
+            duration: 10000,
+          });
+        }
+        return memory.suggestions;
+      },
+    });
+    if (!promise) return;
     setSuggestions(null);
     try {
-      const context = await getContext();
-      const outcome = await runAI({
-        prompt: buildActivitySuggestPrompt({
-          activities,
-          profileText: context.profileText,
-          materialsText: context.materialsText,
-          applicantText: context.applicantText,
-          slots: ACTIVITY_LIMITS.maxActivities,
-        }),
-        response_json_schema: ACTIVITY_SUGGEST_SCHEMA,
-        temperature: 0.35,
-      }, { fallbackTitle: 'Could not read your materials for activities', quiet: true });
-
-      if (!isLiveOutcome(outcome)) {
-        toast.error('No suggestions came back', { description: 'The model did not return a usable answer. Nothing was changed.' });
-        return;
-      }
-      const raw = Array.isArray(outcome.result?.activities) ? outcome.result.activities : [];
-      const cleaned = raw
-        .map((item) => sanitizeActivitySuggestion(item))
-        .filter(isUsableSuggestion);
-      setSuggestions({
-        items: cleaned,
-        ordering: String(outcome.result?.ordering_rationale || ''),
-        missingFacts: Array.isArray(outcome.result?.missing_facts) ? outcome.result.missing_facts : [],
-        missingThemes: Array.isArray(outcome.result?.missing_themes) ? outcome.result.missing_themes : [],
-        rawCount: raw.length,
-      });
-      if (!cleaned.length) {
-        toast.warning('Nothing to suggest yet', {
-          description: 'Atlas only suggests an activity it can point to in your own materials or profile. Add a resume, a certificate, or a note describing what you have done, then try again.',
-          duration: 10000,
-        });
-      }
+      const result = await promise;
+      if (result) setSuggestions(result);
     } catch (e) {
       console.error(e);
       toast.error('Could not suggest activities', { description: e.message });
-    } finally {
-      setBusy(null);
     }
   };
 
   const handlePolish = async (index) => {
     if (!guard('Sharpening this entry')) return;
-    setBusy(`polish-${index}`);
+    const snapshot = activities;
+    const entry = snapshot[index];
+    if (!entry) return;
+    const promise = runActivityTask({
+      label: `Sharpening activity ${index + 1}${entry.position ? `: ${entry.position}` : ''}`,
+      stage: 'activity_polish',
+      scope: { index },
+      work: async () => {
+        const context = await getContext();
+        const outcome = await runAI({
+          prompt: buildActivityPolishPrompt({
+            activity: entry,
+            index,
+            activities: snapshot,
+            profileText: context.profileText,
+            materialsText: context.materialsText,
+            applicantText: context.applicantText,
+            universityName,
+          }),
+          response_json_schema: ACTIVITY_POLISH_SCHEMA,
+          temperature: 0.35,
+        }, { fallbackTitle: 'Could not sharpen this entry', quiet: true });
+
+        if (!isLiveOutcome(outcome)) {
+          toast.error('No revision came back', { description: 'The model did not return a usable answer. Your entry was left alone.' });
+          return null;
+        }
+        // The applicant's private keywords are never part of the submitted
+        // fields, so the model's answer is laid over the entry without them
+        // and they are carried across untouched.
+        const cleaned = sanitizeActivitySuggestion({ ...entry, ...outcome.result });
+        memory.polish = {
+          index,
+          before: entry,
+          proposed: cleaned.activity,
+          changes: Array.isArray(outcome.result?.changes) ? outcome.result.changes : [],
+          missingFacts: Array.isArray(outcome.result?.missing_facts) ? outcome.result.missing_facts : [],
+          verdict: String(outcome.result?.verdict || ''),
+          truncations: cleaned.truncations,
+        };
+        return memory.polish;
+      },
+    });
+    if (!promise) return;
     setPolish(null);
     try {
-      const context = await getContext();
-      const outcome = await runAI({
-        prompt: buildActivityPolishPrompt({
-          activity: activities[index],
-          index,
-          activities,
-          profileText: context.profileText,
-          materialsText: context.materialsText,
-          applicantText: context.applicantText,
-          universityName,
-        }),
-        response_json_schema: ACTIVITY_POLISH_SCHEMA,
-        temperature: 0.35,
-      }, { fallbackTitle: 'Could not sharpen this entry', quiet: true });
-
-      if (!isLiveOutcome(outcome)) {
-        toast.error('No revision came back', { description: 'The model did not return a usable answer. Your entry was left alone.' });
-        return;
-      }
-      const cleaned = sanitizeActivitySuggestion({ ...activities[index], ...outcome.result });
-      setPolish({
-        index,
-        before: activities[index],
-        proposed: cleaned.activity,
-        changes: Array.isArray(outcome.result?.changes) ? outcome.result.changes : [],
-        missingFacts: Array.isArray(outcome.result?.missing_facts) ? outcome.result.missing_facts : [],
-        verdict: String(outcome.result?.verdict || ''),
-        truncations: cleaned.truncations,
-      });
+      const result = await promise;
+      if (result) setPolish(result);
     } catch (e) {
       console.error(e);
       toast.error('Could not sharpen this entry', { description: e.message });
-    } finally {
-      setBusy(null);
     }
   };
 
@@ -222,46 +306,70 @@ export default function ActivityAiPanel({
       toast.error('There is no list to review yet', { description: 'Add an activity, or ask Atlas to suggest some from your materials.' });
       return;
     }
-    setBusy('review');
+    const snapshot = activities;
+    const promise = runActivityTask({
+      label: 'Reviewing your activities list',
+      stage: 'review',
+      work: async () => {
+        const context = await getContext();
+        const outcome = await runAI({
+          prompt: buildActivityListReviewPrompt({
+            activities: snapshot,
+            profileText: context.profileText,
+            materialsText: context.materialsText,
+            applicantText: context.applicantText,
+            universityName,
+          }),
+          response_json_schema: ACTIVITY_LIST_SCHEMA,
+          temperature: 0.25,
+        }, { fallbackTitle: 'Could not review the list', quiet: true });
+
+        if (!isLiveOutcome(outcome)) {
+          toast.error('No review came back', { description: 'The model did not return a usable answer.' });
+          return null;
+        }
+        const ordering = (Array.isArray(outcome.result?.ordering) ? outcome.result.ordering : [])
+          .map((n) => Number(n))
+          .filter((n) => Number.isInteger(n) && n >= 1 && n <= snapshot.length);
+        // A partial or duplicated ordering must never scramble the list, so it is
+        // only used when it is a complete permutation of the current entries.
+        const isPermutation = ordering.length === snapshot.length
+          && new Set(ordering).size === snapshot.length;
+        const ratings = (Array.isArray(outcome.result?.ratings) ? outcome.result.ratings : [])
+          .map((item) => ({
+            entry: Number(item?.entry),
+            score: Math.max(1, Math.min(5, Math.round(Number(item?.score) || 0))),
+            why: String(item?.why || ''),
+          }))
+          .filter((item) => Number.isInteger(item.entry) && item.entry >= 1 && item.entry <= snapshot.length && item.score >= 1)
+          .sort((a, b) => a.entry - b.entry);
+        const listScore = Number(outcome.result?.list_score);
+        memory.listReview = {
+          ordering: isPermutation ? ordering : [],
+          orderingInvalid: !isPermutation && ordering.length > 0,
+          orderingRationale: String(outcome.result?.ordering_rationale || ''),
+          ratings,
+          listScore: Number.isFinite(listScore) ? Math.max(1, Math.min(10, Math.round(listScore))) : null,
+          // The entries as the model saw them, so a later "Reorder my list"
+          // cannot be applied to a list that has changed underneath it.
+          reviewed: snapshot.map((item) => ({ position: item.position, organization: item.organization, description: item.description })),
+          findings: Array.isArray(outcome.result?.findings) ? outcome.result.findings : [],
+          redundant: Array.isArray(outcome.result?.redundant_pairs) ? outcome.result.redundant_pairs : [],
+          missingThemes: Array.isArray(outcome.result?.missing_themes) ? outcome.result.missing_themes : [],
+          fieldProblems: Array.isArray(outcome.result?.field_problems) ? outcome.result.field_problems : [],
+          overall: String(outcome.result?.overall || ''),
+        };
+        return memory.listReview;
+      },
+    });
+    if (!promise) return;
     setListReview(null);
     try {
-      const context = await getContext();
-      const outcome = await runAI({
-        prompt: buildActivityListReviewPrompt({
-          activities,
-          profileText: context.profileText,
-          materialsText: context.materialsText,
-          universityName,
-        }),
-        response_json_schema: ACTIVITY_LIST_SCHEMA,
-        temperature: 0.25,
-      }, { fallbackTitle: 'Could not review the list', quiet: true });
-
-      if (!isLiveOutcome(outcome)) {
-        toast.error('No review came back', { description: 'The model did not return a usable answer.' });
-        return;
-      }
-      const ordering = (Array.isArray(outcome.result?.ordering) ? outcome.result.ordering : [])
-        .map((n) => Number(n))
-        .filter((n) => Number.isInteger(n) && n >= 1 && n <= activities.length);
-      // A partial or duplicated ordering must never scramble the list, so it is
-      // only used when it is a complete permutation of the current entries.
-      const isPermutation = ordering.length === activities.length
-        && new Set(ordering).size === activities.length;
-      setListReview({
-        ordering: isPermutation ? ordering : [],
-        orderingInvalid: !isPermutation && ordering.length > 0,
-        findings: Array.isArray(outcome.result?.findings) ? outcome.result.findings : [],
-        redundant: Array.isArray(outcome.result?.redundant_pairs) ? outcome.result.redundant_pairs : [],
-        missingThemes: Array.isArray(outcome.result?.missing_themes) ? outcome.result.missing_themes : [],
-        fieldProblems: Array.isArray(outcome.result?.field_problems) ? outcome.result.field_problems : [],
-        overall: String(outcome.result?.overall || ''),
-      });
+      const result = await promise;
+      if (result) setListReview(result);
     } catch (e) {
       console.error(e);
       toast.error('Could not review the list', { description: e.message });
-    } finally {
-      setBusy(null);
     }
   };
 
@@ -279,8 +387,20 @@ export default function ActivityAiPanel({
 
   const applyPolish = () => {
     if (!polish) return;
+    // The entry may have been edited, moved, or removed while the job ran.
+    // Find it by its text rather than trusting the index, and refuse to
+    // overwrite a different entry.
+    let index = sameEntryText(activities[polish.index], polish.before) ? polish.index : -1;
+    if (index < 0) index = activities.findIndex((item) => sameEntryText(item, polish.before));
+    if (index < 0) {
+      toast.error('That entry has changed since Atlas read it', {
+        description: 'Nothing was applied. Press Sharpen again on the current wording.',
+      });
+      setPolish(null);
+      return;
+    }
     const next = [...activities];
-    next[polish.index] = { ...next[polish.index], ...polish.proposed };
+    next[index] = { ...next[index], ...polish.proposed };
     onChange(next);
     toast.success('Entry updated', { description: 'Nothing is written to your profile until you press Save profile.' });
     setPolish(null);
@@ -288,10 +408,21 @@ export default function ActivityAiPanel({
 
   const applyOrdering = () => {
     if (!listReview?.ordering?.length) return;
+    const unchanged = listReview.reviewed?.length === activities.length
+      && listReview.reviewed.every((item, i) => sameEntryText(item, activities[i]));
+    if (!unchanged) {
+      toast.error('The list has changed since this review', {
+        description: 'Atlas will not reorder entries it has not read. Run the review again on the current list.',
+      });
+      setListReview((prev) => (prev ? { ...prev, ordering: [], orderingInvalid: false, stale: true } : prev));
+      return;
+    }
     onChange(listReview.ordering.map((position) => activities[position - 1]).filter(Boolean));
     toast.success('List reordered', { description: 'The reader sees the first two or three entries properly, so this order is now your argument.' });
     setListReview((prev) => ({ ...prev, ordering: [], applied: true }));
   };
+
+  const ratingFor = (entryIndex) => listReview?.ratings?.find((item) => item.entry === entryIndex + 1) || null;
 
   const counts = (activity) => activityFieldCounts(activity);
 
@@ -323,12 +454,38 @@ export default function ActivityAiPanel({
             {busy === 'review' ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <ListOrdered className="w-3.5 h-3.5 mr-1.5" />}
             {busy === 'review' ? 'Reading the list…' : 'Review order and impact'}
           </Button>
+          <Button size="sm" variant="ghost" onClick={() => setHintsOpen((open) => !open)} aria-expanded={hintsOpen}>
+            <KeyRound className="w-3.5 h-3.5 mr-1.5" />
+            {hintsOpen ? 'Hide keywords' : 'Keywords for what is missing'}
+          </Button>
           {!hasLiveModel() && (
             <span className="text-[11px] text-amber-700 self-center">
               Demo mode: connect a model in AI setup to use these.
             </span>
           )}
         </div>
+
+        {hintsOpen && (
+          <div className="space-y-1.5">
+            <label htmlFor="activity-hints" className="text-xs font-medium text-foreground/70 flex items-center gap-1.5">
+              <KeyRound className="w-3.5 h-3.5 text-accent" />
+              Activities you did that are not on the list yet — in keywords
+            </label>
+            <Textarea
+              id="activity-hints"
+              value={hints}
+              onChange={(e) => updateHints(e.target.value)}
+              rows={3}
+              placeholder={'e.g. night shifts at the family bakery since grade 10, ~12 hrs/week\nschool robotics: built the drivetrain, regional final 2025\ntranslate at the clinic for my grandmother every month'}
+              className="text-sm"
+            />
+            <p className="text-[11px] text-foreground/45 leading-relaxed">
+              Shorthand is fine. “Suggest activities” builds its entries from these words first, then from your
+              materials and profile — and never from anything else. For an entry already on the list, use its own
+              Keywords box instead.
+            </p>
+          </div>
+        )}
       </div>
 
       {suggestions && (
@@ -349,8 +506,8 @@ export default function ActivityAiPanel({
           )}
           {suggestions.items.length === 0 && (
             <p className="text-xs text-foreground/50 leading-relaxed">
-              Atlas found nothing in your materials it could point to. Add a resume, a certificate, a programme
-              description, or a note about what you have done outside class — then this will have something to work
+              Atlas found nothing in your {suggestions.fromHints ? 'keywords or ' : ''}materials it could point to. Add a resume, a certificate, a programme
+              description, or a few keywords about what you have done outside class — then this will have something to work
               from. Atlas will not invent an activity for you.
             </p>
           )}
@@ -532,13 +689,62 @@ export default function ActivityAiPanel({
             </button>
           </div>
 
+          {listReview.listScore != null && (
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-center shrink-0">
+                <div className="text-xl font-semibold leading-none">{listReview.listScore}<span className="text-xs text-foreground/35">/10</span></div>
+                <div className="text-[10px] uppercase tracking-wide text-foreground/40 mt-1">as a list</div>
+              </div>
+              <p className="text-[11px] text-foreground/45 leading-relaxed">
+                The impression the list leaves in a fifteen-minute file read, in this order. Entry ratings below
+                are on the 1–5 scale an admissions reader uses: 5 proves initiative and impact with a number; 3 is a
+                real commitment described as duties; 1 claims nothing checkable.
+              </p>
+            </div>
+          )}
           {listReview.overall && (
             <p className="text-sm text-foreground/65 leading-relaxed">{listReview.overall}</p>
+          )}
+          {listReview.stale && (
+            <p className="text-[11px] text-amber-700">
+              Your list has changed since this review was written, so the order above can no longer be applied.
+              The ratings and findings may still be useful.
+            </p>
+          )}
+
+          {listReview.ratings?.length > 0 && (
+            <div className="rounded-lg border border-border bg-muted/20 p-3">
+              <h5 className="text-xs font-medium text-foreground/60 mb-2 flex items-center gap-1.5">
+                <Star className="w-3.5 h-3.5 text-accent" /> Entry by entry, as submitted
+              </h5>
+              <ol className="space-y-1.5">
+                {activities.map((activity, index) => {
+                  const rating = ratingFor(index);
+                  return (
+                    <li key={index} className="text-xs text-foreground/65 flex gap-2 items-start">
+                      <span className="font-mono text-foreground/35 w-4 shrink-0">{index + 1}.</span>
+                      <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 font-mono text-[10px] shrink-0 ${rating ? RATING_TONE[rating.score] || RATING_TONE[3] : 'text-foreground/30 border-border'}`}>
+                        {rating ? `${rating.score}/5` : '—'}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="font-medium text-foreground/75">
+                          {activity.position || activity.organization || `entry ${index + 1}`}
+                        </span>
+                        {rating?.why ? <span className="text-foreground/50"> — {rating.why}</span> : null}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
           )}
 
           {listReview.ordering?.length > 0 && (
             <div className="rounded-lg border border-border bg-muted/20 p-3">
               <h5 className="text-xs font-medium text-foreground/60 mb-2">Recommended order</h5>
+              {listReview.orderingRationale && (
+                <p className="text-[11px] text-foreground/50 leading-relaxed mb-2">{listReview.orderingRationale}</p>
+              )}
               <ol className="space-y-1">
                 {listReview.ordering.map((position, index) => (
                   <li key={index} className="text-xs text-foreground/60 flex gap-2">
@@ -628,7 +834,8 @@ export default function ActivityAiPanel({
       {busy && (
         <p className="text-[11px] text-foreground/40 flex items-center gap-1.5">
           <Loader2 className="w-3 h-3 animate-spin" />
-          Working. AI requests run one at a time through a shared queue, so other AI actions wait until this finishes.
+          Working in the background — you can keep editing, or open another page and come back; the result will be
+          waiting here. AI requests run one at a time through a shared queue, so other AI actions wait their turn.
         </p>
       )}
 

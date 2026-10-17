@@ -50,8 +50,23 @@ Vercel + Supabase deployment, environment variables, and key locations.
   against the instruction it was given (the root) and against the review it was asked
   to answer (the flagged phrases), instead of trusting the model's own summary. A
   check that fails is corrected once, then reported honestly to the applicant.
-- `scripts/verify-instructions.mjs`: offline checks for all of the above, including
-  that the pages still call these modules.
+- `src/lib/backgroundTasks.js`: the ledger of AI work that must outlive its page.
+  Any new long-running AI action belongs in `startBackgroundTask` (kind, label,
+  scope) and persists its own result (entity API or `persist.js`) before it
+  resolves — never only in a page's `useState`. `BackgroundTasksPill` in the
+  Layout shows what is running; `taskForEssay` locks one essay, not the page.
+- `src/lib/knowledgeService.js` / `src/lib/knowledgeAutoRefresh.js`: the
+  knowledge-base jobs as background tasks (one at a time; `knowledge_busy` when
+  not), and the automatic pass that keeps the base current. The automatic pass
+  REFRESHES (item by item: keep / revise / remove, removals capped) and files
+  materials into sections; it may rebuild only when nothing is built, never in
+  Demo mode, and never in front of the applicant's own AI work. Dissected
+  section rows (`data.dissected`) follow their material: replaced when it
+  changes, removed when it is removed, untouched by a rebuild or a refresh.
+- `src/hooks/use-drag-reorder.js`: drag-and-drop reordering on native drag
+  events. Keep the arrow buttons next to it — keyboards and touch screens.
+- `scripts/verify-instructions.mjs` and `scripts/verify-background.mjs`: offline
+  checks for all of the above, including that the pages still call these modules.
 - `scripts/render-check.mjs`: renders the essay/activity components in Node with
   the props the pages really pass them (`npm run verify:render`). Lint and build
   cannot see a missing prop; this can.
@@ -134,6 +149,22 @@ Vercel + Supabase deployment, environment variables, and key locations.
   (`withMeasuredLength`) wins over a model's self-reported one.
 - Activities AI is suggestion-only: nothing may be written to the profile's
   activities list without an explicit Add/Apply click, and every field must stay
-  inside the Common App limits from `ACTIVITY_LIMITS`.
+  inside the Common App limits from `ACTIVITY_LIMITS`. The list is kept in
+  submission order (slot 1 is read first) and every prompt sees it that way.
+  Each activity's `keywords` field is the applicant's private ground truth for
+  that entry: prompts build from it and never contradict it, and it is never
+  part of a sanitized suggestion or any submitted field.
+- Essay edit instructions (`essay.edit_instructions`) are binding: ranked below
+  the root and above the review in every generate/polish prompt, split with
+  `splitEditInstructions`, and checked against the text afterwards with
+  `checkInstructionsFollowed`. An edit's re-score is compared with the score
+  before it: equal is reported as unchanged, lower is restored automatically
+  unless the applicant turned that off. Never present an edit as improved on
+  the model's say-so.
+- Knowledge-base items are person-first (`PERSON_FOCUS_RULES`): what kind of
+  person the applicant is, their mindset, how they act, what they like, what
+  drives them — with evidence — never a document summary or a grade.
+  `looksLikeMechanicsDump` marks the failures; the refresh re-examines them
+  first. Items with `origin: 'manual'` are never revised or removed by any job.
 - The app has a Demo mode (no env vars → localStorage backend + labeled demo AI
   output). Keep it working — it is the zero-config onboarding path.

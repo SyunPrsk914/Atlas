@@ -135,6 +135,89 @@ ${shape}${options}${rules}
 }
 
 /**
+ * Splits the applicant's edit instructions into the sentences Atlas will hold
+ * the model to. One instruction per line or per sentence; bullets and numbers
+ * are stripped. Shared by the prompt (which numbers them) and the check in
+ * ./essayEditCheck (which verifies them), so both see the same list.
+ */
+export function splitEditInstructions(text) {
+  const value = String(text || '').replace(/\r\n?/g, '\n');
+  if (!value.trim()) return [];
+  const out = [];
+  for (const line of value.split('\n')) {
+    const bare = line.replace(/^\s*(?:[-*•]|\d+[.)]|[a-z][.)])\s+/i, '').trim();
+    if (!bare) continue;
+    for (const piece of splitSentencesOutsideQuotes(bare)) {
+      const sentence = piece.trim();
+      if (sentence.replace(/[.!?]+$/, '').length >= 3) out.push(sentence);
+    }
+  }
+  return out;
+}
+
+const ABBREVIATION_END = /(?:^|[\s(])(?:e\.g|i\.e|etc|vs|cf|mr|mrs|ms|dr|prof|st|no|para|p|pp|approx)\.?$/i;
+const isBoundaryChar = (ch) => !ch || /[\s([{,:;—–-]/.test(ch);
+const isCloseChar = (ch) => !ch || /[\s)\]}.,:;!?—–-]/.test(ch);
+
+/**
+ * Splits at sentence ends that are not inside quotation marks, so
+ * "replace 'x. y' with 'z'" stays one instruction. An apostrophe inside a word
+ * (don't, teacher's) is never a quote.
+ */
+function splitSentencesOutsideQuotes(text) {
+  const pieces = [];
+  let start = 0;
+  let quote = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if ((quote === '"' && ch === '"') || (quote === '“' && ch === '”') || (quote === '`' && ch === '`')
+        || (quote === "'" && ch === "'" && isCloseChar(text[i + 1]))) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === '“' || ch === '`') { quote = ch; continue; }
+    if (ch === "'" && isBoundaryChar(text[i - 1])) { quote = "'"; continue; }
+    if (/[.!?]/.test(ch)) {
+      let end = i;
+      while (/[.!?]/.test(text[end + 1] || '')) end += 1;
+      const next = text[end + 1];
+      // Only a stop followed by a space (or the end) closes a sentence, and
+      // "e.g.", "i.e.", "etc.", "vs.", "Dr." never do.
+      const abbreviation = ABBREVIATION_END.test(text.slice(Math.max(0, start), i));
+      if ((!next || /\s/.test(next)) && !abbreviation) {
+        pieces.push(text.slice(start, end + 1));
+        start = end + 1;
+      }
+      i = end;
+    }
+  }
+  if (start < text.length) pieces.push(text.slice(start));
+  return pieces;
+}
+
+/**
+ * The applicant's own change list, as a binding block. Comes AFTER the root
+ * (which it may narrow but never contradict) and BEFORE the review findings
+ * (which it outranks: a finding the applicant did not ask for is advice, an
+ * instruction is an order).
+ *
+ * @param {string} editInstructions
+ * @param {{ mode?: 'draft'|'edit' }} [options]
+ */
+export function editInstructionsBrief(editInstructions, { mode = 'edit' } = {}) {
+  const items = splitEditInstructions(editInstructions);
+  if (!items.length) return '';
+  const numbered = items.map((item, index) => `${index + 1}. ${item}`).join('\n');
+  return `APPLICANT'S EDIT INSTRUCTIONS (binding — every numbered sentence must be carried out):
+${numbered}
+
+PRIORITY ORDER, highest first: (1) the required root above, (2) these instructions, (3) the length contract, (4) ${mode === 'edit' ? 'the review findings and optional ideas below' : 'the craft rules and the general guidance'}. Where an instruction and ${mode === 'edit' ? 'a review finding' : 'a craft rule'} pull in different directions, the instruction wins and you say so in your report. Where an instruction and the root conflict, keep the root, do NOT carry out that instruction, and report the conflict under "instructions_not_followed" — never resolve it by guessing.
+- Carry out each instruction literally and completely: an instruction to cut a sentence means the sentence is gone; an instruction to add a detail means the detail appears where it was asked for; an instruction to keep a phrase means the phrase survives word for word.
+- Do not "interpret" an instruction into something easier. If one cannot be carried out without inventing a fact, do not invent it: report it under "instructions_not_followed" with the fact you would need.
+- For every instruction return one entry under "instructions_followed" ({"instruction", "how"}: which words changed), or under "instructions_not_followed" ({"instruction", "why"}). Atlas checks the draft against each instruction and shows the applicant the ones you missed.`;
+}
+
+/**
  * The send-back text used when a finished draft ignored or overstuffed the root.
  * It is a correction, not a fresh brief: everything else the model was told
  * (craft, voice, length) still applies.
@@ -187,8 +270,10 @@ export function lengthBrief(essay, allEssays) {
  * @param {Array} [args.allEssays]
  * @param {string} [args.rootCorrection] the failed root check from ./essayRoot, when
  *   this call is the send-back pass rather than the first attempt
+ * @param {string} [args.editInstructions] the applicant's own change list; binding,
+ *   below the root and above every suggestion
  */
-export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, applicantText = '', allEssays, rootCorrection = '' }) {
+export function buildGeneratePrompt({ essay, university, platform, profileText, knowledgeText, materialsText, applicantText = '', allEssays, rootCorrection = '', editInstructions = '' }) {
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
   const promptWarning = isAmbiguousCommonAppPrompt(essay?.prompt)
@@ -230,7 +315,7 @@ THE ESSAY TO WRITE:
 
 ${rootBrief(essay)}
 
-${rootCorrection ? `${rootCorrection}\n\n` : ''}${buildLengthContractText(essay, allEssays)}
+${(() => { const block = editInstructionsBrief(editInstructions, { mode: 'draft' }); return block ? `${block}\n\n` : ''; })()}${rootCorrection ? `${rootCorrection}\n\n` : ''}${buildLengthContractText(essay, allEssays)}
 
 ${LENGTH_CRAFT_RULES}
 
@@ -247,7 +332,7 @@ HOW TO WORK:
 6. Count the ${formatLimit(unit)} in your own answer. If you are below the target band, you are not finished: go back into the scenes and deepen them until you are.
 7. Do not open with a general statement about yourself. Do not close with a moral.
 
-Return the COMPLETE essay text in "essay" — every paragraph, from the first word to the last — and an explanation in "essay_analysis" of the role this essay plays in the holistic application, how this draft serves that role, and how it reaches the length band without padding. List in "gaps_for_applicant" every place you needed a fact you did not have.`;
+Return the COMPLETE essay text in "essay" — every paragraph, from the first word to the last — and an explanation in "essay_analysis" of the role this essay plays in the holistic application, how this draft serves that role, and how it reaches the length band without padding. List in "gaps_for_applicant" every place you needed a fact you did not have.${splitEditInstructions(editInstructions).length ? ' Report every edit instruction under "instructions_followed" or "instructions_not_followed".' : ''}`;
 }
 
 export const GENERATE_SCHEMA = {
@@ -257,6 +342,14 @@ export const GENERATE_SCHEMA = {
     essay_analysis: { type: 'string' },
     used_profile_details: { type: 'array', items: { type: 'string' } },
     gaps_for_applicant: { type: 'array', items: { type: 'string' } },
+    instructions_followed: {
+      type: 'array',
+      items: { type: 'object', properties: { instruction: { type: 'string' }, how: { type: 'string' } } },
+    },
+    instructions_not_followed: {
+      type: 'array',
+      items: { type: 'object', properties: { instruction: { type: 'string' }, why: { type: 'string' } } },
+    },
   },
 };
 
@@ -490,9 +583,19 @@ ${additions.join('\n')}
 Use one ONLY where it fits the sentence you are already editing and does not change what the essay is about. Skipping every one of them is a completely acceptable outcome, and is the right one when adding it would mean inventing a fact or starting a second thread. Never restructure the draft around an optional idea.`;
 }
 
+/**
+ * @param {{
+ *   essay: object, university?: object|null, platform?: string, reviewResult?: object|null, knowledgeText?: string,
+ *   allEssays?: object[], materialsText?: string, profileText?: string, applicantText?: string,
+ *   focusPhrases?: string[]|null, focusInstructions?: string[]|null, editInstructions?: string,
+ * }} args
+ *   focusPhrases — flagged phrases still in the draft, which makes this a follow-up edit;
+ *   focusInstructions — edit instructions the first pass missed, also a follow-up;
+ *   editInstructions — the applicant's own change list: binding, below the root and above the review.
+ */
 export function buildPolishPrompt({
   essay, university, platform, reviewResult, knowledgeText, allEssays,
-  materialsText = '', profileText = '', applicantText = '', focusPhrases = null,
+  materialsText = '', profileText = '', applicantText = '', focusPhrases = null, focusInstructions = null, editInstructions = '',
 }) {
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
@@ -506,8 +609,17 @@ export function buildPolishPrompt({
   const phraseRules = flagged.length
     ? `\nTHE FLAGGED PHRASES — EVERY ONE MUST BE RESOLVED:\n${flagged.map((phrase) => `- "${phrase}"`).join('\n')}\nFor each one, either change it, or list it under "unresolved_phrases" with the reason it should stay. Returning a draft that still contains a flagged phrase without naming it is a failed edit, whatever else improved. If a phrase is a strength the reviewer misread, say so in the reason — that is a legitimate answer and Atlas will show it.`
     : '';
-  const focusBlock = focusPhrases && focusPhrases.length
-    ? `THIS IS A FOLLOW-UP EDIT. The draft below was already revised once, and these ${focusPhrases.length} phrase${focusPhrases.length === 1 ? '' : 's'} from the review are still in it verbatim. Do not restructure the essay, do not re-polish sentences that are already working, and do not change the story: resolve exactly these, plus anything they touch. Everything else must survive word for word.`
+  const missedCount = Array.isArray(focusInstructions) ? focusInstructions.length : 0;
+  const followUpReasons = [
+    focusPhrases && focusPhrases.length
+      ? `these ${focusPhrases.length} phrase${focusPhrases.length === 1 ? '' : 's'} from the review ${focusPhrases.length === 1 ? 'is' : 'are'} still in it verbatim`
+      : '',
+    missedCount
+      ? `${missedCount} of the applicant's edit instructions (listed above as binding) ${missedCount === 1 ? 'was' : 'were'} not carried out`
+      : '',
+  ].filter(Boolean);
+  const focusBlock = followUpReasons.length
+    ? `THIS IS A FOLLOW-UP EDIT. The draft below was already revised once, and ${followUpReasons.join(', and ')}. Do not restructure the essay, do not re-polish sentences that are already working, and do not change the story: resolve exactly these, plus anything they touch. Everything else must survive word for word.`
     : '';
 
   return `You are a master essay editor working line by line on a draft that belongs to the applicant. Your job is to lift it to the level of an essay read aloud in committee — more human, more specific, better aligned to its prompt — without inventing anything and without taking the essay over.
@@ -523,14 +635,14 @@ ${craftBrief({ essay, university, platform, limit, unit })}
 
 ${rootBrief(essay)}
 
-${HUMAN_VOICE_RULES}
+${(() => { const block = editInstructionsBrief(editInstructions, { mode: 'edit' }); return block ? `${block}\n\n` : ''; })()}${HUMAN_VOICE_RULES}
 
 ${facts.text}
 An edit that makes the draft SHORTER than the target band is a failed edit, whatever else it improves. ${buildLengthContractText(essay, allEssays)}
 
 ${LENGTH_CRAFT_RULES}
 
-${focusBlock ? `${focusBlock}\n\n` : ''}${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check each one against your change log):
+${focusBlock ? `${focusBlock}\n\n` : ''}${reviewResult ? `FINDINGS YOU MUST ACTUALLY FIX (the applicant will check each one against your change log${splitEditInstructions(editInstructions).length ? '; where one of these conflicts with an edit instruction above, the instruction wins' : ''}):
 - Overall score last review: ${reviewResult.overall_score ?? '?'}/10
 - Weaknesses: ${(reviewResult.weaknesses || []).join(' | ') || 'none reported'}
 - Priority improvements: ${(reviewResult.priority_improvements || []).join(' | ') || 'none reported'}
@@ -566,6 +678,8 @@ Return JSON only, with:
 - "why_it_scores_higher": two or three sentences naming which dimensions improved and what earned the increase.
 - "gaps_for_applicant": facts you needed but did not have.
 - "unresolved_phrases": each flagged phrase you deliberately left alone, as { "phrase", "reason" }. Empty only if you resolved every one.
+- "instructions_followed": one { "instruction", "how" } per edit instruction you carried out; "instructions_not_followed": one { "instruction", "why" } per instruction you could not. Both empty when there were no instructions.
+- "improvement_claim": one of "improved", "unchanged", "uncertain" — your honest judgement of whether a careful reader would score the revised draft higher. Say "unchanged" when you only touched wording that was already working.
 - "summary_of_edit": one sentence for the applicant.`;
 }
 
@@ -595,6 +709,15 @@ export const POLISH_SCHEMA = {
     protected: { type: 'array', items: { type: 'string' } },
     why_it_scores_higher: { type: 'string' },
     gaps_for_applicant: { type: 'array', items: { type: 'string' } },
+    instructions_followed: {
+      type: 'array',
+      items: { type: 'object', properties: { instruction: { type: 'string' }, how: { type: 'string' } } },
+    },
+    instructions_not_followed: {
+      type: 'array',
+      items: { type: 'object', properties: { instruction: { type: 'string' }, why: { type: 'string' } } },
+    },
+    improvement_claim: { type: 'string' },
     summary_of_edit: { type: 'string' },
   },
 };

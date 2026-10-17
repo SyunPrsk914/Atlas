@@ -27,6 +27,8 @@ import { contextTargetLabel, filterByContextTarget } from '@/lib/contextTargetin
 import { SCORE_ANCHORS } from '@/lib/essayCraft';
 import ReviewResults from '@/components/review/ReviewResults';
 import { getCachedReview, setCachedReview, clearCachedReview } from '@/lib/persist';
+import { startBackgroundTask, findRunningTask } from '@/lib/backgroundTasks';
+import { useBackgroundTasks } from '@/hooks/use-background-tasks';
 
 /** Short state of one material, as the review will see it. */
 function materialReadState(m) {
@@ -98,9 +100,26 @@ export default function ApplicationReview() {
   const [knowledge, setKnowledge] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [reviewing, setReviewing] = useState(false);
   const [reviewResult, setReviewResult] = useState(null);
   const [cachedAt, setCachedAt] = useState(null);
+
+  // The review runs as a background task, so leaving this page does not cancel
+  // it and coming back shows it still running. When it lands (even on another
+  // page), the cached result is picked up here.
+  const onTaskChange = useCallback((task) => {
+    if (task.kind !== 'application' || String(task.scope?.universityId || '') !== String(id)) return;
+    if (task.state === 'done' && task.result) {
+      const cached = getCachedReview(id);
+      if (cached?.result) {
+        setReviewResult(cached.result);
+        setCachedAt(cached.savedAt || new Date().toISOString());
+      }
+    }
+  }, [id]);
+  const backgroundTasks = useBackgroundTasks(onTaskChange);
+  const reviewTask = backgroundTasks.find((task) => task.kind === 'application' && task.state === 'running'
+    && String(task.scope?.universityId || '') === String(id)) || null;
+  const reviewing = !!reviewTask;
 
   const loadData = useCallback(async () => {
     try {
@@ -153,8 +172,10 @@ export default function ApplicationReview() {
       });
       return;
     }
-    setReviewing(true);
-    setReviewResult(null);
+    if (findRunningTask((task) => task.kind === 'application' && String(task.scope?.universityId || '') === String(id))) {
+      toast.message('This review is already running', { description: 'The result will appear here when it is done.' });
+      return;
+    }
     try {
       const p = profile || {};
       const platform = getUniversityPlatform(university);
@@ -236,20 +257,43 @@ RETURN FORMAT — use exactly these field names:
 - "summary": three or four sentences of overall assessment, in the voice of a reader who has just finished the file.
 
 Return JSON only.`;
-      const outcome = await runAI(
-        { prompt, response_json_schema: APPLICATION_REVIEW_SCHEMA },
-        { fallbackTitle: 'The review could not be completed' },
-      );
-      if (!isLiveOutcome(outcome)) return;
-      const result = outcome.result;
-      setReviewResult(result);
-      setCachedReview(id, result);
-      setCachedAt(new Date().toISOString());
-      toast.success('Review complete', {
-        description: `${result.verdict} · ${Math.round(result.acceptance_probability || 0)}% estimated acceptance. Saved so it stays when you navigate away.`,
+      const universityName = university?.name || 'this university';
+      const { promise } = startBackgroundTask({
+        kind: 'application',
+        label: `Full application review: ${universityName}`,
+        scope: { universityId: String(id) },
+        stage: 'application',
+        run: async () => {
+          const outcome = await runAI(
+            { prompt, response_json_schema: APPLICATION_REVIEW_SCHEMA },
+            { fallbackTitle: 'The review could not be completed' },
+          );
+          if (!isLiveOutcome(outcome)) return null;
+          const result = outcome.result;
+          // Persisted first, so the result survives whether or not this page
+          // is still open when the model answers.
+          setCachedReview(id, result);
+          toast.success(`Review complete: ${universityName}`, {
+            description: `${result.verdict} · ${Math.round(result.acceptance_probability || 0)}% estimated acceptance. Saved so it stays when you navigate away.`,
+          });
+          return result;
+        },
       });
-    } finally {
-      setReviewing(false);
+      toast.message('Reviewing in the background', {
+        description: 'You can keep working on other pages. The result appears here, and the sidebar shows progress.',
+      });
+      promise.then((result) => {
+        if (result) {
+          setReviewResult(result);
+          setCachedAt(new Date().toISOString());
+        }
+      }).catch((error) => {
+        console.error(error);
+        toast.error('The review could not be completed', { description: error?.message || String(error) });
+      });
+    } catch (error) {
+      console.error(error);
+      toast.error('The review could not be started', { description: error?.message || String(error) });
     }
   };
 
@@ -565,6 +609,11 @@ Return JSON only.`;
           <p className="text-xs text-foreground/30">
             Compiles your entire application and evaluates it against {university.name}&apos;s holistic rubric
           </p>
+          {reviewing && (
+            <p className="text-[11px] text-accent">
+              Running in the background — you can keep editing elsewhere.{reviewResult ? ' The result below is the previous review until the new one lands.' : ''}
+            </p>
+          )}
           {cachedAt && reviewResult && (
             <p className="text-[11px] text-foreground/40">
               Last reviewed {new Date(cachedAt).toLocaleString()} — result is cached so it stays when you navigate away.

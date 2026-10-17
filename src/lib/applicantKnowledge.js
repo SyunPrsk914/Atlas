@@ -14,14 +14,28 @@
 // removes the old AI items. Manual items are never removed by a rebuild.
 // Drafting, review, and the holistic review read the items through
 // `applicantKnowledgeForPrompt`.
+//
+// Three ways the AI items change, from safest to most destructive:
+//   refreshApplicantKnowledge — re-examines every AI item one by one against
+//       the sources as they are now: keep, revise, or remove, then add what is
+//       missing. This is what the automatic update runs.
+//   extendApplicantKnowledge  — "Go deeper": appends only.
+//   rebuildApplicantKnowledge — rewrites the AI items of each kind it rebuilds.
+// `dissectMaterialKnowledge` reads one material and files its parts under the
+// school, essay, platform, or task they belong to, so a successful full
+// application becomes a "Stanford" section plus a "roommate essay" section
+// rather than one undifferentiated pile.
 
 import { buildProfileContext } from './profileContext';
 import {
   formatOwnMaterials, formatGuidanceMaterials, formatSampleMaterials, isGuidanceMaterial, isSampleMaterial, presentMaterial,
+  materialAnalysisRole,
 } from './materialRole';
 import { sourceKey } from './materialDocument';
 import { contextTargetLabel, filterByContextTarget } from './contextTargeting';
 import { clipToBoundary, packBlocks } from './textClip';
+import { detectSupplementShapes } from './essayCraft';
+import { universityNamesMatch, limitUnitFor, PLATFORMS } from './applicationData';
 
 export const KNOWLEDGE_KINDS = {
   brief: { label: 'About you', hint: 'Who you are, from your profile, materials, and drafts.' },
@@ -232,9 +246,63 @@ export const GUIDANCE_SCHEMA = {
   },
 };
 
+/**
+ * The standard every portrait item is held to.
+ *
+ * The applicant's complaint was precise: items like "In the physics IA, the
+ * applicant annotates Trial 21 as an outlier" describe a lab notebook, not a
+ * person. A drafter cannot write a human being from that. Every item has to
+ * answer at least one of the five questions below, and academic work may only
+ * ever be read for what it shows about how the person thinks.
+ */
+export const PERSON_FOCUS_RULES = `PERSON FIRST — THE STANDARD EVERY ITEM IS HELD TO
+Every item about the applicant answers at least one of these, in the applicant's own terms:
+  (1) what kind of person this is;  (2) what their core mindset is — how they think, learn, and decide;
+  (3) how they act when it matters, and when nobody is watching;  (4) what they like and keep returning to;
+  (5) what drives them — the reason under the choices.
+- The single most valuable thing in any material is a sentence where the applicant states a value, a belief, or a reason in their own words ("I keep doing this because…", "what matters to me is…", "I could not accept that…"). Quote or closely paraphrase it, say where it was said, and build the portrait around those sentences before anything else.
+- Read between the lines: the subject they chose when they could have chosen anything, the detail they linger on, what they apologise for, what they are proud of without saying so, who they mention and how, what they do repeatedly without being asked, and the gap between what they say and what they do. Say what it suggests about the person, always tied to the evidence, and label an uncertain reading "suggests" or "the materials do not establish".
+- Academic work — an Internal Assessment, an Extended Essay, a lab report, a research paper, a transcript — tells you how this person thinks: what question they picked, how they handle uncertainty, whether they persist, what standard they hold themselves to. Use it ONLY for that. Never record its mechanics: no trial numbers, no outliers, no data tables, no uncertainties, no section summaries, no "annotates Trial 21 as an outlier". If a sentence would read naturally in a lab notebook or a mark scheme, it does not belong in this portrait.
+- Grades, scores, and course lists already live in the profile. Do not restate them as personality, and never let academic detail crowd out the person: an item about how someone treats a struggling teammate is worth more than three about their methodology.
+- Achievements are evidence, not the point. "Founded a tutoring club" says what happened; the portrait has to say what it shows — that they build the thing that is missing, that they would rather teach than be seen, that they stay after the applause.
+- Compact beats long. One item that integrates three pieces of evidence into one true observation beats three items that each report one. Merge overlapping observations; never pad.`;
+
+const MECHANICS_PATTERNS = [
+  /\btrial\s*#?\s*\d+/i,
+  /\boutlier(s)?\b/i,
+  /\b(internal assessment|\bIA\b)[^.]{0,80}\b(annotat|tabulat|record|plot|calculat|graph)/i,
+  /\b(data|results?) table\b/i,
+  /\buncertaint(y|ies) of\b|±\s*\d/i,
+  /\br\s*(\^|²)\s*2?\s*(=|value)/i,
+  /\b(standard deviation|error bars?|p-value|regression line|line of best fit)\b/i,
+  /\b(section|part|page)\s+\d+(\.\d+)?\s+(of the|in the)\s+(IA|report|essay)/i,
+  /\b(scored|achieved|received|got)\s+(a\s+)?\d+\s*(\/|out of)\s*\d+\b/i,
+  /\bpredicted (grade|score) of\b/i,
+];
+
+const PERSON_SIGNALS = /\b(because|values?|believ|cares? about|mindset|drives?|motivat|tends? to|habit|would rather|notices?|returns? to|when (it|things|the plan) (matters|fail|goes wrong)|treats?|refus|insist|curious|patient|stubborn|honest|generous|restless|afraid|proud|ashamed|joy|love|hate|wants?|needs?|chooses?|chose)\b/i;
+
+/**
+ * True when an item reads like an assessment detail rather than a portrait.
+ *
+ * The test is deliberately conservative: it only fires on lab-notebook wording
+ * (trial numbers, outliers, data tables, uncertainties, grade fractions) that
+ * is NOT accompanied by any language about the person. The knowledge-base page
+ * marks such items, and the refresh pass re-examines them first.
+ */
+export function looksLikeMechanicsDump(text) {
+  const value = String(text || '');
+  if (!value.trim()) return false;
+  const mechanical = MECHANICS_PATTERNS.some((pattern) => pattern.test(value));
+  if (!mechanical) return false;
+  return !PERSON_SIGNALS.test(value);
+}
+
 export function buildAboutAndPointsPrompt({ profileText, ownText, essayText, limits = null }) {
   const cap = limits || knowledgeLimitsFor({ materials: 1, essays: 1, profile: 1 });
-  return `You are building a private, editable, evidence-grounded portrait of one college applicant. Essay drafting and holistic review will use it, so depth and accuracy matter more than flattering slogans.
+  return `You are building a private, editable, evidence-grounded portrait of one college applicant. Essay drafting and holistic review will use it, so it has to describe a PERSON — how they think, act, and what they want — with enough evidence that a drafter could write in their voice. Depth and accuracy matter more than flattering slogans.
+
+${PERSON_FOCUS_RULES}
 
 WHAT "DEEP" MEANS HERE
 A literal inventory ("did physics IA on aerodynamics; joined three clubs") is worthless to a drafter — it already has those words. The portrait has to say what the choices imply: why this question rather than another, what the applicant returns to, what they do when the plan fails, how they treat other people's time, what they notice. Read a document the way a literature teacher reads it: the selection, the ordering, the omissions, and the emotional distance are all information.
@@ -242,10 +310,9 @@ A literal inventory ("did physics IA on aerodynamics; joined three clubs") is wo
 RULES FOR A NON-SHALLOW READ
 - Use only what the profile and own material state or strongly support. Never invent an experience, number, relationship, result, diagnosis, or motive. When an interpretation is uncertain, label it as "suggests", "may indicate", or "the materials do not establish".
 - Read across documents, not just within one paragraph. Look for repeated choices, what the applicant notices, what they spend time on, how they respond when a plan fails, the kinds of questions they ask, how they work with people, and the tension between what they say and what they do.
-- ABOUT YOU is not a collection of one-line compliments. Each item is a dense, specific paragraph of 3-5 sentences (60-140 words): the interpretation first, then the evidence in the applicant's own terms, then why that pattern matters for an application. A one-line item is a failed item.
-- Cover every category the sources can support — "personality" (how they come across), "actions" (what they repeatedly do), "mindset" (how they think, learn, handle uncertainty, and treat others), "goals" (what they are moving towards). Do not return one item for the whole set when ${cap.about.min}+ are supported: aim for at least ${Math.max(2, Math.ceil(cap.about.min / 4))} in each category the evidence reaches.
-- PERSONAL POINTS are separate and concrete: achievements with numbers, roles, places, dates, outcomes, responsibilities, and values shown in actions. Each point is self-contained and specific: carry the names, numbers, dates, places, roles, and outcomes exactly as the source states them, so a drafter can use the point without ever seeing the source — a point that says only "worked on a project" is a failed point. Do not repeat an About item as a fact. Each point needs a source_label naming the material or profile section it came from. Aim for ${cap.points.min}+ points; every material listed below should contribute at least one, or you must say in a point that it holds nothing usable.
-- Academic work and internal assessments are not college essays. Do not rate their prose or give sentence-level writing advice; use them to understand intellectual curiosity, method, standards, persistence, and the applicant's approach to evidence.
+- ABOUT YOU is not a collection of one-line compliments. Each item is a dense, specific paragraph of 3-5 sentences (60-140 words): the interpretation first, then the evidence in the applicant's own terms, then why that pattern matters for an application. A one-line item is a failed item; so is an item that only summarises a document.
+- Cover every category the sources can support — "personality" (how they come across), "actions" (what they repeatedly do), "mindset" (how they think, learn, handle uncertainty, and treat others), "goals" (what they are moving towards). Do not return one item for the whole set when ${cap.about.min}+ are supported: aim for at least ${Math.max(2, Math.ceil(cap.about.min / 4))} in each category the evidence reaches — but merge rather than pad.
+- PERSONAL POINTS are separate and concrete: achievements with numbers, roles, places, dates, outcomes, responsibilities, and values shown in actions. Each point is self-contained: carry the names, numbers, dates, places, roles, and outcomes exactly as the source states them, so a drafter can use the point without ever seeing the source — a point that says only "worked on a project" is a failed point. End a point with what it shows about the person when that is not obvious. Do not repeat an About item as a fact. Each point needs a source_label naming the material or profile section it came from. Aim for ${cap.points.min}+ points; every material listed below should contribute at least one, or you must say in a point that it holds nothing usable. A point from academic work records the question, the choice, or the standard — never a measurement.
 - A past essay can provide both concrete events and a voice pattern, but a claim in an AI draft is not confirmed unless the profile or own materials support it. Do not use sample essays, tips, guides, or college references as evidence about the applicant.
 - Do not judge the applicant's chances and do not compare them with other people.
 - Write in complete sentences and finish every one of them. Never stop mid-word, never write "someone who de", never leave a clause hanging: an item that is cut off is worse than no item, because the drafter will quote from it.
@@ -328,6 +395,8 @@ THE ONLY JOB: write what is missing.
 - Every item is a dense paragraph of 2-5 sentences and a COMPLETE sentence: never stop mid-word, never leave a clause hanging.
 - ${limits.about.max} new ABOUT items, ${limits.points.max} new personal points, ${limits.patterns.max} new patterns, ${limits.guidance.max} new guidance items at most. Prefer fewer, fuller items to one-line compliments.
 - Sample essays supply craft only, never another person's life. Tips and references supply rules, never biography. Academic work is never scored as a college essay.
+
+${PERSON_FOCUS_RULES}
 
 ALREADY SAVED (do not repeat)
 ${existingText || '(nothing yet — read every source)'}
@@ -435,12 +504,20 @@ export function knowledgeRowsFor({ about = [], points = [], patterns = [], guida
  */
 export function knowledgeStatus(rows, currentFingerprint) {
   const aiRows = (rows || []).filter((r) => r.origin === 'ai');
+  // Sections filed from one material carry no portrait fingerprint: they follow
+  // their material (see `materialsNeedingDissection`), not the whole source set.
   const stamps = aiRows.map((row) => row.data).filter((data) => data?.fingerprint);
   const latestStamp = stamps.sort((a, b) => String(b.built_at || '').localeCompare(String(a.built_at || '')))[0] || null;
+  const latestRefresh = stamps.map((data) => String(data.refreshed_at || '')).filter(Boolean).sort().reverse()[0] || null;
   return {
     built: aiRows.length > 0,
     builtAt: latestStamp?.built_at || null,
+    refreshedAt: latestRefresh,
     stale: aiRows.length > 0 && stamps.some((data) => data.fingerprint !== currentFingerprint),
+    // Only portrait items are counted: the refresh pass re-examines those, while
+    // a filed section follows its material.
+    flagged: aiRows.filter((row) => !row.data?.dissected && looksLikeMechanicsDump(row.text)).length,
+    dissected: aiRows.filter((row) => row.data?.dissected).length,
     counts: {
       brief: (rows || []).filter((r) => r.kind === 'brief').length,
       evidence: (rows || []).filter((r) => r.kind === 'evidence').length,
@@ -538,7 +615,10 @@ export async function rebuildApplicantKnowledge({ inputs, existingRows = [], run
 
   if (fresh.length) await createRows(fresh);
 
-  const stale = existingRows.filter((row) => row.origin === 'ai' && replacing.has(row.kind));
+  // Sections filed from one material (dissected rows) are not part of the
+  // portrait: they follow their material and are replaced only when it changes
+  // or is removed, so a rebuild must not take them with it.
+  const stale = existingRows.filter((row) => row.origin === 'ai' && !row.data?.dissected && replacing.has(row.kind));
   let failedDeletes = 0;
   for (const row of stale) {
     try {
@@ -603,6 +683,54 @@ function itemsWithProvenance(list, valid, fallback, maxChars) {
 }
 
 /**
+ * Turns a model's { about, points, patterns, guidance } answer into new rows,
+ * dropping anything that restates a saved item. Shared by "Go deeper" and the
+ * in-place refresh, so both append under the same rules.
+ *
+ * @param {object} result the model answer
+ * @param {{ saved: object[], ask: object, countOf: (kind: string) => number, data: object }} options
+ */
+function additionRows(result, { saved, ask, countOf, data }) {
+  const seenLists = {
+    about: saved.filter((r) => r.kind === 'brief').map((r) => wordSet(r.text)),
+    points: saved.filter((r) => r.kind === 'evidence').map((r) => wordSet(r.text)),
+    patterns: saved.filter((r) => r.kind === 'pattern').map((r) => wordSet(r.text)),
+    guidance: saved.filter((r) => r.kind === 'guidance').map((r) => wordSet(r.text)),
+  };
+  const fresh = [];
+  const add = (list, kind, valid, fallback, bucket) => {
+    for (const item of itemsWithProvenance(list, valid, fallback, ask[bucket].max)) {
+      const set = wordSet(item.text);
+      if (nearDuplicate(item.text, seenLists[bucket])) continue;
+      seenLists[bucket].push(set);
+      fresh.push({
+        kind,
+        category: item.category,
+        text: item.text,
+        origin: 'ai',
+        source_label: item.source_label || '',
+        source_id: '',
+        platform: item.platform || 'General',
+        sort_order: countOf(kind) + fresh.filter((row) => row.kind === kind).length,
+        data: { ...data },
+      });
+    }
+  };
+  add(result?.about, 'brief', ABOUT_CATEGORIES, 'personality', 'about');
+  add(
+    (Array.isArray(result?.points) ? result.points : []).map((item) => ({ ...item, source_label: clean(item?.source_label) || 'Profile or materials' })),
+    'evidence', POINT_CATEGORIES, 'fact', 'points',
+  );
+  const patternItems = (Array.isArray(result?.patterns) ? result.patterns : []).map((item) => {
+    const match = Object.keys(PATTERN_PLATFORMS).find((p) => p.toLowerCase() === String(item?.platform || '').trim().toLowerCase());
+    return { ...item, platform: match || 'General' };
+  });
+  add(patternItems, 'pattern', PATTERN_CATEGORIES, 'judgement', 'patterns');
+  add(result?.guidance, 'guidance', GUIDANCE_CATEGORIES, 'writing_principle', 'guidance');
+  return fresh;
+}
+
+/**
  * "Go deeper": read the same sources again and append only what is new.
  *
  * Nothing here deletes a row, so a longer portrait is always safe to build. The
@@ -641,43 +769,9 @@ export async function extendApplicantKnowledge({ inputs, existingRows = [], runA
   }, { quiet: true, fallbackTitle: 'Could not go deeper' });
   if (!isLive(outcome)) throw outcome?.error || new Error('The AI did not return anything. Your existing items were kept.');
 
-  const result = outcome.result || {};
-  const seenLists = {
-    about: saved.filter((r) => r.kind === 'brief').map((r) => wordSet(r.text)),
-    points: saved.filter((r) => r.kind === 'evidence').map((r) => wordSet(r.text)),
-    patterns: saved.filter((r) => r.kind === 'pattern').map((r) => wordSet(r.text)),
-    guidance: saved.filter((r) => r.kind === 'guidance').map((r) => wordSet(r.text)),
-  };
-  const fresh = [];
-  const add = (list, kind, valid, fallback, bucket) => {
-    for (const item of itemsWithProvenance(list, valid, fallback, ask[bucket].max)) {
-      const set = wordSet(item.text);
-      if (nearDuplicate(item.text, seenLists[bucket])) continue;
-      seenLists[bucket].push(set);
-      fresh.push({
-        kind,
-        category: item.category,
-        text: item.text,
-        origin: 'ai',
-        source_label: item.source_label || '',
-        source_id: '',
-        platform: item.platform || 'General',
-        sort_order: countOf(kind) + fresh.filter((row) => row.kind === kind).length,
-        data: { fingerprint: inputs.fingerprint, built_at: now(), model: model || null, appended: true },
-      });
-    }
-  };
-  add(result.about, 'brief', ABOUT_CATEGORIES, 'personality', 'about');
-  add(
-    (Array.isArray(result.points) ? result.points : []).map((item) => ({ ...item, source_label: clean(item?.source_label) || 'Profile or materials' })),
-    'evidence', POINT_CATEGORIES, 'fact', 'points',
-  );
-  const patternItems = (Array.isArray(result.patterns) ? result.patterns : []).map((item) => {
-    const match = Object.keys(PATTERN_PLATFORMS).find((p) => p.toLowerCase() === String(item?.platform || '').trim().toLowerCase());
-    return { ...item, platform: match || 'General' };
+  const fresh = additionRows(outcome.result || {}, {
+    saved, ask, countOf, data: { fingerprint: inputs.fingerprint, built_at: now(), model: model || null, appended: true },
   });
-  add(patternItems, 'pattern', PATTERN_CATEGORIES, 'judgement', 'patterns');
-  add(result.guidance, 'guidance', GUIDANCE_CATEGORIES, 'writing_principle', 'guidance');
 
   if (fresh.length) await createRows(fresh);
   const byKind = (kind) => fresh.filter((row) => row.kind === kind).length;
@@ -689,6 +783,495 @@ export async function extendApplicantKnowledge({ inputs, existingRows = [], runA
     counts: { about: byKind('brief'), points: byKind('evidence'), patterns: byKind('pattern'), guidance: byKind('guidance') },
     warnings,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Refresh: re-examine the saved items one by one instead of starting over
+// ---------------------------------------------------------------------------
+export const REFRESH_SCHEMA = {
+  type: 'object',
+  properties: {
+    decisions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          item: { type: 'number' },
+          action: { type: 'string', enum: ['keep', 'revise', 'remove'] },
+          text: { type: 'string' },
+          category: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+    },
+    additions: DEEPER_SCHEMA,
+  },
+};
+
+/** The most AI items one refresh may remove, as a share of the AI items it saw. */
+export const REFRESH_REMOVAL_CAP = 0.4;
+
+export function buildRefreshPrompt({ inputs, numbered, manualText, limits }) {
+  return `You are re-examining a saved, private knowledge base about one college applicant ITEM BY ITEM against the sources as they are now. This is maintenance, not a rebuild: keep what is still true and useful, update what is stale or weak, remove only what fails the standard, and add only what is genuinely missing. The items the applicant wrote themselves are shown for context and are never yours to change.
+
+${PERSON_FOCUS_RULES}
+
+FOR EVERY NUMBERED AI ITEM, DECIDE:
+- keep — still accurate, person-focused, and not a duplicate. Do not list it; unlisted items are kept.
+- revise — the substance is right but the item fails PERSON FIRST (it records mechanics, restates grades, summarises a document, or stops at "did X" without saying what it shows), is weaker than the sources now support, or is partly out of date. Return the complete replacement text (2-5 finished sentences) and, if it should move, the new category within the same kind.
+- remove — contradicted by the current sources, a near-duplicate of another item (name its number in the reason), or an assessment-mechanics note with nothing about the person in it. Prefer revising to removing whenever the item holds one true thing about the person; a removal destroys evidence and the applicant asked for that to be rare.
+Items marked [CHECK] were flagged by Atlas as reading like lab-notebook detail. Each one needs an explicit decision: revise it into something about the person, or remove it.
+
+THEN, UNDER "additions", ADD ONLY WHAT IS MISSING
+- Go through the sources once more and add an item only where no saved item (AI or applicant-written) covers it. New items follow the same standard: a complete observation about the person, with its evidence, in 2-5 finished sentences.
+- At most ${limits.about.max} new ABOUT items, ${limits.points.max} new personal points, ${limits.patterns.max} new patterns, ${limits.guidance.max} new guidance items. Zero is a fine answer.
+- Keep the whole base compact. After your pass it should be at most as long as before unless the sources genuinely grew.
+- Never invent an experience, number, relationship, result, or motive. Sample essays supply craft only, never another person's life; tips and references supply rules, never biography.
+
+SAVED AI ITEMS (numbered; decide each one)
+${numbered || '(none)'}
+
+WRITTEN BY THE APPLICANT (context only — never revise or remove these, and do not duplicate them)
+${manualText || '(none)'}
+
+STUDENT PROFILE (form data)
+${inputs.profileText || '(no profile saved)'}
+
+OWN MATERIALS
+${inputs.ownText || '(none)'}
+
+ESSAY DRAFTS
+${inputs.essayText || '(none)'}
+
+SAMPLE ESSAYS (craft only)
+${inputs.sampleText || '(none)'}
+
+TIPS, GUIDES, AND REFERENCES
+${inputs.guidanceText || '(none)'}
+
+Return JSON only: {"decisions": [{"item": <number>, "action": "revise|remove", "text": "<full replacement when revising>", "category": "<optional>", "reason": "<one sentence>"}], "additions": {"about": [...], "points": [...], "patterns": [...], "guidance": [...]}}`;
+}
+
+const CATEGORIES_BY_KIND = {
+  brief: ABOUT_CATEGORIES, evidence: POINT_CATEGORIES, pattern: PATTERN_CATEGORIES, guidance: GUIDANCE_CATEGORIES,
+};
+
+/** Runs `work` over `items` with at most `limit` in flight: a refresh touches many rows. */
+async function eachWithLimit(items, limit, work) {
+  const queue = [...items];
+  const failures = [];
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      try {
+        await work(item);
+      } catch (error) {
+        failures.push({ item, error });
+      }
+    }
+  });
+  await Promise.all(workers);
+  return failures;
+}
+
+/**
+ * Reads the model's decisions against the numbered list. Unknown numbers,
+ * repeated numbers, and revisions without text are dropped; the removal cap is
+ * applied in the order the model gave, so a model that wants to delete half the
+ * base can only delete the share Atlas allows.
+ */
+export function normalizeRefreshDecisions(raw, aiRows) {
+  const decisions = Array.isArray(raw?.decisions) ? raw.decisions : [];
+  const seen = new Set();
+  const out = { revise: [], remove: [], ignored: 0, capped: 0 };
+  // A tiny base (one or two items) cannot lose anything; otherwise at most the
+  // capped share, but always at least one so a plain duplicate can go.
+  const maxRemovals = aiRows.length >= 3 ? Math.max(1, Math.floor(aiRows.length * REFRESH_REMOVAL_CAP)) : 0;
+  for (const decision of decisions) {
+    const index = Number(decision?.item);
+    const row = Number.isInteger(index) && index >= 1 ? aiRows[index - 1] : null;
+    const action = String(decision?.action || '').toLowerCase();
+    if (!row || seen.has(row.id) || action === 'keep') { if (!row || seen.has(row?.id)) out.ignored += 1; continue; }
+    if (action === 'revise') {
+      const text = clean(decision?.text);
+      if (!text || text.split(/\s+/).length < 4) { out.ignored += 1; continue; }
+      const table = CATEGORIES_BY_KIND[row.kind] || {};
+      const category = table[String(decision?.category || '').toLowerCase()] ? String(decision.category).toLowerCase() : row.category;
+      seen.add(row.id);
+      out.revise.push({ row, text, category, reason: clean(decision?.reason) });
+    } else if (action === 'remove') {
+      if (out.remove.length >= maxRemovals) { out.capped += 1; continue; }
+      seen.add(row.id);
+      out.remove.push({ row, reason: clean(decision?.reason) });
+    } else {
+      out.ignored += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * The in-place update. Steps:
+ *  1. Show the model every AI item, numbered, with the sources as they are now.
+ *  2. Revise or remove the items it names (removals capped), keep the rest.
+ *  3. Append what is missing, under the same no-repeat rule as "Go deeper".
+ *  4. Stamp every surviving AI item with the current fingerprint, so the base is
+ *     no longer reported as stale.
+ * Manual items are never touched. Nothing is deleted before its replacement is
+ * written, and a failed model call changes nothing at all.
+ *
+ * @returns {Promise<{ counts: { revised: number, removed: number, added: number, kept: number, flagged: number }, warnings: string[] }>}
+ */
+export async function refreshApplicantKnowledge({
+  inputs, existingRows = [], runAI, isLive, createRows, updateRow, deleteRow,
+  model = null, now = () => new Date().toISOString(), concurrency = 4,
+}) {
+  if (inputs.empty) {
+    throw new Error('Add a profile, a material, or an essay draft first. Atlas builds this from what you have entered.');
+  }
+  const saved = (existingRows || []).filter((row) => String(row.text || '').trim());
+  const aiRows = saved.filter((row) => row.origin === 'ai' && !row.data?.dissected);
+  const manualRows = saved.filter((row) => row.origin !== 'ai');
+  if (!aiRows.length) {
+    return { counts: { revised: 0, removed: 0, added: 0, kept: 0, flagged: 0 }, warnings: ['There are no AI-built items to re-examine yet. Build the knowledge base first.'] };
+  }
+  const flagged = aiRows.filter((row) => looksLikeMechanicsDump(row.text));
+  const numbered = aiRows.map((row, i) => `${i + 1}. [${row.kind}/${row.category}]${looksLikeMechanicsDump(row.text) ? ' [CHECK]' : ''} ${row.text}`).join('\n');
+  const manualText = manualRows.map((row) => `- [${row.kind}] ${row.text}`).join('\n');
+  const limits = knowledgeLimitsFor(inputs.counts || {});
+  const countOf = (kind) => saved.filter((row) => row.kind === kind).length;
+  const headroom = (kind, base, ceiling) => Math.min(base, Math.max(0, ceiling - countOf(kind)));
+  const ask = {
+    about: { min: 0, max: headroom('brief', Math.ceil(limits.about.max / 2), MAX_LIMITS.about) },
+    points: { min: 0, max: headroom('evidence', Math.ceil(limits.points.max / 2), MAX_LIMITS.points) },
+    patterns: { min: 0, max: headroom('pattern', Math.ceil(limits.patterns.max / 2), MAX_LIMITS.patterns) },
+    guidance: { min: 0, max: headroom('guidance', Math.ceil(limits.guidance.max / 2), MAX_LIMITS.guidance) },
+  };
+
+  const outcome = await runAI({
+    prompt: buildRefreshPrompt({ inputs, numbered, manualText, limits: ask }),
+    response_json_schema: REFRESH_SCHEMA,
+  }, { quiet: true, fallbackTitle: 'Could not refresh the knowledge base' });
+  if (!isLive(outcome)) throw outcome?.error || new Error('The AI did not return anything. Your existing items were kept exactly as they were.');
+
+  const result = outcome.result || {};
+  const decisions = normalizeRefreshDecisions(result, aiRows);
+  const warnings = [];
+  const stamp = { fingerprint: inputs.fingerprint, refreshed_at: now(), model: model || null };
+
+  // 2. Revisions first, then additions, then removals — a removal only happens
+  //    after everything that replaces or complements it has been written.
+  const revisedIds = new Set();
+  const revisionFailures = await eachWithLimit(decisions.revise, concurrency, async ({ row, text, category, reason }) => {
+    const updated = await updateRow(row.id, {
+      text, category,
+      data: { ...(row.data || {}), ...stamp, revised_at: stamp.refreshed_at, revision_reason: reason || '' },
+    });
+    if (!updated) throw new Error('update not confirmed');
+    revisedIds.add(row.id);
+  });
+  if (revisionFailures.length) warnings.push(`${revisionFailures.length} item${revisionFailures.length === 1 ? '' : 's'} could not be updated and ${revisionFailures.length === 1 ? 'was' : 'were'} left as ${revisionFailures.length === 1 ? 'it was' : 'they were'}.`);
+
+  const removingIds = new Set(decisions.remove.map(({ row }) => row.id));
+  const fresh = additionRows(result.additions || {}, {
+    saved: saved.filter((row) => !removingIds.has(row.id)),
+    ask, countOf, data: { ...stamp, built_at: stamp.refreshed_at, appended: true },
+  });
+  if (fresh.length) await createRows(fresh);
+
+  let removed = 0;
+  for (const { row } of decisions.remove) {
+    try {
+      await deleteRow(row.id);
+      removed += 1;
+    } catch {
+      warnings.push(`“${clipToBoundary(row.text, 80, { marker: '…' })}” could not be removed and is still listed.`);
+    }
+  }
+  if (decisions.capped) {
+    warnings.push(`The model wanted to remove ${decisions.capped} more item${decisions.capped === 1 ? '' : 's'} than Atlas allows in one pass (at most ${Math.round(REFRESH_REMOVAL_CAP * 100)}% of the AI items). They were kept; run Refresh again if the next pass still objects to them.`);
+  }
+
+  // 4. Stamp the kept items so the base stops reporting itself as stale.
+  const kept = aiRows.filter((row) => !revisedIds.has(row.id) && !removingIds.has(row.id));
+  const stampFailures = await eachWithLimit(kept.filter((row) => row.data?.fingerprint !== inputs.fingerprint), concurrency, async (row) => {
+    const updated = await updateRow(row.id, { data: { ...(row.data || {}), ...stamp } });
+    if (!updated) throw new Error('update not confirmed');
+  });
+  if (stampFailures.length) warnings.push(`${stampFailures.length} kept item${stampFailures.length === 1 ? '' : 's'} could not be re-stamped, so the base may still show as out of date.`);
+
+  return {
+    counts: { revised: revisedIds.size, removed, added: fresh.length, kept: kept.length, flagged: flagged.length },
+    warnings,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Dissection: one material, filed by school / essay / platform / task
+// ---------------------------------------------------------------------------
+export const ESSAY_KINDS = [
+  'why_us', 'why_major', 'community', 'challenge', 'activity', 'identity', 'intellectual', 'talent',
+  'goals', 'contribution', 'explain', 'gratitude', 'micro', 'personal_statement', 'activities_list', 'other',
+];
+
+export const DISSECTION_SCHEMA = {
+  type: 'object',
+  properties: {
+    sections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          section: { type: 'string' },
+          school: { type: 'string' },
+          essay_kind: { type: 'string' },
+          platform: { type: 'string' },
+          audience: { type: 'string', enum: ['sample', 'own', 'guide', 'school'] },
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { category: { type: 'string' }, text: { type: 'string' } },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+/** Roles whose documents can hold parts that belong to one school or one essay. */
+const DISSECTABLE_ROLES = new Set(['auto', 'applicant_evidence', 'writing_draft', 'sample_craft', 'personal_context', 'advice', 'application_reference']);
+/** Shorter than this, a material has nothing to dissect. */
+const MIN_DISSECT_CHARS = 700;
+/** The most text one dissection call reads. */
+const DISSECT_TEXT_CHARS = 48000;
+
+/** What the dissection of a material depends on. Changes when the text, the analysis, or the row's own scope changes. */
+export function materialDissectionKey(material) {
+  const presented = presentMaterial(material);
+  return sourceKey(JSON.stringify([
+    presented?.id, presented?.title, presented?.type, presented?.analysis_role,
+    String(presented?.content || '').length, presented?.analysis?.analyzed_at || '',
+    String(presented?.notes || '').length,
+    presented?.target_university_id || '', presented?.target_essay_id || '', presented?.target_platform || '', presented?.target_task || '',
+  ]));
+}
+
+/** The text a dissection reads: the document, else the notes, plus the deep analysis when there is one. */
+function dissectionText(presented) {
+  const body = String(presented?.content || '').trim() || String(presented?.notes || '').trim();
+  const analysis = presented?.analysis?.status === 'ready' ? presented.analysis : null;
+  const absorbed = analysis
+    ? ['deep_read', 'significance'].map((key) => clean(analysis[key])).filter(Boolean).join('\n')
+    : '';
+  return clipToBoundary([body, absorbed ? `\n\nATLAS'S DEEP READING OF THIS MATERIAL:\n${absorbed}` : ''].join(''), DISSECT_TEXT_CHARS);
+}
+
+/** Whether a material is worth a dissection call at all. */
+export function canDissectMaterial(material) {
+  const presented = presentMaterial(material);
+  if (!presented) return false;
+  const role = materialAnalysisRole(presented);
+  if (!DISSECTABLE_ROLES.has(role)) return false;
+  const text = String(presented.content || '').trim() || String(presented.notes || '').trim();
+  return text.length >= MIN_DISSECT_CHARS;
+}
+
+/**
+ * Materials whose sections have not been filed yet, or whose text changed
+ * since they were. Rows written by a dissection carry `data.dissection_key`.
+ */
+export function materialsNeedingDissection(materials, rows) {
+  const filed = new Map();
+  for (const row of rows || []) {
+    if (row?.data?.dissected && row.source_id) filed.set(String(row.source_id), row.data.dissection_key || '');
+  }
+  return (materials || []).filter((material) => {
+    if (!canDissectMaterial(material)) return false;
+    const key = materialDissectionKey(material);
+    return filed.get(String(material.id)) !== key;
+  });
+}
+
+/** Dissected rows whose material no longer exists, or whose material changed. */
+export function staleDissectionRows(materials, rows) {
+  const keys = new Map((materials || []).map((material) => [String(material.id), materialDissectionKey(material)]));
+  return (rows || []).filter((row) => row?.data?.dissected && row.source_id
+    && (!keys.has(String(row.source_id)) || keys.get(String(row.source_id)) !== row.data.dissection_key));
+}
+
+export function buildDissectionPrompt({ material, text, universities = [], essays = [] }) {
+  const presented = presentMaterial(material);
+  const role = materialAnalysisRole(presented);
+  const schools = universities.map((u) => u.name).filter(Boolean);
+  const essayList = essays.map((e) => `${e.title || 'Untitled'}${e.university_name ? ` (${e.university_name})` : ''}: ${clipToBoundary(String(e.prompt || ''), 140, { marker: '…' }) || '(no prompt)'}`);
+  return `You are filing ONE material into the sections an admissions reader would keep apart, so that later drafting reads only the part that is relevant. A successful full application is an activities list plus a personal statement plus several supplements for several schools; a guide has chapters per essay type; the applicant's own notes may address one school. Each of those parts teaches something different and must not be mixed into one pile.
+
+THE MATERIAL
+Title: ${presented.title || '(untitled)'}
+Type: ${presented.type || 'document'} · Lens: ${role}
+${presented.notes ? `Applicant's context notes: ${clipToBoundary(presented.notes, 600, { marker: '…' })}\n` : ''}
+<<<MATERIAL
+${text}
+MATERIAL>>>
+
+THE APPLICANT'S OWN LIST (match sections to these when they fit; never force a match)
+Schools: ${schools.length ? schools.join('; ') : '(none saved)'}
+Essays: ${essayList.length ? `\n- ${essayList.join('\n- ')}` : '(none saved)'}
+
+WHAT TO RETURN
+Return [] in "sections" when the material has no part that belongs to a specific school, essay kind, platform, or task — a resume, a transcript, or a single general reflection usually has none, and that is the correct answer.
+Otherwise, one entry per distinct section, at most 8:
+- "section": a short name a reader would recognise ("Stanford — roommate essay", "Activities list", "Common App personal statement", "How to write a why-us essay").
+- "school": the university the section is for, exactly as written in the material, or "".
+- "essay_kind": one of ${ESSAY_KINDS.join(', ')}.
+- "platform": common_app, uc, ucas, coalition, direct, or "".
+- "audience": "sample" (someone else's successful work), "own" (the applicant's own writing or notes), "guide" (advice or reference about how to write), or "school" (information about a school, its readers, atmosphere, or student body).
+- "items": 1-4 items, each {"category", "text"}, 2-3 finished sentences, and specific:
+    · for "sample": the craft that made THIS section work for THIS reader — the move, why it lands, what a weak imitation gets wrong. Never copy the writer's life. Categories: opening, structure, evidence, reflection, voice, length, judgement.
+    · for "own": what this part shows about the applicant as a person, usable for this essay kind — their mindset, how they act, what drives them — with the concrete evidence. Categories: personality, actions, mindset, goals, achievement, experience, value, fact.
+    · for "guide": the decision rule a drafter can obey without reading the guide. Categories: writing_principle, application_rule, requirement, warning, process.
+    · for "school": what this school's readers reward, the atmosphere, the student body, programmes named — for judging fit. Categories: requirement, judgement.
+Keep it compact: a section with nothing specific to teach is left out. Return JSON only: {"sections": [...]}`;
+}
+
+const ESSAY_KIND_WORDS = {
+  why_us: /why (us|this|our|here)|why [a-z .]+(university|college|school)/i,
+  why_major: /why .{0,20}(major|field|subject|course|programme|program)/i,
+  community: /community|roommate|belong|neighbo/i,
+  challenge: /challenge|setback|failure|obstacle|disagree/i,
+  activity: /activit|extracurricular|leadership/i,
+  identity: /identity|background|heritage|culture|perspective/i,
+  intellectual: /intellectual|curio|idea|topic/i,
+  talent: /talent|skill/i,
+  goals: /future|career|goal|aspir/i,
+  contribution: /contribut|unique|bring/i,
+  explain: /additional|explain|circumstance/i,
+  gratitude: /grateful|gratitude|thank/i,
+  micro: /short answer|micro/i,
+  personal_statement: /personal statement|common app essay|main essay/i,
+};
+
+/** The essay kinds an applicant's own essay answers, for matching dissected sections. */
+export function essayKindsFor(essay) {
+  if (!essay) return [];
+  const kinds = new Set();
+  if (essay.type === 'personal_statement') kinds.add('personal_statement');
+  if (essay.type === 'activity') kinds.add('activity');
+  if (essay.type === 'why_this_school') kinds.add('why_us');
+  if (essay.type === 'other') kinds.add('other');
+  for (const shape of detectSupplementShapes({ prompt: essay.prompt || '', limit: Number(essay.word_limit) || 0, unit: limitUnitFor(essay) })) {
+    kinds.add(shape.key);
+  }
+  for (const [kind, pattern] of Object.entries(ESSAY_KIND_WORDS)) {
+    if (pattern.test(String(essay.title || ''))) kinds.add(kind);
+  }
+  return [...kinds];
+}
+
+/**
+ * Where a dissected section belongs in the applicant's own list.
+ *
+ * A school named in the material is matched to a saved university by name; an
+ * essay kind is matched to that university's essays (or to the shared essays
+ * when the kind is a personal statement). A section for a school the applicant
+ * is not applying to keeps its essay kind only, so its craft still reaches the
+ * right KIND of essay without ever being bound to the wrong school.
+ */
+export function dissectionTargets(section, { universities = [], essays = [] } = {}) {
+  const school = clean(section?.school);
+  const kind = ESSAY_KINDS.includes(String(section?.essay_kind || '').toLowerCase()) ? String(section.essay_kind).toLowerCase() : 'other';
+  const platformRaw = String(section?.platform || '').toLowerCase().trim();
+  const platform = PLATFORMS[platformRaw] ? platformRaw : '';
+  const university = school ? universities.find((u) => universityNamesMatch(u.name, school)) || null : null;
+  const candidates = essays.filter((essay) => {
+    if (kind === 'personal_statement') return essay.scope === 'common' || (!essay.scope && !essay.university_id);
+    if (!university) return false;
+    return String(essay.university_id || '') === String(university.id);
+  });
+  const essay = kind !== 'activities_list' && kind !== 'other'
+    ? candidates.find((item) => essayKindsFor(item).includes(kind)) || null
+    : null;
+  return {
+    target_university_id: university ? String(university.id) : null,
+    target_essay_id: essay ? String(essay.id) : null,
+    target_platform: !university && !essay && platform ? platform : null,
+    target_task: kind === 'activities_list' ? 'activity' : null,
+    shape_keys: kind === 'other' ? [] : [kind],
+    school,
+    kind,
+  };
+}
+
+const AUDIENCE_KIND = { sample: 'pattern', own: 'evidence', guide: 'guidance', school: 'guidance' };
+
+/**
+ * Reads one material and writes its sections as targeted rows.
+ *
+ * Rows from an earlier dissection of the same material are removed only after
+ * the new ones exist. A material with nothing to file produces no rows, and a
+ * failed model call changes nothing.
+ *
+ * @returns {Promise<{ sections: number, rows: number, warnings: string[] }>}
+ */
+export async function dissectMaterialKnowledge({
+  material, existingRows = [], universities = [], essays = [], runAI, isLive, createRows, deleteRow,
+  model = null, now = () => new Date().toISOString(),
+}) {
+  const presented = presentMaterial(material);
+  if (!canDissectMaterial(presented)) return { sections: 0, rows: 0, warnings: [] };
+  const text = dissectionText(presented);
+  const outcome = await runAI({
+    prompt: buildDissectionPrompt({ material: presented, text, universities, essays }),
+    response_json_schema: DISSECTION_SCHEMA,
+  }, { quiet: true, fallbackTitle: `Could not dissect “${presented.title || 'material'}”` });
+  if (!isLive(outcome)) throw outcome?.error || new Error('The AI did not return anything for this material.');
+
+  const key = materialDissectionKey(presented);
+  const stamp = { dissected: true, dissection_key: key, source_key: key, built_at: now(), model: model || null, fingerprint: null };
+  const sections = (Array.isArray(outcome.result?.sections) ? outcome.result.sections : []).slice(0, 8);
+  const fresh = [];
+  const region = presented.target_platform ? platformRegion(presented.target_platform) : null;
+  for (const section of sections) {
+    const audience = ['sample', 'own', 'guide', 'school'].includes(String(section?.audience || '')) ? section.audience : (isSampleMaterial(presented) ? 'sample' : isGuidanceMaterial(presented) ? 'guide' : 'own');
+    const rowKind = AUDIENCE_KIND[audience];
+    const targets = dissectionTargets(section, { universities, essays });
+    const label = clean(section?.section) || (targets.school ? `${targets.school} — ${targets.kind}` : targets.kind);
+    const valid = CATEGORIES_BY_KIND[rowKind];
+    const fallback = rowKind === 'pattern' ? 'judgement' : rowKind === 'guidance' ? (audience === 'school' ? 'requirement' : 'writing_principle') : 'experience';
+    for (const item of itemsWithProvenance(section?.items, valid, fallback, 4)) {
+      const own = audience === 'own' && ABOUT_CATEGORIES[item.category];
+      fresh.push({
+        kind: own ? 'brief' : rowKind,
+        category: item.category,
+        text: item.text,
+        origin: 'ai',
+        source_label: `${presented.title || 'Material'} · ${label}`,
+        source_id: String(presented.id),
+        platform: rowKind === 'pattern'
+          ? (targets.target_platform ? platformRegion(targets.target_platform) : region || 'General')
+          : 'General',
+        sort_order: fresh.length,
+        target_university_id: presented.target_university_id || targets.target_university_id,
+        target_essay_id: presented.target_essay_id || targets.target_essay_id,
+        target_platform: presented.target_platform || targets.target_platform,
+        target_task: presented.target_task || targets.target_task,
+        data: { ...stamp, section: label, school: targets.school, shape_keys: targets.shape_keys, audience },
+      });
+    }
+  }
+  if (fresh.length) await createRows(fresh);
+  const warnings = [];
+  const old = (existingRows || []).filter((row) => row?.data?.dissected && String(row.source_id || '') === String(presented.id));
+  for (const row of old) {
+    try {
+      await deleteRow(row.id);
+    } catch {
+      warnings.push(`An older section from “${presented.title || 'this material'}” could not be removed.`);
+    }
+  }
+  return { sections: sections.length, rows: fresh.length, warnings };
 }
 
 /**
@@ -737,7 +1320,12 @@ export function knowledgeCoverage(rows, inputs) {
 /** The saved item's own scope, as the model sees it. '' when it is general. */
 function targetLabel(row, options) {
   const label = contextTargetLabel(row, options);
-  return label === 'All applications and tasks' ? '' : ` · ${label}`;
+  const scope = label === 'All applications and tasks' ? '' : label;
+  // A section filed from a material names itself ("Stanford — roommate essay"),
+  // so the drafter knows which part of which document it is reading.
+  const section = row?.data?.dissected ? clean(row.data.section) : '';
+  const parts = [scope, section && section !== scope ? section : ''].filter(Boolean);
+  return parts.length ? ` · ${parts.join(' · ')}` : '';
 }
 
 /**
@@ -748,15 +1336,42 @@ function targetLabel(row, options) {
  * a different school must never appear at all. Higher rank means it is shown
  * first and is the last thing dropped when the prompt budget is tight.
  */
-function specificityRank(row, { universityId = '', essayId = '' } = {}) {
+function specificityRank(row, { universityId = '', essayId = '', shapeKeys = [] } = {}) {
   const essayTarget = String(row?.target_essay_id || '');
   const universityTarget = String(row?.target_university_id || '');
-  if (essayId && essayTarget && essayTarget === String(essayId)) return 4;
-  if (universityId && universityTarget && universityTarget === String(universityId)) return 3;
+  const shapes = rowShapeKeys(row);
+  if (essayId && essayTarget && essayTarget === String(essayId)) return 5;
+  if (universityId && universityTarget && universityTarget === String(universityId)) return 4;
+  // Filed under this KIND of essay (a roommate essay, a why-us) by a dissection,
+  // for any school: the craft transfers, so it outranks the general items.
+  if (shapes.length && shapeKeys.some((key) => shapes.includes(key))) return 3;
   // Bound to a platform or a task: relevant, but not to this particular school.
   if (String(row?.target_platform || '') || String(row?.target_task || '')) return 2;
   if (universityTarget || essayTarget) return 0;
   return 1;
+}
+
+/** The essay kinds a dissected row was filed under; [] for ordinary rows. */
+function rowShapeKeys(row) {
+  const keys = row?.data?.shape_keys;
+  return Array.isArray(keys) ? keys.map((key) => String(key)) : [];
+}
+
+/**
+ * Whether a row filed under an essay kind belongs in this prompt.
+ *
+ * A row the dissection filed under "community" (a roommate essay) must not be
+ * read while drafting a why-major essay even though both are general-scope
+ * rows. Rows without shape keys are unaffected, and when the job is not an
+ * essay at all (no essay, no shapes) shaped rows stay out unless they are
+ * bound to this very school or essay.
+ */
+function shapeAllows(row, { shapeKeys = [], universityId = '', essayId = '' } = {}) {
+  const shapes = rowShapeKeys(row);
+  if (!shapes.length) return true;
+  if (essayId && String(row?.target_essay_id || '') === String(essayId)) return true;
+  if (universityId && String(row?.target_university_id || '') === String(universityId)) return true;
+  return shapeKeys.some((key) => shapes.includes(key));
 }
 
 /**
@@ -771,11 +1386,17 @@ function specificityRank(row, { universityId = '', essayId = '' } = {}) {
  */
 export function applicantKnowledgeForPrompt(rows, {
   platform = '', universityId = '', essayId = '', essayIds = [], task = '',
-  universities = [], essays = [], maxChars = 24000,
+  universities = [], essays = [], maxChars = 24000, essay = null,
 } = {}) {
+  // The kinds of essay being written, so sections a dissection filed under
+  // "roommate essay" reach the roommate essay and nothing else.
+  const current = essay || (essayId ? (essays || []).find((item) => String(item?.id) === String(essayId)) : null);
+  const shapeKeys = current ? essayKindsFor(current) : task === 'activity' ? ['activities_list', 'activity'] : [];
+  const scope = { universityId, essayId, shapeKeys };
   const usable = filterByContextTarget(rows, { universityId, essayId, essayIds, platform, task })
     .filter((r) => String(r.text || '').trim())
-    .map((row) => ({ row, rank: specificityRank(row, { universityId, essayId }) }))
+    .filter((row) => shapeAllows(row, scope))
+    .map((row) => ({ row, rank: specificityRank(row, scope) }))
     // Most specific first; the database order breaks ties, so two runs match.
     .sort((a, b) => b.rank - a.rank);
   if (!usable.length) return '';
