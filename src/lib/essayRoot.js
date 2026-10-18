@@ -88,6 +88,10 @@ function extractAlternatives(root, { selectionLike }) {
   return parts.length >= 2 ? parts.slice(0, 8) : [];
 }
 
+// Style language must NOT be treated as a content constraint to match literally —
+// e.g. "Be natural" or "looks like an actual note" is a voice rule, not a topic.
+const STYLE_SIGNALS = /\b(be natural|sounds? like|looks? like|actual note|human|authentic|conversational|simple words?|plain language|not like ai|don't sound|avoid ai|tone|voice|style)\b/i;
+
 /** Sentences that read as instructions about the essay, not as topics to cover. */
 function extractConstraints(root) {
   const sentences = String(root || '')
@@ -100,11 +104,32 @@ function extractConstraints(root) {
     const forbidden = /\b(do not|don't|dont|never|avoid|exclude|without|no\b)/i.test(sentence);
     const required = /\b(must|only|needs? to|make sure|keep|include|mention|use)\b/i.test(sentence);
     if (!forbidden && !required) continue;
+    // Style sentences are voice rules — they intentionally do not need literal word overlap
+    // with the draft; verifying them by keyword would misclassify good drafts as ignored.
+    if (STYLE_SIGNALS.test(sentence)) continue;
     const words = tokens(sentence);
     if (!words.length) continue;
     out.push({ text: sentence, polarity: forbidden ? 'avoid' : 'require', words });
   }
   return out.slice(0, 8);
+}
+
+/** Sentences that are style/voice instructions — "Be natural", "like an actual note". */
+function extractStyleDirectives(root) {
+  const sentences = String(root || '')
+    .split(/(?<=[.!?])\s+|\r?\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const out = [];
+  for (const sentence of sentences) {
+    if (!STYLE_SIGNALS.test(sentence)) continue;
+    out.push(sentence);
+  }
+  // Also catch a bare short root that IS the style directive (no sentence punctuation).
+  if (!out.length && STYLE_SIGNALS.test(String(root || '').trim()) && String(root || '').trim().split(/\s+/).length <= 10) {
+    out.push(String(root || '').trim());
+  }
+  return out.slice(0, 6);
 }
 
 /**
@@ -114,19 +139,27 @@ function extractConstraints(root) {
 export function interpretRoot(root) {
   const text = String(root || '').trim();
   if (!text) {
-    return { text: '', hasRoot: false, chooseOne: false, includeAll: false, alternatives: [], constraints: [], words: [] };
+    return { text: '', hasRoot: false, chooseOne: false, includeAll: false, alternatives: [], constraints: [], words: [], styleDirectives: [], isStyleOnly: false };
   }
   const chooseOne = SELECT_ONE.test(text) && !INCLUDE_ALL.test(text);
   const includeAll = INCLUDE_ALL.test(text);
   const alternatives = extractAlternatives(text, { selectionLike: chooseOne || includeAll || /\b(below|following|options|either)\b/i.test(text) });
+  const constraints = extractConstraints(text);
+  const styleDirectives = extractStyleDirectives(text);
+  const words = tokens(text);
+  // A root like "Be natural" or "Make it look like an actual note" is entirely style.
+  const isStyleOnly = styleDirectives.length > 0 && alternatives.length === 0 && constraints.length === 0
+    && text.split(/(?<=[.!?])\s+|\r?\n/).filter(Boolean).every((sentence) => STYLE_SIGNALS.test(sentence));
   return {
     text,
     hasRoot: true,
     chooseOne,
     includeAll,
     alternatives: alternatives.map((label) => ({ label, words: tokens(label) })),
-    constraints: extractConstraints(text),
-    words: tokens(text),
+    constraints,
+    styleDirectives,
+    isStyleOnly,
+    words,
   };
 }
 
@@ -195,15 +228,14 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
   const overall = coverageOf(root.words, draftWords);
   const statusOf = () => {
     if (root.alternatives.length >= 2) {
-      // "Pick the most effective one" answered with a paragraph about each of
-      // them: the direction was read as an outline instead of a choice.
       if (root.chooseOne && matched.length >= 2) return 'crammed';
       if (matched.length === 0) return 'ignored';
-      // "Include all of these" and only some arrived: worth telling, not worth
-      // rewriting the essay for, because the model may have found one unusable.
       if (root.includeAll && matched.length < root.alternatives.length) return 'uncertain';
       return 'respected';
     }
+    // Meaning and tone cannot be verified by lexical overlap. Do not claim
+    // success, or trigger a destructive rewrite, on that basis.
+    if (root.styleDirectives?.length) return 'uncertain';
     if (overall < 0.15) return 'ignored';
     if (overall < 0.35) return 'uncertain';
     return 'respected';
@@ -226,7 +258,9 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
   return {
     ok: status === 'respected' || status === 'uncertain',
     status,
-    message: messages[status] || '',
+    message: root.styleDirectives?.length && status === 'uncertain'
+      ? 'Voice instructions were sent to the AI. Keyword checks cannot verify tone; review the wording yourself.'
+      : messages[status] || '',
     correction: corrections[status] || (violations.length
       ? `The draft also breaks a stated rule: ${violations.join(' | ')}. Fix that without changing the story.`
       : ''),
