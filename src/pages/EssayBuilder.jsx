@@ -545,6 +545,7 @@ export default function EssayBuilder() {
     const savesInstructions = Object.prototype.hasOwnProperty.call(fields, 'edit_instructions');
     if (savesInstructions) rememberEditInstructions(essayRow.id, fields.edit_instructions);
     let rootDurable = true;
+    let instructionsDurable = true;
     let updated;
     try {
       updated = await updateEssayInOrder(essayRow.id, fields);
@@ -584,59 +585,33 @@ export default function EssayBuilder() {
         clearLocalEditInstructions(essayRow.id);
         setMissingEssayColumns((prev) => prev.filter((column) => column !== 'edit_instructions'));
       } else if (!inDatabase) {
+        instructionsDurable = rememberEditInstructions(essayRow.id, fields.edit_instructions);
         setMissingEssayColumns((prev) => (prev.includes('edit_instructions') ? prev : [...prev, 'edit_instructions']));
       }
     }
     setEssays((prev) => prev.map((row) => mergePersistedFields(row, essayRow, fields, updated)));
     setSelectedEssay((prev) => mergePersistedFields(prev, essayRow, fields, updated));
-    clearDirtyFields(rootDurable ? fields : Object.keys(fields).filter((field) => field !== 'draft_anchor'), essayRow.id);
+    clearDirtyFields(Object.keys(fields).filter((field) => (field !== 'draft_anchor' || rootDurable) && (field !== 'edit_instructions' || instructionsDurable)), essayRow.id);
+    if (!rootDurable || !instructionsDurable) throw new Error('Instructions could not be stored in the database or this browser. Keep this page open and retry.');
     return updated;
   };
 
   /** Save the latest direction independently from the rest of the essay. */
   const saveRootForEssay = async (essayRow) => {
     if (!essayRow?.id) return { ok: false, persisted: false };
-    const fields = { draft_anchor: String(essayRow.draft_anchor || '') };
-    const locallySaved = rememberDraftAnchor(essayRow.id, fields.draft_anchor);
+    const fields = {
+      draft_anchor: String(essayRow.draft_anchor || ''),
+      edit_instructions: String(essayRow.edit_instructions || ''),
+    };
     setRootSaving(true);
     try {
-      if (missingEssayColumns.includes('draft_anchor')) {
-        if (!locallySaved) throw new Error('This browser could not store the root, and the database is missing the draft_anchor column. Run supabase/schema.sql and keep this page open.');
-        clearDirtyFields(fields, essayRow.id);
-        return { ok: true, persisted: false };
-      }
-      const updated = await updateEssayInOrder(essayRow.id, fields);
-      if (!updated) throw new Error('Atlas could not confirm the database save. The root remains in the editor; keep this page open and retry.');
+      const updated = await persist(fields, essayRow);
       const missing = base44.capabilities?.missingOptionalColumns?.() || [];
-      const persisted = Object.prototype.hasOwnProperty.call(updated, 'draft_anchor') && !missing.includes('draft_anchor');
-      const latestRoot = selectedEssayRef.current?.id === essayRow.id
-        ? String(selectedEssayRef.current.draft_anchor || '')
-        : String(essayRow.draft_anchor || '');
-      const rootUnchanged = latestRoot === fields.draft_anchor;
-      if (rootUnchanged) {
-        setEssays((prev) => prev.map((row) => row.id === essayRow.id
-          ? { ...row, draft_anchor: fields.draft_anchor, ...(updated.updated_at ? { updated_at: updated.updated_at } : {}) }
-          : row));
-        setSelectedEssay((prev) => prev?.id === essayRow.id
-          ? { ...prev, draft_anchor: fields.draft_anchor, ...(updated.updated_at ? { updated_at: updated.updated_at } : {}) }
-          : prev);
-      }
-      let localSaved = locallySaved;
-      if (!persisted) {
-        if (rootUnchanged) localSaved = rememberDraftAnchor(essayRow.id, fields.draft_anchor);
-        setMissingEssayColumns((prev) => (prev.includes('draft_anchor') ? prev : [...prev, 'draft_anchor']));
-      } else {
-        if (rootUnchanged) clearLocalDraftAnchor(essayRow.id);
-        setMissingEssayColumns((prev) => prev.filter((column) => column !== 'draft_anchor'));
-      }
-      const savedSomewhere = persisted || localSaved;
-      clearDirtyFields(savedSomewhere ? fields : [], essayRow.id);
-      if (!savedSomewhere && rootUnchanged) {
-        throw new Error('Neither the database nor this browser could store the essay root. Run supabase/schema.sql and keep this page open.');
-      }
-      return { ok: savedSomewhere, persisted, error: persisted ? null : undefined };
+      const persisted = Object.keys(fields).every((key) => !missing.includes(key)
+        && updated[key] === fields[key]);
+      return { ok: true, persisted };
     } catch (error) {
-      return { ok: locallySaved, persisted: false, error };
+      return { ok: false, persisted: false, error };
     } finally {
       setRootSaving(false);
     }
@@ -692,7 +667,7 @@ export default function EssayBuilder() {
       });
       return;
     }
-    toast.success(result.persisted ? 'Essay root saved' : 'Essay root saved in this browser', {
+    toast.success(result.persisted ? 'Root and instructions saved' : 'Root and instructions saved in this browser', {
       description: result.persisted
         ? 'This is the direction future drafts will start from.'
         : 'The AI will use this root here. Run supabase/schema.sql to sync it across devices.',
@@ -2043,7 +2018,7 @@ export default function EssayBuilder() {
                   </div>
                   <Button onClick={handleSaveRoot} variant="outline" size="sm" disabled={rootSaving || saving || busy !== null}>
                     {rootSaving ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1.5" />}
-                    {rootSaving ? 'Saving root…' : 'Save root'}
+                    {rootSaving ? 'Saving…' : 'Save root & instructions'}
                   </Button>
                 </div>
                 <Textarea
@@ -2051,7 +2026,7 @@ export default function EssayBuilder() {
                   value={selectedEssay.draft_anchor || ''}
                   disabled={rootSaving || saving || busy !== null}
                   onChange={(e) => handleFieldChange('draft_anchor', e.target.value)}
-                  placeholder="Add the moments, interests, questions, relationships, or qualities you want the draft to grow from."
+                  placeholder="Tell the AI what to write about or how to sound, e.g. Be natural; make it read like an actual note."
                   rows={4}
                   className="bg-background/70"
                 />
@@ -2070,7 +2045,7 @@ export default function EssayBuilder() {
                         ? `, plus ${rootReading.constraints.length} stated rule${rootReading.constraints.length === 1 ? '' : 's'} it must not break` : ''}.
                       {rootReading.alternatives.length >= 2 && !rootReading.chooseOne && !rootReading.includeAll
                         ? ' Say “pick the strongest one” or “include all of them” if you want the other reading.' : ''}
-                      {' '}Every draft is checked against this before it is shown to you.
+                      {' '}Content checks catch some missed directions; voice and tone still need your review.
                     </span>
                   </p>
                 )}

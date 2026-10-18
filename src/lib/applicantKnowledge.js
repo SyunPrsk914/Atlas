@@ -1154,9 +1154,9 @@ const DISSECT_TEXT_CHARS = 48000;
 export function materialDissectionKey(material) {
   const presented = presentMaterial(material);
   return sourceKey(JSON.stringify([
-    presented?.id, presented?.title, presented?.type, presented?.analysis_role,
-    String(presented?.content || '').length, presented?.analysis?.analyzed_at || '',
-    String(presented?.notes || '').length,
+    'person-first-v2', presented?.id, presented?.title, presented?.type, presented?.analysis_role,
+    String(presented?.content || ''), presented?.analysis?.analyzed_at || '',
+    String(presented?.notes || ''),
     presented?.target_university_id || '', presented?.target_essay_id || '', presented?.target_platform || '', presented?.target_task || '',
   ]));
 }
@@ -1224,6 +1224,7 @@ Schools: ${schools.length ? schools.join('; ') : '(none saved)'}
 Essays: ${essayList.length ? `\n- ${essayList.join('\n- ')}` : '(none saved)'}
 
 WHAT TO RETURN
+Personal experiences, values, goals and biographical facts are shared across ALL applications, including when found in a UCAS or school-specific draft. Extract them as audience "own", school "", platform "", essay_kind "other". The source title is provenance, NEVER a restriction. Only writing guidance or school references may be school/platform-specific. Match school references only to the saved school list; never invent a target. Separate personal evidence from school-specific fit claims.
 Return [] in "sections" when the material has no part that belongs to a specific school, essay kind, platform, or task — a resume, a transcript, or a single general reflection usually has none, and that is the correct answer.
 Otherwise, one entry per distinct section, at most 8:
 - "section": a short name a reader would recognise ("Stanford — roommate essay", "Activities list", "Common App personal statement", "How to write a why-us essay").
@@ -1343,13 +1344,13 @@ export async function dissectMaterialKnowledge({
     const targets = dissectionTargets(section, { universities, essays });
     // The applicant's own life is one independent value: an insight drawn from
     // their writing or story belongs to EVERY application, so a school named in
-    // the prose must never turn it into school-specific knowledge. Only a target
-    // the applicant set on the material itself can bind an "own" row. A guide or
+    // the prose or the source scope must never turn it into school-specific
+    // knowledge. A guide or
     // a school-reference section keeps its binding — those are for one school.
     const ownLife = audience === 'own';
     const ownUniversity = ownLife ? null : targets.target_university_id;
     const ownEssay = ownLife ? null : targets.target_essay_id;
-    const label = clean(section?.section) || (targets.school ? `${targets.school} — ${targets.kind}` : targets.kind);
+    const label = ownLife ? 'Personal evidence — all applications' : clean(section?.section) || (targets.school ? `${targets.school} — ${targets.kind}` : targets.kind);
     // An "own" section may teach the portrait OR the evidence list, so its items
     // are validated against BOTH category tables — otherwise a personality or
     // mindset item is silently downgraded to a fact here and never reaches the
@@ -1371,17 +1372,29 @@ export async function dissectMaterialKnowledge({
           ? (targets.target_platform ? platformRegion(targets.target_platform) : region || 'General')
           : 'General',
         sort_order: fresh.length,
-        target_university_id: presented.target_university_id || ownUniversity,
-        target_essay_id: presented.target_essay_id || ownEssay,
-        target_platform: presented.target_platform || targets.target_platform,
-        target_task: presented.target_task || targets.target_task,
-        data: { ...stamp, section: label, school: targets.school, shape_keys: targets.shape_keys, audience },
+        target_university_id: ownLife ? null : (presented.target_university_id || ownUniversity),
+        target_essay_id: ownLife ? null : (presented.target_essay_id || ownEssay),
+        target_platform: ownLife ? null : (presented.target_platform || targets.target_platform),
+        target_task: ownLife ? null : (presented.target_task || targets.target_task),
+        data: { ...stamp, previous_sections: [], section: label, school: ownLife ? '' : targets.school, shape_keys: ownLife ? [] : targets.shape_keys, audience },
       });
     }
   }
-  if (fresh.length) await createRows(fresh);
   const warnings = [];
-  const old = (existingRows || []).filter((row) => row?.data?.dissected && String(row.source_id || '') === String(presented.id));
+  if (!fresh.length) return { sections: 0, rows: 0, warnings: ['No usable sections returned; existing sections were kept.'] };
+  // Keep a recoverable record of the previous AI extraction in replacement
+  // metadata. User-edited rows stay live, and original materials never change.
+  const previous = existingRows.filter((row) => row.origin === 'ai' && row.data?.dissected
+    && String(row.source_id || '') === String(presented.id));
+  fresh[0].data.previous_sections = previous.map(({ id, text, category, kind, source_label, data }) => ({
+    id, text, category, kind, source_label,
+    data: { ...data, previous_sections: undefined },
+  }));
+  const created = await createRows(fresh);
+  if (!Array.isArray(created) || created.length !== fresh.length) {
+    throw new Error('Replacement sections were not fully confirmed. Existing sections were kept.');
+  }
+  const old = (existingRows || []).filter((row) => row.origin === 'ai' && row?.data?.dissected && String(row.source_id || '') === String(presented.id));
   for (const row of old) {
     try {
       await deleteRow(row.id);
@@ -1485,6 +1498,7 @@ function specificityRank(row, { universityId = '', essayId = '', shapeKeys = [] 
 
 /** The essay kinds a dissected row was filed under; [] for ordinary rows. */
 function rowShapeKeys(row) {
+  if (row.kind === 'brief' || row.kind === 'evidence') return [];
   const keys = row?.data?.shape_keys;
   return Array.isArray(keys) ? keys.map((key) => String(key)) : [];
 }
@@ -1525,7 +1539,11 @@ export function applicantKnowledgeForPrompt(rows, {
   const current = essay || (essayId ? (essays || []).find((item) => String(item?.id) === String(essayId)) : null);
   const shapeKeys = current ? essayKindsFor(current) : task === 'activity' ? ['activities_list', 'activity'] : [];
   const scope = { universityId, essayId, shapeKeys };
-  const usable = filterByContextTarget(rows, { universityId, essayId, essayIds, platform, task })
+  // Legacy AI personal rows may carry faulty source-derived targets. Share them
+  // at retrieval time too; manual scopes remain an explicit user choice.
+  const sharedRows = rows.map((row) => row.origin === 'ai' && ['brief', 'evidence'].includes(row.kind)
+    ? { ...row, target_university_id: null, target_essay_id: null, target_platform: null, target_task: null } : row);
+  const usable = filterByContextTarget(sharedRows, { universityId, essayId, essayIds, platform, task })
     .filter((r) => String(r.text || '').trim())
     .filter((row) => shapeAllows(row, scope))
     .map((row) => ({ row, rank: specificityRank(row, scope) }))

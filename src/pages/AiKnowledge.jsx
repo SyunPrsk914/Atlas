@@ -338,8 +338,8 @@ export default function AiKnowledge() {
   };
 
   /** Files each unfiled material into sections (school, essay kind, platform, task). */
-  const handleDissect = async () => {
-    await runJob((options) => startKnowledgeDissection({ ...options, limit: 4 }), {
+  const handleDissect = async (materialId = null) => {
+    await runJob((options) => startKnowledgeDissection({ ...options, limit: materialId ? 1 : 4, force: !!materialId, materialIds: materialId ? [materialId] : null }), {
       title: 'Could not file the materials into sections',
       onDone: (outcome) => {
         const filed = (outcome.done || []).reduce((sum, item) => sum + (item.rows || 0), 0);
@@ -691,7 +691,7 @@ export default function AiKnowledge() {
                 </Button>
               )}
               {pendingDissection.length > 0 && (
-                <Button variant="outline" onClick={handleDissect} disabled={!!rebuildBlocker || !!busy}>
+                <Button variant="outline" onClick={() => handleDissect()} disabled={!!rebuildBlocker || !!busy}>
                   {busy === 'dissect' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Scissors className="w-4 h-4 mr-2" />}
                   {busy === 'dissect' ? 'Filing…' : `File ${pendingDissection.length} material${pendingDissection.length === 1 ? '' : 's'} into sections`}
                 </Button>
@@ -788,8 +788,7 @@ export default function AiKnowledge() {
                 <FolderTree className="w-4 h-4 text-foreground/40" /> Sections filed from your materials
               </h2>
               <p className="text-xs text-foreground/40">
-                Each material is dissected into the parts that belong to one school, one essay type, or one task. A draft
-                reads only the parts that match it; the full application review reads the school sections for fit.
+                Personal experiences are shared across applications. Only craft guidance and school references are scoped. Re-examine a material below to correct older filing.
               </p>
             </div>
             <Badge variant="outline" className="shrink-0">{plural(filedSections.length, 'material')}</Badge>
@@ -800,6 +799,10 @@ export default function AiKnowledge() {
               {filedSections.map((material) => (
                 <div key={material.key} className="rounded-lg border border-border p-3">
                   <p className="text-xs font-medium text-foreground/75 truncate" title={material.title}>{material.title}</p>
+                  <Button variant="outline" size="sm" className="mt-2" disabled={!!rebuildBlocker || !!busy} onClick={() => handleDissect(material.key)}>
+                    <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Re-examine sections
+                  </Button>
+                  <p className="text-[11px] text-foreground/45 mt-1">Re-read this source with current criteria. Your edited items are kept.</p>
                   <ul className="mt-2 space-y-1">
                     {material.sections.map((section) => (
                       <li key={section.label}>

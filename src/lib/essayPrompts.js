@@ -34,11 +34,17 @@ import { extractFlaggedPhrases } from './essayEditCheck';
  * write new prose inside a fixed shape.
  */
 export const AI_TEMPERATURES = {
-  generate: 0.75,
-  polish: 0.35,
-  repair: 0.6,
+  generate: 0.58,
+  polish: 0.32,
+  repair: 0.55,
   review: 0.15,
 };
+
+export const DEEP_THINKING_PROTOCOL = `DEEP THINKING — HIGHEST QUALITY PASS (do not skip):
+1. THINK FIRST, WRITE SECOND. Before drafting, think carefully through: (a) the required root — what it literally says, what it forbids, and whether it is a STYLE directive ("Be natural", "looks like an actual note") vs a CONTENT directive (what to write about) vs a CHOICE directive ("pick one of these") — you must honour all three kinds, but style is verified by voice not by matching words; (b) the profile + materials + applicant knowledge base — which 2-3 concrete facts actually deepen the root (names, numbers, quotes, dates), and which must be left out; (c) the craft shape for this essay type and this prompt — one story, forward in time, no side quests; (d) the length contract — how you will reach the target band by deepening scenes, not by padding.
+2. Use natural-language instruction exactly as written. The applicant writes in plain English ("Make sure it looks like an actual note", "Be natural, not essay-like") — these are not keywords to echo, they are voice constraints to embody. A natural note is specific, slightly uneven, plain-worded, with a human rhythm; it never announces its own lesson and never sounds like an AI outline.
+3. Verify before you return: re-read your draft as a hostile reader and as a tired reader; fix what either would flag; check that every feasible edit instruction was carried out and report conflicts honestly; check that the length contract is met; check that no banned construction appears.
+4. Quality bar: this is the version the applicant will submit. Aim at 10/10 on every dimension at once. Trade decoration for evidence, not the other way around.`;
 
 /**
  * What the platform's sharing rules mean for THIS essay.
@@ -59,7 +65,7 @@ function platformBrief(essay, university, platform) {
     return `This essay is the SHARED Common Application personal statement. It is sent word-for-word identical to every Common App school on your list. Therefore it must contain NO school-specific content at all: no university names, no "your campus", no programme references, no callbacks to a supplement. If it names a school, it is wrong.`;
   }
   if (platform === 'uc') {
-    return `This is a UC Personal Insight Question answer. The same answer goes to every UC campus you select, so keep it campus-agnostic. UC answers 350 words exactly, and the admissions reader is scoring 13 holistic factors — your job is to make your evidence legible, not to be brilliant.`;
+    return `This is a UC Personal Insight Question answer. The same answer goes to every UC campus you select, so keep it campus-agnostic. UC answers have a maximum of 350 words, and the admissions reader is scoring 13 holistic factors — your job is to make your evidence legible, not to be brilliant.`;
   }
   if (platform === 'ucas') {
     return `This is ONE answer in the UCAS personal statement, not all three questions. Characters are counted including spaces: 4,000 shared across the three answers, 350 minimum in each box. The same wording goes to every course choice, so never name a university or a specific campus. Oxford expects roughly 80% academic content, and Cambridge caps non-academic material at 20% of the answer it sits in — draft to the tighter of those.`;
@@ -84,7 +90,7 @@ export function essayRoleBrief(essay) {
   return table[type] || table.supplemental;
 }
 
-const HUMAN_VOICE_RULES = `VOICE RULES — this is the single most important section:
+const HUMAN_VOICE_RULES = `VOICE RULES — defaults subordinate to the applicant's root and edit instructions:
 - Write like a thoughtful 17-18 year old who is genuinely good at thinking, not like an adult writing about a teenager, and certainly not like a language model.
 - BANNED constructions (do not use these, in any form): "In conclusion", "This experience taught me", "Through this journey", "I realized that", "It was then that I understood", "Looking back", "furthermore", "moreover", "in today's world", "it is important to note", "delve", "tapestry", "a testament to", "embark", "underscore", "navigate the complexities", "a journey of self-discovery", "sparked a passion".
 - No rhetorical questions to the reader. No summarizing your own lesson at the end. No "only time I…" construction.
@@ -105,8 +111,6 @@ export function rootBrief(essay) {
   if (!root) {
     return `APPLICANT'S REQUIRED ROOT / DIRECTION:\nNo root has been entered yet. Do not silently select a random activity just because it appears in the materials. Use only details that clearly serve this prompt, and put any missing personal decision or detail in gaps_for_applicant.`;
   }
-  // Atlas reads the direction as an instruction first, so the model is told what
-  // Atlas will hold it to, rather than discovering it in the feedback afterwards.
   const reading = interpretRoot(root);
   const shape = reading.chooseOne
     ? `Atlas has classified this direction as CHOOSE-ONE: ${reading.alternatives.length || 'several'} options are listed and exactly ONE of them may carry the essay.`
@@ -114,21 +118,28 @@ export function rootBrief(essay) {
       ? `Atlas has classified this direction as INCLUDE-ALL: every listed option is a requirement.`
       : reading.alternatives.length >= 2
         ? `Atlas reads ${reading.alternatives.length} options here with no instruction to include all of them, so ONE must be chosen as the through-line.`
-        : `Atlas reads this as a single direction with no list of alternatives.`;
+        : reading.isStyleOnly
+          ? `Atlas reads this as a STYLE/voice instruction (how to write, not what to write about). Do not treat it as a keyword to echo; embody it as tone.`
+          : `Atlas reads this as a single direction with no list of alternatives.`;
   const options = reading.alternatives.length
     ? `\nOptions found in the direction: ${reading.alternatives.map((item) => `"${item.label}"`).join(', ')}.`
     : '';
   const rules = reading.constraints.length
     ? `\nStated rules you must satisfy${reading.chooseOne ? ' while narrowing to one option' : ''}: ${reading.constraints.map((item) => `"${item.text}" (${item.polarity})`).join('; ')}.`
     : '';
+  const style = reading.styleDirectives.length
+    ? `\nStyle/voice directives in this root (natural-language instructions about HOW to sound — highest priority for voice, not keywords to repeat): ${reading.styleDirectives.map((s) => `"${s}"`).join('; ')}. These mean: write with plain words, uneven rhythm, specific objects, a human cadence; no essay-ese, no moral summary, no AI scaffolding. "Looks like an actual note" = short sentences mixed with long ones, concrete details, no generic conclusion.`
+    : '';
   return `APPLICANT'S REQUIRED ROOT / DIRECTION (hard constraint):
 ${root}
+
+NATURAL-LANGUAGE INSTRUCTION — read exactly as the applicant wrote it: this box holds instructions like "Be natural", "Make sure it looks like an actual note", "Pick the most effective one of the below and expand about it". It is NOT a keyword list. A word inside it (e.g. "natural") is not a word to repeat in the essay — it is a direction about how to sound. Honour both content ("what to write about") and style ("how it should feel") literally.
 
 Start from this direction. Do not swap in a different activity, hobby, or achievement merely because it is more convenient in the materials. Use the profile, deep material readings, guidance, and craft patterns to expand, verify, complicate, and structure this root. If a necessary concrete detail is not available, leave a clear gap for the applicant rather than inventing one.
 
 HOW ATLAS READS THIS DIRECTION — and what it will check your draft against:
-${shape}${options}${rules}
-- Read the meaning of the direction, not its word count. Separate hard constraints ("must", "only", "never", "choose one") from examples, brainstormed options, and possible angles.
+${shape}${options}${rules}${style}
+- Read the meaning of the direction, not its word count. Separate hard constraints ("must", "only", "never", "choose one") from examples, brainstormed options, and possible angles, and from style notes about voice.
 - A numbered or bulleted list inside the direction is a menu of possible subjects, not an outline to fill in. If the applicant says to choose one, choose ONE; one paragraph per option is the single most common way an essay like this fails, and it is why the draft will be rejected and sent back.
 - Include multiple items only when the applicant explicitly makes each one a requirement and they genuinely fit the prompt. If the direction is contradictory or impossible to honor, do not guess: explain the conflict and leave a question in gaps_for_applicant.
 - Say in essay_analysis which option you built on and why the others were dropped. Atlas checks that claim against the draft word by word.`;
@@ -208,13 +219,16 @@ export function editInstructionsBrief(editInstructions, { mode = 'edit' } = {}) 
   const items = splitEditInstructions(editInstructions);
   if (!items.length) return '';
   const numbered = items.map((item, index) => `${index + 1}. ${item}`).join('\n');
-  return `APPLICANT'S EDIT INSTRUCTIONS (binding — every numbered sentence must be carried out):
+  return `APPLICANT'S EDIT INSTRUCTIONS (binding — every numbered sentence must be carried out — these are natural-language voice/style AND content instructions, not keywords):
 ${numbered}
 
+HOW TO READ THESE: the applicant writes plain English like "Be more natural", "Make sure it looks like an actual note, not an essay", "Remove the AI-sounding parts". Do not repeat the words literally — embody the meaning: plain diction, uneven sentences, concrete objects, no generic lesson, rhythm of a real person writing.
+
 PRIORITY ORDER, highest first: (1) the required root above, (2) these instructions, (3) the length contract, (4) ${mode === 'edit' ? 'the review findings and optional ideas below' : 'the craft rules and the general guidance'}. Where an instruction and ${mode === 'edit' ? 'a review finding' : 'a craft rule'} pull in different directions, the instruction wins and you say so in your report. Where an instruction and the root conflict, keep the root, do NOT carry out that instruction, and report the conflict under "instructions_not_followed" — never resolve it by guessing.
-- Carry out each instruction literally and completely: an instruction to cut a sentence means the sentence is gone; an instruction to add a detail means the detail appears where it was asked for; an instruction to keep a phrase means the phrase survives word for word.
+- Carry out each instruction literally and completely: "Be natural" means the essay must read with natural rhythm and plain words; "looks like an actual note" means concrete, brief, personal, not an outline; an instruction to cut a sentence means the sentence is gone; an instruction to keep a phrase means the phrase survives word for word.
+- Think deeply about what each instruction wants — style instructions require you to change cadence, diction, and sentence shape, not just swap a synonym.
 - Do not "interpret" an instruction into something easier. If one cannot be carried out without inventing a fact, do not invent it: report it under "instructions_not_followed" with the fact you would need.
-- For every instruction return one entry under "instructions_followed" ({"instruction", "how"}: which words changed), or under "instructions_not_followed" ({"instruction", "why"}). Atlas checks the draft against each instruction and shows the applicant the ones you missed.`;
+- For every instruction return one entry under "instructions_followed" ({"instruction", "how"}: which words changed and how the voice/content shifted), or under "instructions_not_followed" ({"instruction", "why"}). Atlas checks the draft against each instruction and shows the applicant the ones you missed.`;
 }
 
 /**
@@ -322,6 +336,8 @@ ${LENGTH_CRAFT_RULES}
 ${HUMAN_VOICE_RULES}
 
 ${AMBITION_RULES}
+
+${DEEP_THINKING_PROTOCOL}
 
 HOW TO WORK:
 1. Decide what this prompt is really asking before writing a word, and make a specific choice about how the required root serves it.
@@ -557,9 +573,9 @@ export const ADMISSIONS_OFFICER_RULE = `JUDGE ONLY WHAT IS ON THE PAGE — THE A
 
 const PRESERVATION_RULES = `THE PRIME DIRECTIVE — CONSERVE THE APPLICANT'S DRAFT:
 - You are an editor, not an author. The story, the scenes, their order, the timeline, the people in it, and what the essay means must all survive your edit unchanged.
-- Keep at least 80% of the original words recognisably intact. The applicant reads this draft as theirs; a rewrite is a rejection of their work and is not what was asked for.
+- Unless the applicant explicitly requests a broader change, keep at least 80% of the original words recognisably intact. The applicant reads this draft as theirs; a rewrite is a rejection of their work and is not what was asked for.
 - Change wording, rhythm, precision, and the specific problems the review named. Change a point only where leaving it would cost the essay a score.
-- NEVER do any of these: replace the required root with another activity; restructure or reorder the narrative; delete a scene, a person, or a piece of evidence; add a new scene, achievement, name, or number; change what the ending means; switch person or tense; rewrite a paragraph that is already working; shorten the essay to make your job easier.
+- Unless explicitly requested by the applicant, never do any of these: replace the required root with another activity; restructure or reorder the narrative; delete a scene, a person, or a piece of evidence; add a new scene, achievement, name, or number; change what the ending means; switch person or tense; rewrite a paragraph that is already working; shorten the essay to make your job easier.
 - Where you believe a substantial change is essential to reach 10/10, make it — and name it in "changes" with the reason. An unnamed substantial change is a failure of this task.
 - Every change you report is shown to the applicant highlighted inside the text, so report the real wording you replaced, not a paraphrase of it.`;
 
@@ -667,6 +683,8 @@ Rules for the revision itself:
 - For craft, you may borrow technique from samples that match this platform (US samples for US essays, UK samples for UCAS), but never borrow a life event.
 - Deepen before you cut. Where a sentence is weak, first try to make it more concrete; only delete it if nothing in it is doing evidential work.
 ${limitUnitFor(essay) === 'characters' ? '- This limit is in CHARACTERS including spaces. Check your output length before returning it.' : '- Stay inside the word limit and inside the target band.'}
+
+${DEEP_THINKING_PROTOCOL}
 
 ${AMBITION_RULES}${phraseRules}
 
@@ -805,6 +823,8 @@ ${platformBrief(essay, university, platform)}
 ${craftBrief({ essay, university, platform, limit, unit })}
 
 ${rootBrief(essay)}
+
+${editInstructionsBrief(essay?.edit_instructions || '')}
 
 ${HUMAN_VOICE_RULES}
 

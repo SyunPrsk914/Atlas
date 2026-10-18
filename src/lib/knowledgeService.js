@@ -13,7 +13,7 @@ import { peekAIStatus, runAI } from '@/lib/ai';
 import { isLiveOutcome } from '@/lib/aiOutcome';
 import {
   buildKnowledgeInputs, rebuildApplicantKnowledge, extendApplicantKnowledge, refreshApplicantKnowledge,
-  dissectMaterialKnowledge, materialsNeedingDissection, staleDissectionRows,
+  dissectMaterialKnowledge, materialsNeedingDissection, staleDissectionRows, canDissectMaterial,
 } from '@/lib/applicantKnowledge';
 import { findRunningTask, startBackgroundTask } from '@/lib/backgroundTasks';
 
@@ -124,7 +124,7 @@ export function startKnowledgeRefresh({ owner = null } = {}) {
  * text changed), at most `limit` of them, and removes sections whose material
  * is gone. Returns per-material results so the caller can say what happened.
  */
-export function startKnowledgeDissection({ owner = null, limit = 3, materialIds = null } = {}) {
+export function startKnowledgeDissection({ owner = null, limit = 3, materialIds = null, force = false } = {}) {
   return startKnowledgeTask({
     label: 'Dissecting materials into sections', stage: 'dissect', owner,
     run: async ({ setStage }) => {
@@ -132,7 +132,7 @@ export function startKnowledgeDissection({ owner = null, limit = 3, materialIds 
       if (fresh.missing) return { done: [], skipped: 0, removed: 0, warnings: ['The knowledge table is missing.'] };
       const deps = knowledgeDeps();
       const wanted = materialIds ? new Set(materialIds.map(String)) : null;
-      const pending = materialsNeedingDissection(fresh.materials, fresh.items)
+      const pending = (force ? fresh.materials.filter(canDissectMaterial) : materialsNeedingDissection(fresh.materials, fresh.items))
         .filter((material) => !wanted || wanted.has(String(material.id)));
       const batch = pending.slice(0, Math.max(0, limit));
       const done = [];
