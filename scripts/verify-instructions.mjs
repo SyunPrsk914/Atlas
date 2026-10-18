@@ -15,8 +15,15 @@ import {
 import { encodeDocumentText } from '../src/lib/materialDocument.js';
 import {
   KNOWLEDGE_BASE_LIMITS, MAX_LIMITS, knowledgeLimitsFor, buildKnowledgeInputs, itemLooksCutOff,
-  knowledgeCoverage, applicantKnowledgeForPrompt,
+  knowledgeCoverage, applicantKnowledgeForPrompt, looksLikeMechanicsDump, buildDissectionPrompt,
 } from '../src/lib/applicantKnowledge.js';
+import {
+  QA_ASK_LIMIT, mergeQuestions, normalizeQuestions, buildQaQuestionsPrompt, buildQaAnswerPrompt,
+  normalizeQaAnalysis, qaAnswerRow, qaAnalysisRows, loadQaEntries, saveQaEntries, patchQaEntry,
+} from '../src/lib/applicantQA.js';
+import {
+  HONOR_LIMITS, buildHonorPolishPrompt, sanitizeHonorPolish, honorPolishDiffers, honorNoteBrief,
+} from '../src/lib/honorPrompts.js';
 import { interpretRoot, checkDraftAgainstRoot, rootCheckBrief } from '../src/lib/essayRoot.js';
 import { extractFlaggedPhrases, findUnaddressedFindings, unaddressedBrief } from '../src/lib/essayEditCheck.js';
 import {
@@ -188,6 +195,7 @@ const kbRow = (over) => ({
   id: over.id, kind: over.kind, text: over.text, category: over.category || 'other',
   platform: over.platform || 'General', source_label: over.source_label || '',
   target_university_id: over.target_university_id || null, target_essay_id: over.target_essay_id || null,
+  data: over.data || null,
 });
 
 await check('the prompt version is ordered by how specific each item is', () => {
@@ -526,8 +534,124 @@ await check('the knowledge base page can deepen itself and report its own densit
   assert.match(page, /matchesQuery/, 'the knowledge base cannot be searched');
 });
 
+
+// ---------------------------------------------------------------------------
+// Q&A: the interview layer that feeds the knowledge base — non-binding unless
+// the applicant marks an answer "must include".
+// ---------------------------------------------------------------------------
+await check('the question generator asks about real gaps and nothing else', () => {
+  const prompt = buildQaQuestionsPrompt({
+    profileText: 'PROFILE BODY',
+    knowledgeText: 'KNOWLEDGE BODY — never re-ask something answered here',
+    materialsNote: 'Materials on file: IA.pdf',
+    limit: 3,
+  });
+  assert.match(prompt, /cannot answer/, 'the generator is not told to ask only about gaps');
+  assert.match(prompt, /never re-ask/i, 'the generator can re-ask what the base already holds');
+  assert.match(prompt, /reference material/i, 'answers could be presented as binding by default');
+  assert.match(prompt, /At most 3\b/);
+  assert.ok(!prompt.includes('KNOWLEDGE BODY') === false);
+  const normalized = normalizeQuestions({ questions: [
+    { question: 'How many students attended the Saturday workshops you ran?', why: 'impact', feeds: 'activities' },
+    { question: 'Tell me what your role was', why: '', feeds: 'not-a-feed' },
+    { question: 'The file appears complete and strong overall.', why: '', feeds: 'other' },
+  ] }, { limit: 2 });
+  assert.equal(normalized.length, 2, 'a sentence that is not a question must not survive');
+  assert.equal(normalized[0].feeds, 'activities');
+  assert.equal(normalized[1].feeds, 'knowledge', 'an invalid feed falls back to knowledge, never vanishes');
+});
+
+await check('asked questions deduplicate against what is already open or answered', () => {
+  const first = mergeQuestions([], [{ question: 'How many attended the workshops?', why: 'w', feeds: 'activities' }]);
+  assert.equal(first.added, 1);
+  const again = mergeQuestions(first.entries, [{ question: 'how many attended the workshops', why: '', feeds: 'activities' }]);
+  assert.equal(again.added, 0, 'a restated question must not pile up');
+  const answered = patchQaEntry(again.entries, again.entries[0].id, { status: 'answered', answer: 'Forty.' });
+  const third = mergeQuestions(answered, [{ question: 'How many people attended the workshops?', why: '', feeds: 'activities' }]);
+  assert.equal(third.added, 0, 'an answered question must not come back to be asked again');
+});
+
+await check('an answer is filed as the applicant\'s own item, with its standing encoded', () => {
+  const entry = {
+    id: 'q1', question: 'How many attended?', answer: 'About 40 students across 12 Saturday sessions in 2024-25; nine built a working site.',
+    include: true,
+  };
+  const row = qaAnswerRow(entry);
+  assert.equal(row.origin, 'manual', 'an answer is never AI property: rebuilds must not remove it');
+  assert.equal(row.kind, 'evidence');
+  assert.match(row.text, /the applicant's own answer/);
+  assert.equal(row.data.from_qa, true);
+  assert.equal(row.data.include, true);
+  const analysis = normalizeQaAnalysis({
+    insights: [{ category: 'mindset', text: 'He stays with teaching long after the event ends: he ran twelve sessions himself.' }, { category: 'not-a-category', text: 'She notices the quiet one in every room, the notes say.' }],
+    facts: [{ category: 'fact', text: 'Nine of about forty workshop students built a working site (2024-25).' }],
+    note: 'Filed the persistence reading.',
+  });
+  assert.equal(analysis.insights.length, 2);
+  assert.equal(analysis.insights[1].category, 'actions', 'an invalid portrait category falls back to actions, it is not dropped');
+  const rows = qaAnalysisRows(entry, analysis);
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((r) => r.origin === 'manual' && r.data.from_qa === true), 'analysis rows stay the applicant\'s');
+  assert.equal(rows[0].kind, 'brief');
+  assert.match(rows[0].source_label, /read between the lines/);
+  assert.equal(rows[2].kind, 'evidence');
+});
+
+await check('the reading prompt forbids inflation and demands a usable empty answer', () => {
+  const prompt = buildQaAnswerPrompt({ entry: { question: 'Why the microwave lab?', answer: 'It was the only room that let me break things on purpose.' }, profileText: '', knowledgeText: '' });
+  assert.match(prompt, /extract from it only; you never add to it/, 'the pass is not told it may only extract');
+  assert.match(prompt, /\[\] is a fine answer|return \[\]/, 'an empty reading is not punished, so inflation has no reward');
+  assert.match(prompt, /suggests/, 'uncertain readings must be labeled');
+  assert.match(prompt, /REFERENCE for future drafting, not an obligation/);
+});
+
+await check('prompts tell the drafter exactly how far a Q&A item may be used', () => {
+  const out = applicantKnowledgeForPrompt([
+    kbRow({ id: 'a', kind: 'evidence', text: `Ran twelve Saturday sessions for about forty students.${words(12)}`, data: { from_qa: true } }),
+    kbRow({ id: 'b', kind: 'evidence', text: `He kept the WSC ledger because the numbers told him where to push.${words(12)}`, data: { from_qa: true, include: true } }),
+  ], { maxChars: 4000 });
+  const lines = out.split('\n');
+  assert.match(out, /reference, never an obligation/, 'the default standing of an answer is not stated');
+  assert.ok(/APPLICANT INSTRUCTION/.test(lines.find((l) => l.includes('WSC ledger'))), 'a marked answer is not flagged as an instruction');
+  assert.ok(!/APPLICANT INSTRUCTION/.test(lines.find((l) => l.includes('Saturday sessions'))), 'the instruction marker leaked onto an unmarked item');
+});
+
+await check('honors sharpening fits the real field, touches nothing else, and can say "no change"', () => {
+  const over = 'Japan Physics Olympiad — Silver Medal, awarded to one of twelve finalists chosen from roughly 2,400 registrants';
+  assert.ok(over.length > HONOR_LIMITS.name, 'the fixture must actually be over the limit');
+  const polished = sanitizeHonorPolish(
+    { name: over, changes: [{ field: 'name', reason: 'from your note' }], missing_facts: ['the nomination path'], verdict: 'A national-tier physics result, now inside the box.' },
+    { name: 'JPhO award', grade_level: '11', level: 'National', note: 'top 12 of ~2,400; nominated by the school' },
+  );
+  assert.ok(polished.honor.name.length <= HONOR_LIMITS.name, polished.honor.name);
+  assert.deepEqual(polished.truncations, ['name'], 'an over-limit rewrite must be reported, not silently cut');
+  assert.equal(polished.honor.grade_level, '11', 'sharpen never touches the structured facts');
+  assert.equal(polished.honor.level, 'National');
+  assert.equal(polished.honor.note, 'top 12 of ~2,400; nominated by the school', 'the private note is carried through, not replaced');
+  assert.ok(!honorPolishDiffers({ name: 'Same.' }, { name: 'Same.' }), 'an unchanged rewrite must be recognizable as no improvement');
+  const prompt = buildHonorPolishPrompt({ honor: { name: 'JPhO award', note: 'silver, top 12 of 2400' }, index: 0, honors: [], profileText: 'p', materialsText: 'm', applicantText: 'k' });
+  assert.match(prompt, /may NOT invent a number/);
+  assert.match(prompt, /Do not change grade_level or level/);
+  assert.match(prompt, /APPLICANT'S OWN NOTE/, 'the note box must be named as ground truth');
+  assert.match(prompt, /return it unchanged/, 'a no-op must be an allowed, honest answer');
+  assert.match(honorNoteBrief({ note: 'ceremony in Osaka' }), /ceremony in Osaka/);
+  assert.equal(honorNoteBrief({}), '');
+});
+
+await check('the dissection is told never to file the applicant\'s own story under a school', () => {
+  const prompt = buildDissectionPrompt({
+    material: { id: 'm', title: 'My past essays', type: 'essay', notes: '', content: 'x'.repeat(900) },
+    text: 'BODY',
+    universities: [{ id: 'stan', name: 'Stanford' }],
+    essays: [],
+  });
+  assert.match(prompt, /NEVER name a school for the applicant's own story/, 'a life can be filed under one school again');
+  assert.match(prompt, /General guidance .* never school-level|is platform- or kind-level, never school-level/s, 'general advice can be bound to one college again');
+  assert.match(prompt, /return \[\]/i, 'filing everything somewhere is still presented as the failure mode');
+});
+
 await check('every prompt-side truncation goes through the boundary rule', () => {
-  for (const file of ['src/lib/materialRole.js', 'src/lib/applicantKnowledge.js', 'src/lib/materialAnalysis.js', 'src/lib/schoolFit.js']) {
+  for (const file of ['src/lib/materialRole.js', 'src/lib/applicantKnowledge.js', 'src/lib/materialAnalysis.js', 'src/lib/schoolFit.js', 'src/lib/applicantQA.js']) {
     const text = src(file);
     assert.match(text, /textClip|clipToBoundary|previewClip/, `${file} clips without the shared rule`);
     assert.ok(!/return String\(text[^\n]*\)\.slice\(0,\s*\w+\);/.test(text), `${file} still returns a raw slice`);

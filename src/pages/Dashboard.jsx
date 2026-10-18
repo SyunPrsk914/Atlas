@@ -5,7 +5,7 @@ import { base44 } from '@/api/base44Client';
 import {
   GraduationCap, PenLine, FolderOpen, CheckCircle2, Calendar, ArrowRight,
   Sparkles, Library, CircleAlert, ScanText, AlertTriangle,
-  User, Clock, Globe, BarChart3, Brain,
+  User, Clock, Globe, BarChart3, Brain, MessageCircleQuestion,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -17,6 +17,7 @@ import {
 import { getLastUniversityId } from '@/lib/persist';
 import { presentMaterial } from '@/lib/materialRole';
 import { buildKnowledgeInputs, knowledgeStatus } from '@/lib/applicantKnowledge';
+import { loadQaEntries, openQuestions } from '@/lib/applicantQA';
 import { hasLiveModel } from '@/lib/aiOutcome';
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -193,6 +194,27 @@ export default function Dashboard() {
         icon: Brain,
         title: 'Refresh your AI knowledge base',
         detail: 'Your profile or materials changed since it was built.',
+        tone: 'normal',
+      });
+    }
+    // Flagged portrait items and waiting Q&A answers are knowledge-base work the
+    // page can no longer be trusted to surface by itself; say it on the dashboard.
+    if (knowledgeInfo?.flagged > 0) {
+      actions.push({
+        to: '/ai-knowledge',
+        icon: AlertTriangle,
+        title: `${plural(knowledgeInfo.flagged, 'knowledge item')} read${knowledgeInfo.flagged === 1 ? 's' : ''} like a fact list, not a portrait`,
+        detail: 'Refresh re-examines each one: rewrite it, move it to Personal points, or remove it.',
+        tone: 'normal',
+      });
+    }
+    const openQa = openQuestions(loadQaEntries());
+    if (openQa.length > 0) {
+      actions.push({
+        to: '/ai-knowledge',
+        icon: MessageCircleQuestion,
+        title: `${plural(openQa.length, 'question')} from Atlas ${openQa.length === 1 ? 'is' : 'are'} waiting for you`,
+        detail: 'Two rough sentences become knowledge — reference, never an obligation, unless you mark them must-include.',
         tone: 'normal',
       });
     }

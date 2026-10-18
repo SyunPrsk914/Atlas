@@ -67,6 +67,9 @@ import EssayReviewPanel from '@/components/essay/EssayReviewPanel';
 import UcasStatementEditor from '@/components/essay/UcasStatementEditor';
 import ActivitiesEditor from '@/components/profile/ActivitiesEditor';
 import ActivityAiPanel from '@/components/profile/ActivityAiPanel';
+import HonorsEditor from '@/components/profile/HonorsEditor';
+import HonorsAiPanel from '@/components/profile/HonorsAiPanel';
+import ApplicantQuestionsPanel from '@/components/ApplicantQuestionsPanel';
 import AiStatusPill from '@/components/AiStatusPill';
 import BackgroundTasksPill from '@/components/BackgroundTasksPill';
 import AiSetupDialog, { OllamaReasoning } from '@/components/AiSetupDialog';
@@ -111,6 +114,19 @@ const ucasRow = (id, content) => ({
 });
 
 const getContext = async () => ({ profileText: '', materialsText: '', applicantText: '' });
+
+const honor = {
+  name: 'Japan Physics Olympiad — Silver Medal (top 12 of ~2,400)',
+  grade_level: '11', level: 'National',
+  note: 'nominated by the school; ceremony in Osaka, March 2025',
+};
+// An open question parked in the browser store, exactly as applicantQA.js
+// saves it: the panel must render the answer box, the feeds badge, and the
+// must-include switch without crashing on a real-shaped entry.
+globalThis.localStorage.setItem('atlas:applicantQa:v1', JSON.stringify({ entries: [
+  { id: 'qa-1', question: 'How many students actually attended the workshops you ran?', why: 'so the WSC entry can show impact instead of a duty list', feeds: 'activities', asked_at: '2026-10-01T10:00:00.000Z', status: 'open', answer: '', include: false, answered_at: '', row_ids: [], analysis: null },
+  { id: 'qa-2', question: 'What was your specific role on the thruster team, and how did you get there?', why: 'the profile says "research placement" and nothing else', feeds: 'essays', asked_at: '2026-10-01T10:00:00.000Z', status: 'answered', answer: 'I owned the discharge chamber; a teacher pulled me in after the microwave lab open day.', include: true, answered_at: '2026-10-02T09:00:00.000Z', row_ids: ['r1'], analysis: { status: 'done', insights: 1, facts: 0, note: 'Filed the chamber ownership as a personal point.' } },
+] }));
 
 /** Every case is a component plus the props a page really hands it. */
 export const cases = {
@@ -296,6 +312,28 @@ export const cases = {
   'ActivityAiPanel — idle': () => (
     <ActivityAiPanel activities={[activity]} onChange={() => {}} getContext={getContext}
       sharpenIndex={null} onSharpenDone={() => {}} />
+  ),
+
+  // Honors: the sharpen affordance, the private note, the over-limit warning,
+  // and the empty list must all survive the props the Profile page hands them.
+  'HonorsEditor — one entry with note and sharpen': () => (
+    <HonorsEditor value={[honor]} onChange={() => {}} onSharpen={() => {}} sharpeningIndex={null} />
+  ),
+  'HonorsEditor — over-limit name': () => (
+    <HonorsEditor value={[{ ...honor, name: words(40) }]} onChange={() => {}} onSharpen={() => {}} sharpeningIndex={0} />
+  ),
+  'HonorsEditor — empty list': () => <HonorsEditor value={[]} onChange={() => {}} />,
+  'HonorsAiPanel — idle': () => (
+    <HonorsAiPanel honors={[honor]} onChange={() => {}} getContext={getContext} sharpenIndex={null} onSharpenDone={() => {}} />
+  ),
+
+  // The Q&A panel renders from the browser store; it must survive an open
+  // question, an answered one, and a missing table — with no model connected.
+  'ApplicantQuestionsPanel — store with an open and an answered entry': () => (
+    <ApplicantQuestionsPanel inputs={null} rows={[]} materials={[]} tableMissing={false} />
+  ),
+  'ApplicantQuestionsPanel — table missing': () => (
+    <ApplicantQuestionsPanel inputs={null} rows={[]} materials={[]} tableMissing />
   ),
 };
 

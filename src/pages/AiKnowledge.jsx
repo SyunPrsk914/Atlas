@@ -6,6 +6,8 @@ import { contextTargetFields, contextTargetLabel } from '@/lib/contextTargeting'
 import { notifyAIError } from '@/lib/ai';
 import { hasLiveModel } from '@/lib/aiOutcome';
 import { Button } from '@/components/ui/button';
+import ApplicantQuestionsPanel from '@/components/ApplicantQuestionsPanel';
+import { isQaRow } from '@/lib/applicantQA';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
@@ -100,7 +102,8 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
       </li>
     );
   }
-  const flagged = item.origin === 'ai' && !item.data?.dissected && looksLikeMechanicsDump(item.text);
+  const flagged = item.origin === 'ai' && !item.data?.dissected && looksLikeMechanicsDump(item.text, item.kind);
+  const fromQa = isQaRow(item);
   const section = item.data?.dissected ? String(item.data.section || '') : '';
   return (
     <li className="group bg-card border border-border rounded-xl p-4 flex items-start gap-3">
@@ -109,8 +112,18 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
           <Badge variant="outline" className="h-5 px-1.5 text-[10px]">{categoryLabel}</Badge>
           {showPlatform && <Badge variant="outline" className="h-5 px-1.5 text-[10px]">{item.platform || 'General'}</Badge>}
           <span className={`text-[10px] uppercase tracking-wide ${item.origin === 'manual' ? 'text-accent' : 'text-foreground/35'}`}>
-            {item.origin === 'manual' ? 'You wrote this' : item.data?.revised_at ? 'Built by AI · revised' : 'Built by AI'}
+            {item.origin === 'manual' ? (fromQa ? 'Your Q&A answer' : 'You wrote this') : item.data?.revised_at ? 'Built by AI · revised' : item.data?.moved_from ? 'Built by AI · re-filed' : 'Built by AI'}
           </span>
+          {fromQa && item.data?.include && (
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-accent border-accent/30 bg-accent/5 gap-1" title="You marked this answer as an instruction: every drafting and review prompt is told to honour it.">
+              must include
+            </Badge>
+          )}
+          {item.data?.moved_from && (
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-foreground/50" title={`A Refresh found this item true but filed in the wrong section and moved it from “${item.data.moved_from}”.`}>
+              re-filed
+            </Badge>
+          )}
           {section && (
             <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-foreground/60 gap-1" title="Filed from one section of a material">
               <FolderTree className="w-2.5 h-2.5" />{section}
@@ -133,8 +146,8 @@ function ItemRow({ item, onEdit, onDelete, editing, draft, setDraft, onSave, onC
         {flagged && (
           <p className="text-[11px] text-amber-700 mt-1 flex items-start gap-1.5">
             <TriangleAlert className="w-3 h-3 mt-0.5 shrink-0" />
-            Reads like assessment detail (an IA, a grade, a trial number) rather than something about you as a person.
-            “Refresh” re-examines it and rewrites or removes it; or edit it yourself into what it shows about you.
+            Reads like assessment detail or a fact list (a grade, a trial number, a raw measurement) rather than something about you as a person.
+            “Refresh” re-examines it: it rewrites it into what it shows about you, moves it to Personal points if it is a fact, or removes it. You can also edit it yourself.
           </p>
         )}
         {(item.kind === 'evidence' || item.kind === 'guidance') && item.source_label && (
@@ -287,11 +300,11 @@ export default function AiKnowledge() {
       title: 'Could not refresh the knowledge base',
       onDone: (outcome) => {
         const c = outcome.counts || {};
-        if (!c.revised && !c.removed && !c.added) {
+        if (!c.revised && !c.removed && !c.added && !c.moved) {
           toast.message('Already current', { description: outcome.warnings[0] || `Every one of the ${plural(c.kept || 0, 'item')} still holds.` });
         } else {
           toast.success('Knowledge base refreshed', {
-            description: `${plural(c.revised || 0, 'item')} rewritten · ${c.removed || 0} removed · ${c.added || 0} added · ${c.kept || 0} kept as they were.`,
+            description: `${plural(c.revised || 0, 'item')} rewritten · ${c.moved || 0} moved to the section they belong in · ${c.removed || 0} removed · ${c.added || 0} added · ${c.kept || 0} kept as they were.`,
           });
         }
         for (const warning of outcome.warnings.slice(0, 3)) toast.warning('Note', { description: warning });
@@ -645,8 +658,8 @@ export default function AiKnowledge() {
             {status.flagged > 0 && (
               <p className="text-xs text-amber-700 flex items-center gap-1.5 mt-1">
                 <TriangleAlert className="w-3.5 h-3.5" />
-                {plural(status.flagged, 'item')} read{status.flagged === 1 ? 's' : ''} like assessment detail rather than a person
-                {' '}(marked below). “Refresh” rewrites or removes {status.flagged === 1 ? 'it' : 'them'}.
+                {plural(status.flagged, 'item')} read{status.flagged === 1 ? 's' : ''} like assessment detail or a fact list rather than a person
+                {' '}(marked below). “Refresh” re-examines {status.flagged === 1 ? 'it' : 'them'}: rewrite, re-file as a personal point, or remove.
               </p>
             )}
             {pendingDissection.length > 0 && (
@@ -693,7 +706,7 @@ export default function AiKnowledge() {
             )}
             {status.built && !rebuildBlocker && (
               <p className="text-[11px] text-foreground/35 max-w-sm text-right">
-                “Refresh” examines each item one by one and keeps, rewrites, or removes it, then adds only what is missing.
+                “Refresh” examines each item one by one and keeps, rewrites, re-files, or removes it, then adds only what is missing.
                 “Go deeper” only adds. “Rebuild” starts the portrait over — items you wrote and filed sections are kept either way.
               </p>
             )}
@@ -737,6 +750,14 @@ export default function AiKnowledge() {
           </Button>
         </div>
       </div>
+
+      <ApplicantQuestionsPanel
+        inputs={inputs}
+        rows={rows}
+        materials={materials}
+        tableMissing={tableMissing}
+        onRowsChanged={() => load({ quiet: true })}
+      />
 
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-56 max-w-md">

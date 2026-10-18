@@ -265,6 +265,7 @@ Every item about the applicant answers at least one of these, in the applicant's
 - Academic work — an Internal Assessment, an Extended Essay, a lab report, a research paper, a transcript — tells you how this person thinks: what question they picked, how they handle uncertainty, whether they persist, what standard they hold themselves to. Use it ONLY for that. Never record its mechanics: no trial numbers, no outliers, no data tables, no uncertainties, no section summaries, no "annotates Trial 21 as an outlier". If a sentence would read naturally in a lab notebook or a mark scheme, it does not belong in this portrait.
 - Grades, scores, and course lists already live in the profile. Do not restate them as personality, and never let academic detail crowd out the person: an item about how someone treats a struggling teammate is worth more than three about their methodology.
 - Achievements are evidence, not the point. "Founded a tutoring club" says what happened; the portrait has to say what it shows — that they build the thing that is missing, that they would rather teach than be seen, that they stay after the applause.
+- An ABOUT YOU item that reads like a résumé line is a filing mistake, not a portrait: "Achieved a specific impulse of 210 seconds using L-menthol as propellant in the microwave-arc thruster built during a research placement, a quantitative result explicitly named in both the essay context and the preparation draft" records a result and cites two documents — no personality in it. The quantified result belongs in PERSONAL POINTS exactly as stated; ABOUT YOU then says what chasing that number shows about the person (they take an idea from a kitchen chemistry hunch to a working apparatus; they hold themselves to instrument-verified claims). Provenance clauses ("named in both the … and the …") belong in the source label of an evidence item, never inside a portrait sentence.
 - Compact beats long. One item that integrates three pieces of evidence into one true observation beats three items that each report one. Merge overlapping observations; never pad.`;
 
 const MECHANICS_PATTERNS = [
@@ -283,16 +284,53 @@ const MECHANICS_PATTERNS = [
 const PERSON_SIGNALS = /\b(because|values?|believ|cares? about|mindset|drives?|motivat|tends? to|habit|would rather|notices?|returns? to|when (it|things|the plan) (matters|fail|goes wrong)|treats?|refus|insist|curious|patient|stubborn|honest|generous|restless|afraid|proud|ashamed|joy|love|hate|wants?|needs?|chooses?|chose)\b/i;
 
 /**
+ * Quantified achievements and provenance citations masquerading as personality.
+ *
+ * The applicant's own example was precise: "Achieved a specific impulse of 210
+ * seconds using L-menthol as propellant in the microwave discharge plasma
+ * thruster built during the Kyushu University research placement, a quantitative
+ * result explicitly named in both the Common App essay context and the UCAS
+ * academic preparation draft." Nothing in that is lab-notebook wording, so the
+ * mechanics patterns above miss it — but it is still a fact list, not a portrait.
+ * These patterns only ever run on ABOUT YOU items, where a number with a unit
+ * and an "explicitly named in the X and the Y" clause is a filing mistake, not
+ * content: the same sentence in PERSONAL POINTS is exactly what belongs there.
+ */
+const FACT_DUMP_PATTERNS = [
+  /\b(achieved|achieves?|attained|secured|recorded|obtained|earned|built|developed|designed|engineered|implemented|constructed|calculated|measured|fabricated|synthesi[sz]ed)\b[^.\n]{0,140}\b\d+(\.\d+)?\s*(seconds?|secs?|minutes?|hours?|newtons?|kilonewtons?|m\/s|watts?|kilowatts?|volts?|amperes?|kg\b|grams?|kelvin|millimetres?|millimeters?|people|students?|members|participants|schools?|events?|teams?|medals?|places?|rank|impulse|thrust|efficiency|accuracy|growth|reduction|increase|percent|%)/i,
+  /\b(specific impulse|thrust (to|of)|power (to|of)|torque (to|of))\s+of?\s*\d/i,
+  /\b(explicitly |clearly |directly )?named in both\b/i,
+  /\ba quantitative (result|figure|outcome)\b[^.\n]{0,60}\bin (both|the)\b/i,
+  /\b(named|stated|listed|documented|recorded|specified) (in|within|across) (both|the)\b[^.\n]{0,120}\band the\b[^.\n]{0,40}\b(draft|essay|context|application|file|profile)\b/i,
+];
+
+/** True when a quantified-achievement row is standing in for a portrait item. */
+export function looksLikeFactDump(text) {
+  const value = String(text || '');
+  if (!value.trim()) return false;
+  if (!FACT_DUMP_PATTERNS.some((pattern) => pattern.test(value))) return false;
+  return !PERSON_SIGNALS.test(value);
+}
+
+/**
  * True when an item reads like an assessment detail rather than a portrait.
  *
  * The test is deliberately conservative: it only fires on lab-notebook wording
  * (trial numbers, outliers, data tables, uncertainties, grade fractions) that
- * is NOT accompanied by any language about the person. The knowledge-base page
- * marks such items, and the refresh pass re-examines them first.
+ * is NOT accompanied by any language about the person. For ABOUT YOU items it
+ * also fires on quantified-achievement rows and provenance citations, which are
+ * personal points filed in the wrong section, not personality. The
+ * knowledge-base page marks such items, and the refresh pass re-examines them
+ * first — where they are rewritten, re-filed to the section they belong in,
+ * or removed.
+ *
+ * @param {string} text the saved item
+ * @param {string} [kind] the row's kind; the fact-dump check only applies to 'brief'
  */
-export function looksLikeMechanicsDump(text) {
+export function looksLikeMechanicsDump(text, kind = '') {
   const value = String(text || '');
   if (!value.trim()) return false;
+  if (kind === 'brief' && looksLikeFactDump(value)) return true;
   const mechanical = MECHANICS_PATTERNS.some((pattern) => pattern.test(value));
   if (!mechanical) return false;
   return !PERSON_SIGNALS.test(value);
@@ -516,7 +554,7 @@ export function knowledgeStatus(rows, currentFingerprint) {
     stale: aiRows.length > 0 && stamps.some((data) => data.fingerprint !== currentFingerprint),
     // Only portrait items are counted: the refresh pass re-examines those, while
     // a filed section follows its material.
-    flagged: aiRows.filter((row) => !row.data?.dissected && looksLikeMechanicsDump(row.text)).length,
+    flagged: aiRows.filter((row) => !row.data?.dissected && looksLikeMechanicsDump(row.text, row.kind)).length,
     dissected: aiRows.filter((row) => row.data?.dissected).length,
     counts: {
       brief: (rows || []).filter((r) => r.kind === 'brief').length,
@@ -648,7 +686,7 @@ export async function rebuildApplicantKnowledge({ inputs, existingRows = [], run
  * catches that: two items describing the same thing in different words have
  * almost the same vocabulary, two different facts do not.
  */
-function nearDuplicate(text, seenList) {
+export function nearDuplicate(text, seenList) {
   const words = new Set(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 4));
   if (!words.size) return false;
   for (const other of seenList) {
@@ -660,7 +698,7 @@ function nearDuplicate(text, seenList) {
   return false;
 }
 
-const wordSet = (text) => new Set(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 4));
+export const wordSet = (text) => new Set(String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 4));
 
 /**
  * `cleanItems` keeps only `category` and `text`. A deeper pass writes database
@@ -797,9 +835,10 @@ export const REFRESH_SCHEMA = {
         type: 'object',
         properties: {
           item: { type: 'number' },
-          action: { type: 'string', enum: ['keep', 'revise', 'remove'] },
+          action: { type: 'string', enum: ['keep', 'revise', 'remove', 'move'] },
           text: { type: 'string' },
           category: { type: 'string' },
+          to: { type: 'string', enum: ['about', 'points', 'patterns', 'guidance'] },
           reason: { type: 'string' },
         },
       },
@@ -819,8 +858,9 @@ ${PERSON_FOCUS_RULES}
 FOR EVERY NUMBERED AI ITEM, DECIDE:
 - keep — still accurate, person-focused, and not a duplicate. Do not list it; unlisted items are kept.
 - revise — the substance is right but the item fails PERSON FIRST (it records mechanics, restates grades, summarises a document, or stops at "did X" without saying what it shows), is weaker than the sources now support, or is partly out of date. Return the complete replacement text (2-5 finished sentences) and, if it should move, the new category within the same kind.
-- remove — contradicted by the current sources, a near-duplicate of another item (name its number in the reason), or an assessment-mechanics note with nothing about the person in it. Prefer revising to removing whenever the item holds one true thing about the person; a removal destroys evidence and the applicant asked for that to be rare.
-Items marked [CHECK] were flagged by Atlas as reading like lab-notebook detail. Each one needs an explicit decision: revise it into something about the person, or remove it.
+- move — the item is true and worth keeping but it is filed in the wrong section: a quantified fact, date, or outcome sitting in ABOUT YOU belongs in PERSONAL POINTS ("points"); a person-level insight — what the fact shows about the applicant — sitting in PERSONAL POINTS belongs in ABOUT YOU ("about"); a craft rule belongs in "patterns"; a reusable rule or requirement belongs in "guidance". Return "to" (one of about, points, patterns, guidance), the text to carry over (the item as saved, lightly reframed so it reads well in the destination section — never a new fact), a destination category, and the reason. A move keeps the evidence and fixes the filing; prefer it to remove whenever the content is real but the section is wrong.
+- remove — contradicted by the current sources, a near-duplicate of another item (name its number in the reason), or an assessment-mechanics note with nothing about the person in it. Prefer revising to removing whenever the item holds one true thing about the person; prefer moving to removing whenever the thing is true but filed in the wrong section; a removal destroys evidence and the applicant asked for that to be rare.
+Items marked [CHECK] were flagged by Atlas as reading like lab-notebook detail or a fact list rather than a portrait. Each one needs an explicit decision: move it to the section it belongs in, revise it into something about the person, or remove it.
 
 THEN, UNDER "additions", ADD ONLY WHAT IS MISSING
 - Go through the sources once more and add an item only where no saved item (AI or applicant-written) covers it. New items follow the same standard: a complete observation about the person, with its evidence, in 2-5 finished sentences.
@@ -849,7 +889,7 @@ ${inputs.sampleText || '(none)'}
 TIPS, GUIDES, AND REFERENCES
 ${inputs.guidanceText || '(none)'}
 
-Return JSON only: {"decisions": [{"item": <number>, "action": "revise|remove", "text": "<full replacement when revising>", "category": "<optional>", "reason": "<one sentence>"}], "additions": {"about": [...], "points": [...], "patterns": [...], "guidance": [...]}}`;
+Return JSON only: {"decisions": [{"item": <number>, "action": "revise|remove|move", "text": "<full replacement when revising; carried or lightly reframed text when moving>", "category": "<optional>", "to": "about|points|patterns|guidance (only for move)", "reason": "<one sentence>"}], "additions": {"about": [...], "points": [...], "patterns": [...], "guidance": [...]}}`;
 }
 
 const CATEGORIES_BY_KIND = {
@@ -874,16 +914,24 @@ async function eachWithLimit(items, limit, work) {
   return failures;
 }
 
+/** The destination a refresh decision names, as the kind it writes under. */
+export const REFRESH_MOVE_KINDS = { about: 'brief', points: 'evidence', patterns: 'pattern', guidance: 'guidance' };
+/** Where an item lands when the model moves it but leaves the category invalid. */
+const MOVE_FALLBACK_CATEGORY = {
+  brief: 'personality', evidence: 'fact', pattern: 'judgement', guidance: 'writing_principle',
+};
+
 /**
  * Reads the model's decisions against the numbered list. Unknown numbers,
- * repeated numbers, and revisions without text are dropped; the removal cap is
- * applied in the order the model gave, so a model that wants to delete half the
- * base can only delete the share Atlas allows.
+ * repeated numbers, revisions without text, and moves that would duplicate the
+ * destination are dropped; the removal cap is applied in the order the model
+ * gave, so a model that wants to delete half the base can only delete the
+ * share Atlas allows.
  */
 export function normalizeRefreshDecisions(raw, aiRows) {
   const decisions = Array.isArray(raw?.decisions) ? raw.decisions : [];
   const seen = new Set();
-  const out = { revise: [], remove: [], ignored: 0, capped: 0 };
+  const out = { revise: [], remove: [], move: [], ignored: 0, capped: 0 };
   // A tiny base (one or two items) cannot lose anything; otherwise at most the
   // capped share, but always at least one so a plain duplicate can go.
   const maxRemovals = aiRows.length >= 3 ? Math.max(1, Math.floor(aiRows.length * REFRESH_REMOVAL_CAP)) : 0;
@@ -899,6 +947,18 @@ export function normalizeRefreshDecisions(raw, aiRows) {
       const category = table[String(decision?.category || '').toLowerCase()] ? String(decision.category).toLowerCase() : row.category;
       seen.add(row.id);
       out.revise.push({ row, text, category, reason: clean(decision?.reason) });
+    } else if (action === 'move') {
+      // A move re-files content that stays; the cap on destruction is about
+      // losing evidence, and a move loses none — the destination row is
+      // written before the original is deleted, so this is exempt from it.
+      const to = REFRESH_MOVE_KINDS[String(decision?.to || '').toLowerCase()];
+      if (!to || to === row.kind) { out.ignored += 1; continue; }
+      const text = clean(decision?.text) || clean(row.text);
+      if (!text || text.split(/\s+/).length < 4) { out.ignored += 1; continue; }
+      const table = CATEGORIES_BY_KIND[to] || {};
+      const category = table[String(decision?.category || '').toLowerCase()] ? String(decision.category).toLowerCase() : MOVE_FALLBACK_CATEGORY[to];
+      seen.add(row.id);
+      out.move.push({ row, to, text, category, reason: clean(decision?.reason) });
     } else if (action === 'remove') {
       if (out.remove.length >= maxRemovals) { out.capped += 1; continue; }
       seen.add(row.id);
@@ -913,14 +973,16 @@ export function normalizeRefreshDecisions(raw, aiRows) {
 /**
  * The in-place update. Steps:
  *  1. Show the model every AI item, numbered, with the sources as they are now.
- *  2. Revise or remove the items it names (removals capped), keep the rest.
+ *  2. Revise, re-file (move), or remove the items it names — removals are
+ *     capped, and a move writes its destination before the original goes —
+ *     and keep the rest.
  *  3. Append what is missing, under the same no-repeat rule as "Go deeper".
  *  4. Stamp every surviving AI item with the current fingerprint, so the base is
  *     no longer reported as stale.
  * Manual items are never touched. Nothing is deleted before its replacement is
  * written, and a failed model call changes nothing at all.
  *
- * @returns {Promise<{ counts: { revised: number, removed: number, added: number, kept: number, flagged: number }, warnings: string[] }>}
+ * @returns {Promise<{ counts: { revised: number, removed: number, added: number, kept: number, moved: number, flagged: number }, warnings: string[] }>}
  */
 export async function refreshApplicantKnowledge({
   inputs, existingRows = [], runAI, isLive, createRows, updateRow, deleteRow,
@@ -933,10 +995,10 @@ export async function refreshApplicantKnowledge({
   const aiRows = saved.filter((row) => row.origin === 'ai' && !row.data?.dissected);
   const manualRows = saved.filter((row) => row.origin !== 'ai');
   if (!aiRows.length) {
-    return { counts: { revised: 0, removed: 0, added: 0, kept: 0, flagged: 0 }, warnings: ['There are no AI-built items to re-examine yet. Build the knowledge base first.'] };
+    return { counts: { revised: 0, removed: 0, added: 0, kept: 0, moved: 0, flagged: 0 }, warnings: ['There are no AI-built items to re-examine yet. Build the knowledge base first.'] };
   }
-  const flagged = aiRows.filter((row) => looksLikeMechanicsDump(row.text));
-  const numbered = aiRows.map((row, i) => `${i + 1}. [${row.kind}/${row.category}]${looksLikeMechanicsDump(row.text) ? ' [CHECK]' : ''} ${row.text}`).join('\n');
+  const flagged = aiRows.filter((row) => looksLikeMechanicsDump(row.text, row.kind));
+  const numbered = aiRows.map((row, i) => `${i + 1}. [${row.kind}/${row.category}]${looksLikeMechanicsDump(row.text, row.kind) ? ' [CHECK]' : ''} ${row.text}`).join('\n');
   const manualText = manualRows.map((row) => `- [${row.kind}] ${row.text}`).join('\n');
   const limits = knowledgeLimitsFor(inputs.counts || {});
   const countOf = (kind) => saved.filter((row) => row.kind === kind).length;
@@ -973,8 +1035,49 @@ export async function refreshApplicantKnowledge({
   if (revisionFailures.length) warnings.push(`${revisionFailures.length} item${revisionFailures.length === 1 ? '' : 's'} could not be updated and ${revisionFailures.length === 1 ? 'was' : 'were'} left as ${revisionFailures.length === 1 ? 'it was' : 'they were'}.`);
 
   const removingIds = new Set(decisions.remove.map(({ row }) => row.id));
+  // 2b. Moves re-file content that stays true: the destination row is written
+  //     first and the original removed after, so a move can never lose evidence.
+  //     A destination that already says the same thing gets no duplicate and the
+  //     original is kept for the applicant to see (and delete) by hand.
+  const movedIds = new Set();
+  const movedRows = [];
+  const destinationWords = new Map();
+  for (const { row, to, text, category, reason } of decisions.move) {
+    if (!destinationWords.has(to)) destinationWords.set(to, saved.filter((r) => r.kind === to).map((r) => wordSet(r.text)));
+    if (nearDuplicate(text, destinationWords.get(to))) {
+      warnings.push(`“${clipToBoundary(text, 70, { marker: '…' })}” was not moved: ${to === 'brief' ? 'ABOUT YOU' : to === 'evidence' ? 'PERSONAL POINTS' : to === 'pattern' ? 'the patterns' : 'the guidance'} already covers it. The saved item was kept either way.`);
+      continue;
+    }
+    const created = await createRows([{
+      kind: to,
+      category,
+      text,
+      origin: 'ai',
+      source_label: clean(row.source_label) || 'Re-filed by Atlas from another section',
+      source_id: String(row.source_id || ''),
+      platform: to === 'pattern' ? (row.platform || 'General') : 'General',
+      sort_order: saved.filter((r) => r.kind === to).length + movedRows.filter((r) => r.kind === to).length,
+      target_university_id: row.target_university_id || null,
+      target_essay_id: row.target_essay_id || null,
+      target_platform: row.target_platform || null,
+      target_task: row.target_task || null,
+      data: { ...stamp, moved_from: row.kind, moved_at: stamp.refreshed_at, move_reason: reason || '' },
+    }]).catch(() => null);
+    if (!created) {
+      warnings.push(`“${clipToBoundary(text, 70, { marker: '…' })}” could not be moved, so the original stayed where it was.`);
+      continue;
+    }
+    movedRows.push({ kind: to, text, source_label: clean(row.source_label) || '' });
+    destinationWords.get(to).push(wordSet(text));
+    try {
+      await deleteRow(row.id);
+      movedIds.add(row.id);
+    } catch {
+      warnings.push(`The moved copy of “${clipToBoundary(text, 70, { marker: '…' })}” was saved, but its original could not be removed. Delete the old one by hand if you see both.`);
+    }
+  }
   const fresh = additionRows(result.additions || {}, {
-    saved: saved.filter((row) => !removingIds.has(row.id)),
+    saved: [...saved.filter((row) => !removingIds.has(row.id) && !movedIds.has(row.id)), ...movedRows],
     ask, countOf, data: { ...stamp, built_at: stamp.refreshed_at, appended: true },
   });
   if (fresh.length) await createRows(fresh);
@@ -993,7 +1096,7 @@ export async function refreshApplicantKnowledge({
   }
 
   // 4. Stamp the kept items so the base stops reporting itself as stale.
-  const kept = aiRows.filter((row) => !revisedIds.has(row.id) && !removingIds.has(row.id));
+  const kept = aiRows.filter((row) => !revisedIds.has(row.id) && !removingIds.has(row.id) && !movedIds.has(row.id));
   const stampFailures = await eachWithLimit(kept.filter((row) => row.data?.fingerprint !== inputs.fingerprint), concurrency, async (row) => {
     const updated = await updateRow(row.id, { data: { ...(row.data || {}), ...stamp } });
     if (!updated) throw new Error('update not confirmed');
@@ -1001,7 +1104,7 @@ export async function refreshApplicantKnowledge({
   if (stampFailures.length) warnings.push(`${stampFailures.length} kept item${stampFailures.length === 1 ? '' : 's'} could not be re-stamped, so the base may still show as out of date.`);
 
   return {
-    counts: { revised: revisedIds.size, removed, added: fresh.length, kept: kept.length, flagged: flagged.length },
+    counts: { revised: revisedIds.size, removed, added: fresh.length, kept: kept.length, moved: movedIds.size, flagged: flagged.length },
     warnings,
   };
 }
@@ -1124,7 +1227,8 @@ WHAT TO RETURN
 Return [] in "sections" when the material has no part that belongs to a specific school, essay kind, platform, or task — a resume, a transcript, or a single general reflection usually has none, and that is the correct answer.
 Otherwise, one entry per distinct section, at most 8:
 - "section": a short name a reader would recognise ("Stanford — roommate essay", "Activities list", "Common App personal statement", "How to write a why-us essay").
-- "school": the university the section is for, exactly as written in the material, or "".
+- "school": the university the section is FOR, exactly as written in the material, or "". Fill it ONLY when the material itself targets that school — a supplement written for it, that school's own guide or requirements. NEVER name a school for the applicant's own story, reflection, or past writing: a personal statement or a life experience is the applicant's biography, which every school reads. If such a text mentions a university in passing, the section still gets "school": "" — that mention is content, not a filing address.
+- General guidance ("how to write Ivy League essays", "Common App tips") is platform- or kind-level, never school-level: leave "school" empty for it even if the guide name-drops schools.
 - "essay_kind": one of ${ESSAY_KINDS.join(', ')}.
 - "platform": common_app, uc, ucas, coalition, direct, or "".
 - "audience": "sample" (someone else's successful work), "own" (the applicant's own writing or notes), "guide" (advice or reference about how to write), or "school" (information about a school, its readers, atmosphere, or student body).
@@ -1237,8 +1341,22 @@ export async function dissectMaterialKnowledge({
     const audience = ['sample', 'own', 'guide', 'school'].includes(String(section?.audience || '')) ? section.audience : (isSampleMaterial(presented) ? 'sample' : isGuidanceMaterial(presented) ? 'guide' : 'own');
     const rowKind = AUDIENCE_KIND[audience];
     const targets = dissectionTargets(section, { universities, essays });
+    // The applicant's own life is one independent value: an insight drawn from
+    // their writing or story belongs to EVERY application, so a school named in
+    // the prose must never turn it into school-specific knowledge. Only a target
+    // the applicant set on the material itself can bind an "own" row. A guide or
+    // a school-reference section keeps its binding — those are for one school.
+    const ownLife = audience === 'own';
+    const ownUniversity = ownLife ? null : targets.target_university_id;
+    const ownEssay = ownLife ? null : targets.target_essay_id;
     const label = clean(section?.section) || (targets.school ? `${targets.school} — ${targets.kind}` : targets.kind);
-    const valid = CATEGORIES_BY_KIND[rowKind];
+    // An "own" section may teach the portrait OR the evidence list, so its items
+    // are validated against BOTH category tables — otherwise a personality or
+    // mindset item is silently downgraded to a fact here and never reaches the
+    // portrait it was extracted for.
+    const valid = audience === 'own'
+      ? { ...ABOUT_CATEGORIES, ...POINT_CATEGORIES }
+      : CATEGORIES_BY_KIND[rowKind];
     const fallback = rowKind === 'pattern' ? 'judgement' : rowKind === 'guidance' ? (audience === 'school' ? 'requirement' : 'writing_principle') : 'experience';
     for (const item of itemsWithProvenance(section?.items, valid, fallback, 4)) {
       const own = audience === 'own' && ABOUT_CATEGORIES[item.category];
@@ -1253,8 +1371,8 @@ export async function dissectMaterialKnowledge({
           ? (targets.target_platform ? platformRegion(targets.target_platform) : region || 'General')
           : 'General',
         sort_order: fresh.length,
-        target_university_id: presented.target_university_id || targets.target_university_id,
-        target_essay_id: presented.target_essay_id || targets.target_essay_id,
+        target_university_id: presented.target_university_id || ownUniversity,
+        target_essay_id: presented.target_essay_id || ownEssay,
         target_platform: presented.target_platform || targets.target_platform,
         target_task: presented.target_task || targets.target_task,
         data: { ...stamp, section: label, school: targets.school, shape_keys: targets.shape_keys, audience },
@@ -1326,6 +1444,20 @@ function targetLabel(row, options) {
   const section = row?.data?.dissected ? clean(row.data.section) : '';
   const parts = [scope, section && section !== scope ? section : ''].filter(Boolean);
   return parts.length ? ` · ${parts.join(' · ')}` : '';
+}
+
+/**
+ * How a knowledge item that came from the applicant's Q&A answers reads in a
+ * prompt. An answer is reference material the applicant volunteered — Atlas may
+ * use it wherever it strengthens the piece and omit it wherever it does not. An
+ * answer the applicant marked "must include" is the one exception: that is an
+ * instruction, and instructions are obeyed.
+ */
+function qaNote(row) {
+  if (!row?.data?.from_qa) return '';
+  return row.data.include
+    ? ' [APPLICANT INSTRUCTION — the applicant directed Atlas to use this in the application; honour it wherever the prompt allows]'
+    : ' [the applicant\'s own answer to a question — reference, never an obligation: use it where it strengthens this piece, leave it out where it does not]';
 }
 
 /**
@@ -1422,13 +1554,13 @@ export function applicantKnowledgeForPrompt(rows, {
       heading: 'ABOUT THE APPLICANT (AI-built and applicant-edited; consistent with the profile and materials):',
       items: about,
       budget: share(0.3),
-      render: ({ row }) => `- [${ABOUT_CATEGORIES[row.category] || 'About'}]${targetLabel(row, { universities, essays })} ${row.text}`,
+      render: ({ row }) => `- [${ABOUT_CATEGORIES[row.category] || 'About'}]${targetLabel(row, { universities, essays })} ${row.text}${qaNote(row)}`,
     },
     {
       heading: 'PERSONAL POINTS (facts the applicant can use. Use these, and never add experiences beyond them):',
       items: points,
       budget: share(0.34),
-      render: ({ row }) => `- [${POINT_CATEGORIES[row.category] || 'Fact'}]${targetLabel(row, { universities, essays })} ${row.text}${row.source_label ? ` (source: ${row.source_label})` : ''}`,
+      render: ({ row }) => `- [${POINT_CATEGORIES[row.category] || 'Fact'}]${targetLabel(row, { universities, essays })} ${row.text}${row.source_label ? ` (source: ${row.source_label})` : ''}${qaNote(row)}`,
     },
     {
       heading: 'SUCCESSFUL-APPLICATION PATTERNS (apply the technique to this applicant’s own life; never copy a sample’s life):',

@@ -59,8 +59,13 @@ export function formatActivities(activities, oldText) {
 
 export function formatHonors(honors) {
   if (Array.isArray(honors) && honors.length > 0) {
+    // Same contract as the activities list: the note is private context for the
+    // AI, labeled so no prompt mistakes it for submitted text.
     return honors
-      .map((h, i) => `${i + 1}. ${h.name || 'Unnamed'} — grade ${h.grade_level || '?'}, ${h.level || 'School'} level`)
+      .map((h, i) => {
+        const note = String(h.note || '').replace(/\s+/g, ' ').trim();
+        return `${i + 1}. ${h.name || 'Unnamed'} — grade ${h.grade_level || '?'}, ${h.level || 'School'} level${note ? `\n   Applicant's private note on this honor (facts, not submitted): ${note}` : ''}`;
+      })
       .join('\n');
   }
   return '';

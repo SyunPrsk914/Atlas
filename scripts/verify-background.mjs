@@ -26,8 +26,8 @@ import {
 } from '../src/lib/essayPrompts.js';
 import { classifyInstruction, checkInstructionsFollowed, instructionsBrief } from '../src/lib/essayEditCheck.js';
 import {
-  looksLikeMechanicsDump, knowledgeStatus, rebuildApplicantKnowledge, refreshApplicantKnowledge,
-  materialsNeedingDissection, staleDissectionRows, buildRefreshPrompt, PERSON_FOCUS_RULES,
+  looksLikeMechanicsDump, looksLikeFactDump, knowledgeStatus, rebuildApplicantKnowledge, refreshApplicantKnowledge,
+  materialsNeedingDissection, staleDissectionRows, buildRefreshPrompt, PERSON_FOCUS_RULES, dissectMaterialKnowledge,
 } from '../src/lib/applicantKnowledge.js';
 
 let passed = 0;
@@ -362,6 +362,12 @@ await check('the knowledge page edits in place and updates itself; nothing is re
   assert.match(page, /window\.confirm\(/, 'a rebuild can be started without a warning');
   assert.match(page, /looksLikeMechanicsDump/, 'mechanics items are not marked for the applicant');
   assert.match(page, /filedSections/, 'filed sections are not shown by material');
+  assert.match(page, /ApplicantQuestionsPanel/, 'the Q&A panel is not mounted on the knowledge base page');
+  assert.match(page, /looksLikeMechanicsDump\(item\.text, item\.kind\)/, 'the flag check ignores the kind, so fact lists slip through');
+  assert.match(page, /c\.moved/, 'items the refresh re-files are not reported');
+  const profile = src('src/pages/Profile.jsx');
+  assert.match(profile, /HonorsAiPanel/, 'honors sharpening is not wired');
+  assert.match(profile, /setHonorSharpenIndex\(index\)/, 'the honor rows cannot start a sharpen');
   const auto = src('src/lib/knowledgeAutoRefresh.js');
   assert.match(auto, /startKnowledgeRefresh/, 'the automatic pass must refresh, not rebuild, a built base');
   assert.match(auto, /needsPortrait \? |startKnowledgeRebuild\(\{ owner: 'auto' \}\)/, 'a first build is allowed only when nothing is built');
@@ -370,6 +376,88 @@ await check('the knowledge page edits in place and updates itself; nothing is re
   for (const file of ['src/pages/Profile.jsx', 'src/pages/Materials.jsx']) {
     assert.match(src(file), /scheduleKnowledgeAutoRefresh/, `${file} saves without telling the knowledge base`);
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// The fact list that pretends to be personality: flag it, and let Refresh
+// re-file it instead of destroying it.
+// ---------------------------------------------------------------------------
+const FACT_LIST = "Achieved a specific impulse of 210 seconds using L-menthol as propellant in the microwave discharge plasma thruster built during the Kyushu University research placement, a quantitative result explicitly named in both the Common App essay context and the UCAS academic preparation draft.";
+
+await check('a quantified achievement in ABOUT YOU is flagged; the same line in PERSONAL POINTS is not', () => {
+  assert.ok(looksLikeFactDump(FACT_LIST), "the applicant's exact complaint — a fact list, not a personality");
+  assert.ok(looksLikeMechanicsDump(FACT_LIST, 'brief'), 'the portrait panel does not mark it');
+  assert.ok(!looksLikeMechanicsDump(FACT_LIST, 'evidence'), 'quantified facts are exactly what Personal points is for');
+  assert.ok(!looksLikeMechanicsDump('He returned to the thruster because a number he had not measured himself felt like wearing someone else\'s coat; the 210 seconds were the first result that was his.', 'brief'), 'the rewrite is a portrait, not a fact list');
+  assert.match(PERSON_FOCUS_RULES, /filing mistake/, 'the standard does not name the fact-list failure');
+  assert.match(PERSON_FOCUS_RULES, /PERSONAL POINTS/, 'the standard does not say where the fact belongs');
+});
+
+await check('a refresh can move an item to the section it belongs in — without losing evidence', async () => {
+  const rows = [
+    { id: 'a', kind: 'brief', category: 'personality', text: 'Achieved 210 seconds of specific impulse on the bench thruster.', origin: 'ai', source_label: 'Built from your profile and materials', data: { fingerprint: 'old' } },
+    { id: 'b', kind: 'brief', category: 'mindset', text: 'Someone who would rather be useful than noticed and keeps the treasurer job for three years.', origin: 'ai', data: { fingerprint: 'old' } },
+    { id: 'c', kind: 'evidence', category: 'experience', text: 'Would rather be useful than noticed: stayed treasurer three years after the club folded.', origin: 'ai', data: { fingerprint: 'old' } },
+  ];
+  const created = [];
+  const deleted = [];
+  const updates = [];
+  const outcome = await refreshApplicantKnowledge({
+    inputs: { empty: false, profileText: 'profile', ownText: '', essayText: '', sampleText: '', guidanceText: '', fingerprint: 'new', counts: { profile: 1 } },
+    existingRows: rows,
+    runAI: async ({ prompt }) => {
+      assert.match(prompt, /move — /, 'the refresh never offers to re-file an item');
+      assert.match(prompt, /prefer moving to removing/, 'removal is not framed as the last resort behind moving');
+      return { result: { decisions: [
+        { item: 1, action: 'move', to: 'points', category: 'achievement', text: 'Achieved 210 seconds of specific impulse on the bench thruster (Kyushu University placement).', reason: 'a quantified result, not personality' },
+        { item: 2, action: 'move', to: 'points', text: 'Someone who would rather be useful than noticed and keeps the treasurer job for three years.', reason: 'also fact-ish' },
+      ], additions: {} } };
+    },
+    isLive: () => true,
+    createRows: async (items) => { created.push(...items); return items; },
+    updateRow: async (id, patch) => { updates.push([id, patch]); return { id, ...patch }; },
+    deleteRow: async (id) => { deleted.push(id); },
+  });
+  assert.equal(created.length, 1, 'the destination row is written once');
+  assert.equal(created[0].kind, 'evidence');
+  assert.equal(created[0].category, 'achievement');
+  assert.equal(created[0].data.moved_from, 'brief');
+  assert.deepEqual(deleted, ['a'], 'the original goes only after its destination copy exists');
+  assert.equal(outcome.counts.moved, 1);
+  assert.ok(outcome.warnings.some((w) => /already covers it/.test(w)), 'a move into a section that already says it must be reported as skipped');
+  assert.ok(!deleted.includes('b'), 'a skipped move keeps the original intact');
+});
+
+await check('a dissection never files the applicant\'s own story under one school, but does file that school\'s guide', async () => {
+  const created = [];
+  const material = { id: 'm1', title: 'My past essays', type: 'essay', content: 'x'.repeat(900), notes: '', analysis: null };
+  const outcome = await dissectMaterialKnowledge({
+    material,
+    existingRows: [],
+    universities: [{ id: 'stan', name: 'Stanford' }],
+    essays: [],
+    runAI: async ({ prompt }) => {
+      assert.match(prompt, /NEVER name a school for the applicant's own story/);
+      return { result: { sections: [
+        { section: 'Personal statement on the thruster', school: 'Stanford', essay_kind: 'personal_statement', platform: '', audience: 'own', items: [
+          { category: 'mindset', text: 'Syun keeps returning to machines he can measure: he rebuilt the chamber twice because the first answer felt borrowed.' },
+        ] },
+        { section: 'Stanford — the why-us essay', school: 'Stanford', essay_kind: 'why_us', platform: '', audience: 'guide', items: [
+          { category: 'writing_principle', text: 'Name one lab, one professor, one reason — this school rewards specificity over admiration.' },
+        ] },
+      ] } };
+    },
+    isLive: () => true,
+    createRows: async (items) => { created.push(...items); return items; },
+    deleteRow: async () => {},
+  });
+  assert.equal(outcome.rows, 2);
+  const own = created.find((row) => row.data.audience === 'own');
+  const guide = created.find((row) => row.data.audience === 'guide');
+  assert.ok(!own.target_university_id, 'the applicant\'s own life was bound to one university — it must belong to every application');
+  assert.equal(guide.target_university_id, 'stan', 'a school\'s own guide keeps its school binding');
+  assert.equal(own.kind, 'brief', 'a mindset item from an own section still lands in the portrait');
 });
 
 await check('unsaved profile edits are kept in this browser until they are saved', () => {
