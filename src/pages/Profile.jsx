@@ -17,6 +17,7 @@ import {
 import ActivitiesEditor from '@/components/profile/ActivitiesEditor';
 import ActivityAiPanel from '@/components/profile/ActivityAiPanel';
 import HonorsEditor from '@/components/profile/HonorsEditor';
+import HonorsAiPanel from '@/components/profile/HonorsAiPanel';
 import IbSubjectPicker from '@/components/profile/IbSubjectPicker';
 import {
   NATIONALITIES, SCHOOL_SYSTEMS, GPA_SCALES, CITIZENSHIP_STATUSES,
@@ -169,6 +170,8 @@ export default function Profile() {
   const [missingColumns, setMissingColumns] = useState([]);
   /** Which activity entry the applicant asked the AI to sharpen. */
   const [sharpenIndex, setSharpenIndex] = useState(null);
+  /** Which honor entry the applicant asked the AI to sharpen (same split as activities). */
+  const [honorSharpenIndex, setHonorSharpenIndex] = useState(null);
   /** Materials/knowledge are fetched the first time the activities AI is used. */
   const activityContextRef = useRef(null);
   /** Edits from an earlier visit that were never saved, offered back once. */
@@ -628,8 +631,26 @@ export default function Profile() {
         </div>
       </SectionCard>
 
-      <SectionCard icon={Award} title="Honors" description="Common App format — up to 5">
-        <HonorsEditor value={formData.honors || []} onChange={(val) => set('honors', val)} />
+      <SectionCard
+        icon={Award}
+        title="Honors"
+        description="Common App format — up to 5, name within 100 characters. Sharpen rewrites the name from your facts; it never invents one."
+      >
+        <HonorsAiPanel
+          honors={formData.honors || []}
+          onChange={(val) => set('honors', val)}
+          getContext={getActivityContext}
+          sharpenIndex={honorSharpenIndex}
+          onSharpenDone={() => setHonorSharpenIndex(null)}
+        />
+        <div className="mt-4">
+          <HonorsEditor
+            value={formData.honors || []}
+            onChange={(val) => set('honors', val)}
+            onSharpen={(index) => setHonorSharpenIndex(index)}
+            sharpeningIndex={honorSharpenIndex}
+          />
+        </div>
       </SectionCard>
 
       <SectionCard icon={DollarSign} title="Financial Aid" description="This changes the strategy at every school you research">

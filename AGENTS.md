@@ -39,6 +39,18 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - `src/lib/textDiff.js`: lossless word diff used to show what an AI edit changed.
 - `src/lib/activityPrompts.js`: Common App activity limits, suggestion prompts,
   and the validation that cuts a suggestion to the real form.
+- `src/lib/honorPrompts.js`: the Common App honors limits and the sharpen-only
+  prompt for the honors list — it rewrites a honor NAME from the entry, its private
+  note, the profile, and the materials, never a grade level or a recognition level,
+  and returns the original when the name already works. Honors has no "suggest
+  entries" feature on purpose; do not add one without the applicant asking.
+- `src/lib/applicantQA.js`: the Q&A layer (`ApplicantQuestionsPanel` on the AI
+  Knowledge Base page). Atlas asks only what the file cannot answer; the answer is
+  filed as a manual item (works in Demo mode), a second pass reads between the
+  lines into portrait items and personal points. Filed Q&A rows carry
+  `data.from_qa` and every prompt marks them REFERENCE — never binding — unless
+  the applicant set `data.include` (the "must include" switch), which prompts must
+  honour. The exchange list lives in `persist.js`, not Postgres.
 - `src/lib/persist.js`: browser-local cache, pre-edit snapshots, and the
   per-essay progress history (deliberately not in Postgres — no schema change).
 - `src/lib/textClip.js`: the ONLY way text is shortened for a prompt or a preview.
@@ -58,7 +70,8 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - `src/lib/knowledgeService.js` / `src/lib/knowledgeAutoRefresh.js`: the
   knowledge-base jobs as background tasks (one at a time; `knowledge_busy` when
   not), and the automatic pass that keeps the base current. The automatic pass
-  REFRESHES (item by item: keep / revise / remove, removals capped) and files
+  REFRESHES (item by item: keep / revise / re-file / remove, removals capped — a true fact filed as
+  "personality" moves to Personal points instead of being deleted) and files
   materials into sections; it may rebuild only when nothing is built, never in
   Demo mode, and never in front of the applicant's own AI work. Dissected
   section rows (`data.dissected`) follow their material: replaced when it
