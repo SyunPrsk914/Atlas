@@ -19,11 +19,13 @@ import {
   LENGTH_CRAFT_RULES, assessLength, buildLengthContractText, lengthContract,
 } from './essayLength';
 import {
-  AMBITION_RULES, ESSAY_REVIEW_DIMENSIONS, SCORE_ANCHORS, craftBrief, schoolVoiceFor,
+  AMBITION_RULES, ESSAY_REVIEW_DIMENSIONS, SCORE_ANCHORS, craftBrief, isNarrativeEssay, schoolVoiceFor,
 } from './essayCraft';
 import { buildFitBrief } from './schoolFit';
 import { interpretRoot } from './essayRoot';
 import { extractFlaggedPhrases } from './essayEditCheck';
+import { PRESERVATION_FLOOR } from './textDiff';
+import { clipToBoundary } from './textClip';
 
 /**
  * Sampling temperature per action.
@@ -40,11 +42,22 @@ export const AI_TEMPERATURES = {
   review: 0.15,
 };
 
-export const DEEP_THINKING_PROTOCOL = `DEEP THINKING — HIGHEST QUALITY PASS (do not skip):
-1. THINK FIRST, WRITE SECOND. Before drafting, think carefully through: (a) the required root — what it literally says, what it forbids, and whether it is a STYLE directive ("Be natural", "looks like an actual note") vs a CONTENT directive (what to write about) vs a CHOICE directive ("pick one of these") — you must honour all three kinds, but style is verified by voice not by matching words; (b) the profile + materials + applicant knowledge base — which 2-3 concrete facts actually deepen the root (names, numbers, quotes, dates), and which must be left out; (c) the craft shape for this essay type and this prompt — one story, forward in time, no side quests; (d) the length contract — how you will reach the target band by deepening scenes, not by padding.
-2. Use natural-language instruction exactly as written. The applicant writes in plain English ("Make sure it looks like an actual note", "Be natural, not essay-like") — these are not keywords to echo, they are voice constraints to embody. A natural note is specific, slightly uneven, plain-worded, with a human rhythm; it never announces its own lesson and never sounds like an AI outline.
-3. Verify before you return: re-read your draft as a hostile reader and as a tired reader; fix what either would flag; check that every feasible edit instruction was carried out and report conflicts honestly; check that the length contract is met; check that no banned construction appears.
-4. Quality bar: this is the version the applicant will submit. Aim at 10/10 on every dimension at once. Trade decoration for evidence, not the other way around.`;
+/**
+ * The reasoning pass every writing call must do first.
+ *
+ * "Deep analysis" does not mean re-reading the words on the page and naming
+ * their structure or their emotion; it means working with the material the way
+ * a counsellor who has read all of it would — knowing which rule belongs to
+ * which kind of writing, which fact belongs to which event, and where a link is
+ * real. This block is that procedure, and it is deliberately stated as steps the
+ * model can be held to rather than as an exhortation to try hard.
+ */
+export const DEEP_THINKING_PROTOCOL = `DEEP THINKING — THE PASS THAT DECIDES THE QUALITY (do every step before you write, and skip none):
+1. READ THE JOB, NOT THE HABIT. Say what THIS prompt literally asks and what THIS kind of essay is for, then take its shape from the craft brief above. The shape of a personal statement — one story, forward in time, no side quests — is NOT the shape of a 40-word box, a why-us essay, an activities list, an additional-information explanation, or a UCAS academic statement. Imposing one essay type's structure on another is how a distinctive applicant ends up sounding generic; if this question wants an argument, a plan, a list, or a piece of plain information, give it exactly that shape.
+2. READ THE APPLICANT'S DIRECTION AS WRITTEN. The root and the edit instructions are plain English, not a keyword list and not a topic to repeat. "Be natural", "make it read like an actual note", "less polished" are VOICE constraints: change diction, sentence length, rhythm, and how much you explain. "Pick the strongest of these" is a CHOICE. "Cut the last paragraph", "keep the sentence about the bakery" are CONTENT. Honour all three kinds. An applicant's instruction is never declined: it is either carried out, or it genuinely collides with the root or the length contract — in which case you do as much of it as the collision allows and name the collision.
+3. THINK IN LINKS, NOT IN LISTS. The applicant's knowledge base is a web: a fact, the event it came from, the quality it shows, the guide that says how to use it. Follow every item back to the section of the material it was filed from and use the source's own words where they beat yours. Then check each link you are about to write: NEVER assert that an achievement came from an event, a club, a person, or a class unless the applicant's own text says so — two items filed next to each other is filing, not causation. A number does not become a motive. Do not merge two true things into one false sentence to make the paragraph feel like it means something.
+4. EVERY DETAIL EARNS ITS PLACE. Before a detail goes in, know what it proves about the writer and where the page shows it. Decoration, hedging, restating the prompt, announcing a lesson, and flattering adjectives are all subtractive: replace each with a scene, a name, a number, an object, or a line somebody actually said.
+5. VERIFY BEFORE YOU RETURN. Re-read what you wrote once as a hostile reader and once as a tired reader with forty files in a pile, and fix what either would flag. Then check, in order: the shape is this essay kind's own and not a borrowed one; the length contract is met by going deeper, never by padding; every applicant instruction is carried out or its collision is named; no banned construction survived; nothing in the draft is a fact the applicant did not give you.`;
 
 /**
  * What the platform's sharing rules mean for THIS essay.
@@ -103,7 +116,13 @@ const HUMAN_VOICE_RULES = `VOICE RULES — defaults subordinate to the applicant
 function applicantSection(applicantText) {
   const text = String(applicantText || '').trim();
   if (!text) return '';
-  return `APPLICANT KNOWLEDGE BASE (AI-built and applicant-edited. Keep the writing consistent with who this applicant is. Do not add facts beyond it and the materials):\n${text}\n\n`;
+  return `APPLICANT KNOWLEDGE BASE — A WEB, NOT A LIST (AI-built and applicant-edited).
+Each item carries the section of the applicant's own material it was read out of, and a pattern or a tip says which kind of writing it governs. Use an item where its own scope says it belongs and leave it out where it does not: a rule for a personal statement is not a rule for a 40-word box, and a Stanford guide is not a rule for anybody else.
+Two items filed near each other are two facts, not a cause. Never write that an achievement came from an event, a club, a course, or a person unless an item below says that link is what happened; if the source keeps them separate, keep them separate on the page.
+Keep the writing consistent with who this applicant is and add no facts beyond these and the materials.
+${text}
+
+`;
 }
 
 export function rootBrief(essay) {
@@ -219,16 +238,17 @@ export function editInstructionsBrief(editInstructions, { mode = 'edit' } = {}) 
   const items = splitEditInstructions(editInstructions);
   if (!items.length) return '';
   const numbered = items.map((item, index) => `${index + 1}. ${item}`).join('\n');
-  return `APPLICANT'S EDIT INSTRUCTIONS (binding — every numbered sentence must be carried out — these are natural-language voice/style AND content instructions, not keywords):
+  return `APPLICANT'S EDIT INSTRUCTIONS (binding — every numbered sentence must be carried out; these are natural-language voice/style AND content instructions, not keywords):
 ${numbered}
 
-HOW TO READ THESE: the applicant writes plain English like "Be more natural", "Make sure it looks like an actual note, not an essay", "Remove the AI-sounding parts". Do not repeat the words literally — embody the meaning: plain diction, uneven sentences, concrete objects, no generic lesson, rhythm of a real person writing.
+HOW TO READ THESE: the applicant writes plain English like "Be more natural", "Make sure it looks like an actual note, not an essay", "Remove the AI-sounding parts". Do not repeat the words literally — embody the meaning: plain diction, uneven sentences, concrete objects, no generic lesson, the rhythm of a real person writing.
 
 PRIORITY ORDER, highest first: (1) the required root above, (2) these instructions, (3) the length contract, (4) ${mode === 'edit' ? 'the review findings and optional ideas below' : 'the craft rules and the general guidance'}. Where an instruction and ${mode === 'edit' ? 'a review finding' : 'a craft rule'} pull in different directions, the instruction wins and you say so in your report. Where an instruction and the root conflict, keep the root, do NOT carry out that instruction, and report the conflict under "instructions_not_followed" — never resolve it by guessing.
-- Carry out each instruction literally and completely: "Be natural" means the essay must read with natural rhythm and plain words; "looks like an actual note" means concrete, brief, personal, not an outline; an instruction to cut a sentence means the sentence is gone; an instruction to keep a phrase means the phrase survives word for word.
-- Think deeply about what each instruction wants — style instructions require you to change cadence, diction, and sentence shape, not just swap a synonym.
-- Do not "interpret" an instruction into something easier. If one cannot be carried out without inventing a fact, do not invent it: report it under "instructions_not_followed" with the fact you would need.
-- For every instruction return one entry under "instructions_followed" ({"instruction", "how"}: which words changed and how the voice/content shifted), or under "instructions_not_followed" ({"instruction", "why"}). Atlas checks the draft against each instruction and shows the applicant the ones you missed.`;
+- There is no third reason to leave an instruction undone. Declining is not an option available to you: Atlas treats "I could not do this" as a failed edit and sends it back. A style instruction can always be done (it costs you a rewrite of rhythm and diction, not a fact); a content instruction can always be done as far as the text allows, and if the full version needs something the applicant has not written down, do the part that needs nothing and name the exact fact in "gaps_for_applicant".
+- Carry out each instruction literally and completely: "Be natural" means the essay reads with natural rhythm and plain words; "looks like an actual note" means concrete, brief, personal, not an outline; an instruction to cut a sentence means the sentence is gone; an instruction to keep a phrase means the phrase survives word for word.
+- Think about what each instruction is really asking for. Style instructions require a change of cadence, diction, and sentence shape — never a synonym swap dressed up as an edit.
+- Do not "interpret" an instruction into something easier, and never invent a fact to satisfy one: an invented detail is worse than an undone instruction.
+- For every instruction return one entry under "instructions_followed" ({"instruction", "how"}: which words changed and how the voice or content shifted), or under "instructions_not_followed" ({"instruction", "why"}) with the root conflict that stopped you. Atlas checks the draft against each instruction and shows the applicant the ones you missed.`;
 }
 
 /**
@@ -267,6 +287,40 @@ export function lengthBrief(essay, allEssays) {
   }
   const unit = contract.unit;
   return `LENGTH: the limit is ${contract.limit.toLocaleString()} ${formatLimit(unit)}. The current draft is ${contract.count.toLocaleString()} ${formatLimit(unit)}. Aim for ${contract.targetLow.toLocaleString()}–${contract.targetHigh.toLocaleString()} ${formatLimit(unit)}. Respect the ceiling.`;
+}
+
+/**
+ * The rest of the file, in the brief. A reader does not grade an essay alone: they
+ * have just read the personal statement and the other supplements, so a story told
+ * twice is a story wasted and a phrase reused is a tell. Atlas has the whole file in
+ * hand, which is the one place where cross-essay relationships can be reasoned about
+ * honestly — and the only thing it may do with them is keep this essay distinct,
+ * never score another page's absence.
+ *
+ * @param {object} essay the draft being written or edited
+ * @param {object[]} [allEssays] every essay in the application
+ * @returns {string} a prompt block, or '' when this is the only essay
+ */
+export function siblingEssaysBrief(essay, allEssays) {
+  const others = (allEssays || []).filter((row) => row && String(row.id) !== String(essay?.id)
+    && String(row.content || '').trim());
+  if (!others.length) return '';
+  const shown = others.slice(0, 8);
+  const lines = shown.map((row) => {
+    const title = clipToBoundary(String(row.title || row.type || 'Untitled essay').replace(/\s+/g, ' ').trim(), 70, { marker: '…' });
+    const school = row.university_name ? `, ${row.university_name}` : '';
+    const opening = clipToBoundary(String(row.content).replace(/\s+/g, ' ').trim(), 170, { marker: '…' });
+    return `· “${title}” (${row.type || 'essay'}${school}) begins: ${opening}`;
+  });
+  const hidden = others.length - shown.length;
+  return `THE REST OF THIS APPLICATION — ${others.length} other essay${others.length === 1 ? '' : 's'} in the file${hidden ? ` (${hidden} not shown)` : ''}
+${lines.join('\n')}
+
+The reader of THIS page has read those too. So:
+- One story belongs to one essay. The narrative essay carries the arc; a supplement carries the argument, the fit, or the plain answer. If a scene genuinely has to recur, it does a different job here and is told in different words.
+- Never reuse a phrase, an image, or a closing line from another essay in this file, and never re-explain a fact the reader already has.
+- What another essay already proved needs no proof here: spend these words on what only this question can ask, and let the two pages strengthen each other by covering different ground.
+- An activity, award, or value named in the activities list is not evidence by itself — say what this page adds that the list cannot.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +372,8 @@ CRITICAL RULES FOR USING MATERIALS:
 - PLATFORM DISTINCTION: Some samples are US (Common App 650w, UC PIQ 350w) and some are UK (UCAS 4000 chars across 3 Qs). When writing for ${platform === 'ucas' ? 'UCAS (UK)' : 'US platforms (Common App, UC, Coalition, Direct)'}, prioritize samples from the SAME system for structural guidance. You may learn voice/tone from any sample, but NEVER apply UK UCAS structure (3 questions sharing 4000 chars, 80% academic) to a US essay, and NEVER apply US Common App structure to a UCAS answer. This is obvious and you must distinguish.
 - THE DEEP ANALYSIS IS THE ABSORBED READING: when a material carries a deep analysis, its concrete items — facts, what it suggests about the applicant, guidance, craft moves — are the distilled understanding of that source. Use the section appropriate to its lens: facts/evidence for applicant-owned sources, intellectual signals for academic work, guidance for references, and craft moves for samples. Do not treat every analysis as a writing score.
 - SPECIFICS OVER PARAPHRASE: prefer the names, numbers, dates, places, and exact wording carried in the profile, the materials, and their deep analyses over a vague summary of the documents. Every concrete detail in the draft must trace back to one of those sources or the university research. If the root needs a detail none of them holds, name the gap in "gaps_for_applicant" instead of inventing one.
+- LINKS MUST BE TRUE: these sources arrive as separate items — an achievement, an event, a number, a quality, a rule. You may join them into a sentence only where a source says the connection is real. Never invent a cause ("the internship is why I built the rig"), never borrow a context from a neighbouring document to explain this one, and never let a school named in passing become the reason something happened. Two true things kept apart beat one false link.
+- ONE DOCUMENT, ONE SUBJECT: what a document is about is not what it mentions. A guide that names Stanford in an example is not a Stanford guide; a draft that thanks a coach is not about coaching. Read the whole thing before you decide which part of the applicant's story it is, and apply it only there.
 
 ${buildFitBrief(knowledgeText, { kind: 'draft', essay }) || `UNIVERSITY RESEARCH: none cached for this school. Write from the applicant's own material only — do not invent anything about this university's programmes, buildings, clubs or traditions, and do not assert what it "values". Nothing in the essay may rest on a fact about the school that Atlas does not have.`}
 
@@ -329,7 +385,7 @@ THE ESSAY TO WRITE:
 
 ${rootBrief(essay)}
 
-${(() => { const block = editInstructionsBrief(editInstructions, { mode: 'draft' }); return block ? `${block}\n\n` : ''; })()}${rootCorrection ? `${rootCorrection}\n\n` : ''}${buildLengthContractText(essay, allEssays)}
+${(() => { const block = editInstructionsBrief(editInstructions, { mode: 'draft' }); return block ? `${block}\n\n` : ''; })()}${rootCorrection ? `${rootCorrection}\n\n` : ''}${buildLengthContractText(essay, allEssays)}${(() => { const block = siblingEssaysBrief(essay, allEssays); return block ? `\n\n${block}\n` : ''; })()}
 
 ${LENGTH_CRAFT_RULES}
 
@@ -373,11 +429,44 @@ export const GENERATE_SCHEMA = {
 // Review — one essay, seven dimensions, on a fixed scale
 // ---------------------------------------------------------------------------
 
+/** The arc-vs-shape test, decided by what this prompt actually asked for. */
+function essayIsNarrative(essay) {
+  return isNarrativeEssay({
+    type: essay?.type, prompt: String(essay?.prompt || ''),
+    limit: Number(essay?.word_limit) || 0, unit: limitUnitFor(essay),
+  });
+}
+
 /** The dimension list as the model is asked for it, in panel order. */
-function dimensionInstructions() {
+function dimensionInstructions(essay) {
+  // `structure` is the one dimension whose standard belongs to the kind of
+  // writing. An arc is the right shape for a personal statement and the wrong
+  // test for a 40-word answer, a why-us argument, or a plain explanation of a
+  // transcript gap — and a supplemental essay scored against a personal
+  // statement's shape is simply scored wrong.
+  const narrative = essayIsNarrative(essay);
+  const structureQuestion = narrative
+    ? 'Does it move? One story, forward in time, every paragraph earning the next?'
+    : 'Does the piece have the shape THIS prompt asks for: an argued two-way match for a why-us, one compressed detail for a very short box, a plain factual explanation for an additional-information question, the academic through-line for a UCAS answer? Judge the structure against this prompt and this length, never against a personal statement’s arc, and name in one sentence the shape this question wanted.';
   return ESSAY_REVIEW_DIMENSIONS
-    .map((d, i) => `${i + 1}. ${d.key} — ${d.question}`)
+    .map((d, i) => `${i + 1}. ${d.key} — ${d.key === 'structure' ? structureQuestion : d.question}`)
     .join('\n');
+}
+
+/**
+ * The coherence rule, matched to the shape this prompt asked for.
+ *
+ * A missing through-line is a real flaw in a narrative essay and a phantom one in
+ * a list-like or factual answer, where the applicant deliberately gave the reader
+ * information instead of a story. Asking an explanation of a bad semester for an
+ * "arc" is how a review ends up docking a good answer for not being a different
+ * kind of answer.
+ */
+function coherenceRule(essay) {
+  if (essayIsNarrative(essay)) {
+    return `If the draft has no coherent through-line of its own — no single story or argument that the sentences keep serving — that IS a flaw visible on the page, and the applicant's stated root tells you what the through-line was meant to be. If no root was supplied, judge the through-line from the text and say the direction is underspecified rather than penalizing the essay for not guessing it.`;
+  }
+  return `Do not require a story arc here: this is not a narrative question. Judge its coherence by whether every sentence serves the answer the prompt asked for — a list answered as a list, an explanation kept factual and plain, a short box that lands one detail and stops. The absence of a scene, a turn, or a "journey" is not a flaw in an answer that never promised one; name what this shape needs, and only what is genuinely weak on the page.`;
 }
 
 function scaleInstructions() {
@@ -427,6 +516,10 @@ export function buildReviewPrompt({
       previousReview.weaknesses?.length ? `- weaknesses reported: ${previousReview.weaknesses.join(' | ')}` : '',
       previousReview.priority_improvements?.length ? `- priority fixes asked for: ${previousReview.priority_improvements.join(' | ')}` : '',
       `Judge the draft in front of you now. Where a reported weakness is genuinely fixed in the text, raise that dimension and quote the fix. Where it is not fixed, hold the score and say it is still open. Do not move a score you cannot justify from the text: an unexplained rise is noise, and noise is useless to the applicant.`,
+      // An applicant who cut a weak line has fixed the weakness; a reviewer who
+      // mourns the cut line turns editing into a penalty. The reader of a real
+      // file never sees the earlier draft, and neither does this score.
+      `A weakness the applicant removed by cutting the offending sentence counts as FIXED: raise that dimension and say the sentence is gone. Never deduct for content that is no longer in the essay because an earlier draft had it, never call a deletion a loss, and never write a weakness that only makes sense next to a version the admissions reader will never see.`,
     ].filter(Boolean).join('\n')
     : '';
 
@@ -460,16 +553,18 @@ ${buildFitBrief(knowledgeText, { kind: 'review', essay }) || 'UNIVERSITY RESEARC
 
 ${profileText ? `APPLICANT PROFILE — BACKGROUND YOU MAY NOT SCORE AGAINST. Use it only to spot an invented or inflated claim, and to form optional ideas. Never to list what the essay "should" have mentioned:\n${profileText}\n` : ''}${materialsText ? `SUPPORTING MATERIALS — BACKGROUND YOU MAY NOT SCORE AGAINST (use each source according to its analysis lens: applicant-owned evidence is not all essay prose; academic work informs intellectual habits; guidance is not biography; samples are craft only. Distinguish US vs UK samples: do not apply UK UCAS conventions to US essays or vice versa. Where a source carries a deep analysis, its concrete items — facts, personal signals, guidance, craft moves — are the absorbed reading of that source: use them to judge whether a claim on the page is verifiable and to form optional ideas, never as content the essay owed the reader):\n${materialsText}\n` : ''}${applicantSection(applicantText)}${previousScores ? `${previousScores}\n` : ''}${reviewNotes ? `EARLIER FINDINGS SAVED WITH THIS ESSAY (re-check whether this draft fixed them):\n${reviewNotes}\n` : ''}
 Score these dimensions 1-10 and answer each one's question:
-${dimensionInstructions()}
+${dimensionInstructions(essay)}
 
 For EVERY dimension, also say in one sentence exactly what would raise it to a 10, quoting the text where you can. "Make it better" is not an answer; "replace \\"we worked hard together\\" in paragraph 3 with what the two of you actually did on the night the rig failed" is.
 
 Be concrete everywhere: quote the exact phrases you are objecting to. "Feels AI-generated" is not a finding; "\\"In the end, this experience taught me that…\\" appears in the third paragraph" is.
 
 ${ADMISSIONS_OFFICER_RULE}
+- This is the only version the reader sees. There is no earlier draft in the file: never deduct a point, never write a weakness, and never raise a dimension because something the applicant has since cut is no longer in the essay. A deletion is only ever a problem through what the text in front of you now lacks — and that has to be visible on this page, not in your memory of a previous review.
 
-If the draft has no coherent through-line of its own — no single story or argument that the sentences keep serving — that IS a flaw visible on the page, and the applicant's stated root tells you what the through-line was meant to be. If no root was supplied, judge the through-line from the text and say the direction is underspecified rather than penalizing the essay for not guessing it.
+${coherenceRule(essay)}
 Judge length from the MEASURED LENGTH above, not from your own count.
+Judge a causal claim the text itself does not earn (“because of that summer I could finally do long division”) on the Risk dimension: quote the sentence in "weaknesses" and score Risk for it, because an essay may state a link but these sentences have to show it.
 
 Return JSON only.`;
 }
@@ -569,13 +664,13 @@ export const ADMISSIONS_OFFICER_RULE = `JUDGE ONLY WHAT IS ON THE PAGE — THE A
 - Score every dimension from the text alone: what these sentences actually do on the page, not what the applicant could have said.
 - Where something from the context would genuinely strengthen a specific line, put it in "optional_additions" — an idea the applicant may take or leave, phrased as a suggestion ("consider …"), anchored to the exact place in the draft where it would go, and never counted against any score.
 - What you MAY hold against the essay: vagueness, abstraction, claims the text does not support, a sentence that could belong to any applicant, structural drift, AI tells, a tone that does not suit this reader, an over-length or under-length draft, and anything in the essay that contradicts itself or overclaims. All of that is visible on the page.
-- If a claim in the essay looks invented or inflated next to what Atlas knows, that is a risk finding — say which sentence and why it reads as unverifiable. Do not name the private source; describe what a reader would doubt.`;
+- If a claim in the essay looks invented or inflated next to what Atlas knows, that is the one exception above: put the sentence in "weaknesses" and lower Risk for it, saying why it reads as unverifiable to a reader. Do not name the private source that made you doubt it — describe the doubt, not the file behind it.`;
 
 const PRESERVATION_RULES = `THE PRIME DIRECTIVE — CONSERVE THE APPLICANT'S DRAFT:
 - You are an editor, not an author. The story, the scenes, their order, the timeline, the people in it, and what the essay means must all survive your edit unchanged.
-- Unless the applicant explicitly requests a broader change, keep at least 80% of the original words recognisably intact. The applicant reads this draft as theirs; a rewrite is a rejection of their work and is not what was asked for.
-- Change wording, rhythm, precision, and the specific problems the review named. Change a point only where leaving it would cost the essay a score.
-- Unless explicitly requested by the applicant, never do any of these: replace the required root with another activity; restructure or reorder the narrative; delete a scene, a person, or a piece of evidence; add a new scene, achievement, name, or number; change what the ending means; switch person or tense; rewrite a paragraph that is already working; shorten the essay to make your job easier.
+- The contract is that ${Math.round(PRESERVATION_FLOOR * 100)}% of the applicant's own words survive recognisably intact. Atlas does not take your word for it: it diffs your answer against the draft and measures the real number, and an edit below the contract is sent back and then discarded. The one thing that lifts the contract is the applicant explicitly asking for a rewrite or a restructure — then rewrite, and name the instruction that authorised it in "changes".
+- The applicant asked for the minimum change that makes the essay better, and "better" is not a matter of taste: an edit that changes most of the draft and lifts nothing measurable is a net loss — their writing gone, their score the same. Change wording, rhythm, precision, and the specific problems the review named. Change a point only where leaving it would cost the essay a score.
+- Never delete anything the applicant did not ask you to delete. Unless explicitly requested: never replace the required root with another activity; restructure or reorder the narrative; delete a scene, a person, or a piece of evidence; add a new scene, achievement, name, or number; change what the ending means; switch person or tense; rewrite a paragraph that is already working; shorten the essay to make your job easier.
 - Where you believe a substantial change is essential to reach 10/10, make it — and name it in "changes" with the reason. An unnamed substantial change is a failure of this task.
 - Every change you report is shown to the applicant highlighted inside the text, so report the real wording you replaced, not a paraphrase of it.`;
 
@@ -604,14 +699,17 @@ Use one ONLY where it fits the sentence you are already editing and does not cha
  *   essay: object, university?: object|null, platform?: string, reviewResult?: object|null, knowledgeText?: string,
  *   allEssays?: object[], materialsText?: string, profileText?: string, applicantText?: string,
  *   focusPhrases?: string[]|null, focusInstructions?: string[]|null, editInstructions?: string,
+ *   redoNote?: string,
  * }} args
  *   focusPhrases — flagged phrases still in the draft, which makes this a follow-up edit;
  *   focusInstructions — edit instructions the first pass missed, also a follow-up;
- *   editInstructions — the applicant's own change list: binding, below the root and above the review.
+ *   editInstructions — the applicant's own change list: binding, below the root and above the review;
+ *   redoNote — why Atlas rejected the previous answer, sent with a second attempt.
  */
 export function buildPolishPrompt({
   essay, university, platform, reviewResult, knowledgeText, allEssays,
   materialsText = '', profileText = '', applicantText = '', focusPhrases = null, focusInstructions = null, editInstructions = '',
+  redoNote = '',
 }) {
   const unit = limitUnitFor(essay);
   const limit = Number(essay.word_limit) || (unit === 'characters' ? 4000 : 650);
@@ -637,11 +735,20 @@ export function buildPolishPrompt({
   const focusBlock = followUpReasons.length
     ? `THIS IS A FOLLOW-UP EDIT. The draft below was already revised once, and ${followUpReasons.join(', and ')}. Do not restructure the essay, do not re-polish sentences that are already working, and do not change the story: resolve exactly these, plus anything they touch. Everything else must survive word for word.`
     : '';
+  // Atlas measured the last answer and found it wanting. A model that reads its
+  // own work as fine is not corrected by a hint, so the failed measurement is
+  // stated here, in numbers, above the rest of the brief.
+  const redoBlock = String(redoNote || '').trim()
+    ? `ATLAS REJECTED YOUR LAST ANSWER AND SENT IT BACK BEFORE THE APPLICANT SAW IT.
+${String(redoNote).trim()}
+
+Do the missing part now, on the draft below (which is the applicant's own text, not your previous answer). Keep the root, the prompt, the length contract, and everything your last attempt left untouched.\n`
+    : '';
 
   return `You are a master essay editor working line by line on a draft that belongs to the applicant. Your job is to lift it to the level of an essay read aloud in committee — more human, more specific, better aligned to its prompt — without inventing anything and without taking the essay over.
-
+${redoBlock ? `\n${redoBlock}` : ''}
 ${PRESERVATION_RULES}
-
+${(() => { const block = siblingEssaysBrief(essay, allEssays); return block ? `\n${block}\n` : ''; })()}
 THE ROLE OF THIS PARTICULAR ESSAY:
 ${essayRoleBrief(essay)}
 
@@ -677,6 +784,7 @@ ${essay?.content || ''}
 ESSAY>>>
 
 Rules for the revision itself:
+- Every change must name what it fixes. Before you make one, know which finding, which instruction, or which craft rule it answers and which dimension it raises; write that in "reason". A change that cannot name one is a change you should not make — the applicant's own sentence stays.
 - Do not invent experiences, names, numbers, or outcomes. If a change needs a fact you do not have, leave the sentence out rather than guessing, and list the fact you needed in "gaps_for_applicant".
 - Preserve and strengthen the applicant's required root. Never replace it with a more convenient activity or a sample writer's story.
 - Use concrete evidence from the appropriate applicant-owned sources — names, numbers, roles, outcomes, or intellectual questions — when the draft needs it. Do not turn an academic assessment, guidance source, or cautious interpretation into a claimed personal experience.

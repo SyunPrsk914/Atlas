@@ -210,11 +210,36 @@ export const ABOUT_AND_POINTS_SCHEMA = {
           category: { type: 'string' },
           text: { type: 'string' },
           source_label: { type: 'string' },
+          evidence: { type: 'string' },
         },
       },
     },
   },
 };
+
+/**
+ * A pattern or a tip is only as good as the kind of writing it was drawn from.
+ *
+ * `applies_to` is how the model says so: the essay kinds the rule governs, or
+ * nothing at all when the rule really is universal. It is stored as
+ * `data.shape_keys` and read back by `shapeAllows`, so a craft rule taken from a
+ * personal statement never arrives in the prompt for a 40-word roommate answer —
+ * the mixing the applicant has to correct by hand otherwise.
+ */
+export const APPLIES_TO_ANY = 'any';
+
+/** The model's `applies_to` list, kept to essay kinds Atlas actually recognises. */
+export function appliesToKeys(value) {
+  const list = Array.isArray(value) ? value : (value ? [value] : []);
+  const out = [];
+  for (const raw of list) {
+    const key = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_').replace(/[^a-z_]/g, '');
+    if (!key || key === APPLIES_TO_ANY || key === 'all' || key === 'universal') continue;
+    if (!ESSAY_KINDS.includes(key) || out.includes(key)) continue;
+    out.push(key);
+  }
+  return out.slice(0, 6);
+}
 
 export const PATTERNS_SCHEMA = {
   type: 'object',
@@ -227,6 +252,7 @@ export const PATTERNS_SCHEMA = {
           category: { type: 'string' },
           platform: { type: 'string' },
           text: { type: 'string' },
+          applies_to: { type: 'array', items: { type: 'string' } },
         },
       },
     },
@@ -240,7 +266,11 @@ export const GUIDANCE_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { category: { type: 'string' }, text: { type: 'string' } },
+        properties: {
+          category: { type: 'string' },
+          text: { type: 'string' },
+          applies_to: { type: 'array', items: { type: 'string' } },
+        },
       },
     },
   },
@@ -350,8 +380,9 @@ RULES FOR A NON-SHALLOW READ
 - Read across documents, not just within one paragraph. Look for repeated choices, what the applicant notices, what they spend time on, how they respond when a plan fails, the kinds of questions they ask, how they work with people, and the tension between what they say and what they do.
 - ABOUT YOU is not a collection of one-line compliments. Each item is a dense, specific paragraph of 3-5 sentences (60-140 words): the interpretation first, then the evidence in the applicant's own terms, then why that pattern matters for an application. A one-line item is a failed item; so is an item that only summarises a document.
 - Cover every category the sources can support — "personality" (how they come across), "actions" (what they repeatedly do), "mindset" (how they think, learn, handle uncertainty, and treat others), "goals" (what they are moving towards). Do not return one item for the whole set when ${cap.about.min}+ are supported: aim for at least ${Math.max(2, Math.ceil(cap.about.min / 4))} in each category the evidence reaches — but merge rather than pad.
-- PERSONAL POINTS are separate and concrete: achievements with numbers, roles, places, dates, outcomes, responsibilities, and values shown in actions. Each point is self-contained: carry the names, numbers, dates, places, roles, and outcomes exactly as the source states them, so a drafter can use the point without ever seeing the source — a point that says only "worked on a project" is a failed point. End a point with what it shows about the person when that is not obvious. Do not repeat an About item as a fact. Each point needs a source_label naming the material or profile section it came from. Aim for ${cap.points.min}+ points; every material listed below should contribute at least one, or you must say in a point that it holds nothing usable. A point from academic work records the question, the choice, or the standard — never a measurement.
-- A past essay can provide both concrete events and a voice pattern, but a claim in an AI draft is not confirmed unless the profile or own materials support it. Do not use sample essays, tips, guides, or college references as evidence about the applicant.
+- PERSONAL POINTS are separate and concrete: achievements with numbers, roles, places, dates, outcomes, responsibilities, and values shown in actions. Each point is self-contained: carry the names, numbers, dates, places, roles, and outcomes exactly as the source states them, so a drafter can use the point without ever seeing the source — a point that says only "worked on a project" is a failed point. End a point with what it shows about the person when that is not obvious. Do not repeat an About item as a fact. Each point needs a source_label naming the material or profile section it came from, and "evidence" — up to two sentences quoted from that source, which is what the point is a claim about. Aim for ${cap.points.min}+ points; every material listed below should contribute at least one, or you must say in a point that it holds nothing usable. A point from academic work records the question, the choice, or the standard — never a measurement.
+- File an achievement, an event, a number, and a quality as separate points unless one source states the connection between them. Never write "X led to Y", "because of that summer she…", or "his research made him a leader" as a fact: two true items side by side is filing, not causation, and a drafter who inherits a false link puts it in the essay. Where the source is silent about why, say what happened and leave the reason out.
+- A past essay can provide both concrete events and a voice pattern, but a claim in an AI draft is not confirmed unless the profile or own materials support it. Do not use sample essays, tips, guides, or college references as evidence about the applicant, and do not treat a school named inside the applicant's own story as a school-specific fact about them.
 - Do not judge the applicant's chances and do not compare them with other people.
 - Write in complete sentences and finish every one of them. Never stop mid-word, never write "someone who de", never leave a clause hanging: an item that is cut off is worse than no item, because the drafter will quote from it.
 - Return at most ${cap.about.max} ABOUT YOU items and ${cap.points.max} personal points. Density means substance per item, not padding: two 120-word items beat eight one-liners.
@@ -365,7 +396,7 @@ ${ownText || '(none added)'}
 ESSAY DRAFTS (may include AI-written drafts that the applicant edited. Use them only as corroborated evidence of voice or experience.)
 ${essayText || '(none)'}
 
-Return JSON only: {"about": [{"category": "personality|actions|mindset|goals", "text": "3-5 dense sentences"}], "points": [{"category": "achievement|experience|value|fact", "text": "...", "source_label": "..."}]}`;
+Return JSON only: {"about": [{"category": "personality|actions|mindset|goals", "text": "3-5 dense sentences"}], "points": [{"category": "achievement|experience|value|fact", "text": "...", "source_label": "...", "evidence": "up to two sentences quoted from the source"}]}`;
 }
 
 export function buildPatternsPrompt({ sampleText, limits = null }) {
@@ -378,13 +409,17 @@ Be critical of the samples too. A successful essay is not automatically a good o
 
 PLATFORM: each sample's label may say [US] or [UK]. Tag a pattern "US" or "UK" when the rule depends on that system, and "General" otherwise. Never apply UK structure (three fixed questions sharing 4,000 characters) to a US essay, or US structure to a UK answer.
 
+WHICH WRITING THE RULE GOVERNS — this is the field a drafter trusts most. A pattern is drawn from one kind of piece, and a rule taken from a personal statement ("open inside a moment", "one story, forward in time") is not a law for a 40-word answer, a why-us argument, an activities list, or a UCAS academic statement. Name the kinds each rule governs in "applies_to", from: ${ESSAY_KINDS.join(', ')}. Use ["any"] only for a rule that is true of every kind of writing (e.g. "cut the sentence that announces the lesson"). A pattern about structure, opening, or length almost never governs every kind — say which one it does.
+
 Categories: opening, structure, evidence, reflection, voice, length, judgement.
-Each pattern is one dense, usable rule of 2-4 sentences: the technique, the reason it works on a reader, and the failure mode it prevents. Aim for at least ${Math.max(1, cap.patterns.min)} patterns across every sample you were given, and at most ${cap.patterns.max}. A sample that produced no pattern should be named in one pattern about what it does badly.
+Each pattern is one dense, usable rule of 2-4 sentences: the technique, the reason it works on a reader, and the failure mode it prevents. Quote a phrase from the sample where the rule is hard to state without it, and keep the writer's life out of the rule. Aim for at least ${Math.max(1, cap.patterns.min)} patterns across every sample you were given, and at most ${cap.patterns.max}. A sample that produced no pattern should be named in one pattern about what it does badly.
+
+Do not build a causal claim out of adjacent items. If one sample ties an achievement to an event, that is the sample writer's link, not a rule and not the applicant's life; record the technique only.
 
 SAMPLE ESSAYS (craft only)
 ${sampleText}
 
-Return JSON only: {"patterns": [{"category": "...", "platform": "US|UK|General", "text": "a critical, reusable rule"}]}`;
+Return JSON only: {"patterns": [{"category": "...", "platform": "US|UK|General", "text": "a critical, reusable rule", "applies_to": ["personal_statement"]}]}`;
 }
 
 export function buildGuidancePrompt({ guidanceText, limits = null }) {
@@ -395,13 +430,17 @@ Read for the underlying decision rules: what the reader is looking for, what a w
 
 Write every rule so a drafter can obey it without reading the original document: "in a 50-word box, answer in the first sentence and spend the rest on one detail" is a rule; "be concise" is not. Where two sources disagree, record both and say which is more specific.
 
+Name which writing each rule governs in "applies_to", from: ${ESSAY_KINDS.join(', ')}. A requirement from a school's own page, or a chapter of a guide about the personal statement, is not a rule for a supplemental or a UCAS answer; only put ["any"] on a rule that is true for every kind of writing (a deadline, a character count, "never invent"). Keep a rule with the essay kind, platform, or school that wrote it — that scope is what makes it usable.
+
+A rule about the applicant's life is a different thing: if the source states a fact about the applicant, quote its exact words in "evidence" so the item cannot drift into an inference.
+
 Categories: writing_principle, application_rule, requirement, warning, process.
 Aim for at least ${Math.max(1, cap.guidance.min)} items and at most ${cap.guidance.max}. Keep source-specific constraints in the item rather than presenting them as universal, and note which essay type or platform each rule governs.
 
 GUIDANCE AND REFERENCE SOURCES
 ${guidanceText || '(none)'}
 
-Return JSON only: {"guidance": [{"category": "...", "text": "a precise rule with its implication"}]}`;
+Return JSON only: {"guidance": [{"category": "...", "text": "a precise rule with its implication", "applies_to": ["why_us", "personal_statement"]}]}`;
 }
 
 /**
@@ -416,9 +455,9 @@ export const DEEPER_SCHEMA = {
   type: 'object',
   properties: {
     about: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' } } } },
-    points: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' }, source_label: { type: 'string' } } } },
-    patterns: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, platform: { type: 'string' }, text: { type: 'string' } } } },
-    guidance: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' } } } },
+    points: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' }, source_label: { type: 'string' }, evidence: { type: 'string' } } } },
+    patterns: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, platform: { type: 'string' }, text: { type: 'string' }, applies_to: { type: 'array', items: { type: 'string' } } } } },
+    guidance: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, text: { type: 'string' }, applies_to: { type: 'array', items: { type: 'string' } } } } },
   },
 };
 
@@ -433,6 +472,7 @@ THE ONLY JOB: write what is missing.
 - Every item is a dense paragraph of 2-5 sentences and a COMPLETE sentence: never stop mid-word, never leave a clause hanging.
 - ${limits.about.max} new ABOUT items, ${limits.points.max} new personal points, ${limits.patterns.max} new patterns, ${limits.guidance.max} new guidance items at most. Prefer fewer, fuller items to one-line compliments.
 - Sample essays supply craft only, never another person's life. Tips and references supply rules, never biography. Academic work is never scored as a college essay.
+- Carry the same fields the first build used: "source_label" and "evidence" (the source's own words) on a new point, and "applies_to" on a new pattern or guidance item — the essay kinds it governs, or ["any"]. An item filed without a scope is read as universal, so an unfamiliar rule is a risk, not a bonus.
 
 ${PERSON_FOCUS_RULES}
 
@@ -483,6 +523,13 @@ function cleanItems(list, validCategories, fallbackCategory, max, extra = (_item
 
 const capOf = (limits, kind, fallback) => (Number.isFinite(Number(limits?.[kind]?.max)) ? Number(limits[kind].max) : fallback);
 
+/** A source's own words, kept whole enough to quote and short enough to travel. */
+function sourceEvidence(value) {
+  const text = clean(value);
+  if (!text) return '';
+  return clipToBoundary(text, 320, { marker: '…' });
+}
+
 export function normalizeAboutAndPoints(raw, limits = null) {
   return {
     about: cleanItems(raw?.about, ABOUT_CATEGORIES, 'personality', capOf(limits, 'about', KNOWLEDGE_BASE_LIMITS.about)),
@@ -490,6 +537,7 @@ export function normalizeAboutAndPoints(raw, limits = null) {
       // A source label is a label, not an essay: keep it in full rather than
       // cutting it at an arbitrary character count.
       source_label: clean(item?.source_label) || 'Profile or materials',
+      evidence: sourceEvidence(item?.evidence),
     })),
   };
 }
@@ -498,12 +546,14 @@ export function normalizePatterns(raw, limits = null) {
   return cleanItems(raw?.patterns, PATTERN_CATEGORIES, 'judgement', capOf(limits, 'patterns', KNOWLEDGE_BASE_LIMITS.patterns), (item) => {
     const platform = String(item?.platform || '').trim();
     const match = Object.keys(PATTERN_PLATFORMS).find((p) => p.toLowerCase() === platform.toLowerCase());
-    return { platform: match || 'General' };
+    return { platform: match || 'General', shape_keys: appliesToKeys(item?.applies_to) };
   });
 }
 
 export function normalizeGuidance(raw, limits = null) {
-  return cleanItems(raw?.guidance, GUIDANCE_CATEGORIES, 'writing_principle', capOf(limits, 'guidance', KNOWLEDGE_BASE_LIMITS.guidance));
+  return cleanItems(raw?.guidance, GUIDANCE_CATEGORIES, 'writing_principle', capOf(limits, 'guidance', KNOWLEDGE_BASE_LIMITS.guidance), (item) => ({
+    shape_keys: appliesToKeys(item?.applies_to),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -512,26 +562,37 @@ export function normalizeGuidance(raw, limits = null) {
 /** Database rows for a rebuild. Every AI row carries the fingerprint of the inputs it came from. */
 export function knowledgeRowsFor({ about = [], points = [], patterns = [], guidance = [] }, { fingerprint, builtAt, model }) {
   const data = { fingerprint, built_at: builtAt, model: model || null };
+  /**
+   * What a row adds to the shared stamp: the essay kinds a pattern or a tip
+   * governs, and the source wording an evidence item rests on. An item that
+   * declared neither is filed exactly as it was before.
+   */
+  const stamp = (item) => {
+    const extra = {};
+    if (item?.shape_keys?.length) extra.shape_keys = item.shape_keys;
+    if (item?.evidence) extra.evidence = item.evidence;
+    return Object.keys(extra).length ? { ...data, ...extra } : data;
+  };
   return [
     ...about.map((item, i) => ({
       kind: 'brief', category: item.category, text: item.text, origin: 'ai',
       source_label: 'Built from your profile and materials', source_id: '', platform: 'General',
-      sort_order: i, data,
+      sort_order: i, data: stamp(item),
     })),
     ...points.map((item, i) => ({
       kind: 'evidence', category: item.category, text: item.text, origin: 'ai',
       source_label: item.source_label, source_id: '', platform: 'General',
-      sort_order: i, data,
+      sort_order: i, data: stamp(item),
     })),
     ...patterns.map((item, i) => ({
       kind: 'pattern', category: item.category, text: item.text, origin: 'ai',
       source_label: 'From sample essays you chose', source_id: '', platform: item.platform || 'General',
-      sort_order: i, data,
+      sort_order: i, data: stamp(item),
     })),
     ...guidance.map((item, i) => ({
       kind: 'guidance', category: item.category, text: item.text, origin: 'ai',
       source_label: 'From tips, guides, and application references', source_id: '', platform: 'General',
-      sort_order: i, data,
+      sort_order: i, data: stamp(item),
     })),
   ];
 }
@@ -711,11 +772,17 @@ function itemsWithProvenance(list, valid, fallback, maxChars) {
     const text = String(item?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 700);
     if (!text) return null;
     const category = valid && !Object.prototype.hasOwnProperty.call(valid, item?.category) ? fallback : item.category;
+    // The source's own words travel with the item (see the dissection brief):
+    // a drafter can quote what the applicant actually wrote instead of the
+    // summary of it, and the applicant can see what an item was built on.
+    const evidence = clipToBoundary(String(item?.evidence ?? '').replace(/\s+/g, ' ').trim(), 320, { marker: '…' });
     return {
       category,
       text,
+      evidence,
       source_label: String(item?.source_label ?? '').replace(/\s+/g, ' ').trim().slice(0, 160),
       platform: String(item?.platform ?? '').replace(/\s+/g, ' ').trim(),
+      applies_to: Array.isArray(item?.applies_to) ? item.applies_to : [],
     };
   }).filter(Boolean).slice(0, limit);
 }
@@ -741,6 +808,13 @@ function additionRows(result, { saved, ask, countOf, data }) {
       const set = wordSet(item.text);
       if (nearDuplicate(item.text, seenLists[bucket])) continue;
       seenLists[bucket].push(set);
+      const extra = {};
+      // A new pattern or tip may name the kinds it governs; a new point may
+      // carry the source's own words. Both are filed, not dropped, so "Go
+      // deeper" is held to the same standard as a first build.
+      const shapes = appliesToKeys(item?.applies_to);
+      if (shapes.length) extra.shape_keys = shapes;
+      if (item?.evidence) extra.evidence = item.evidence;
       fresh.push({
         kind,
         category: item.category,
@@ -750,7 +824,7 @@ function additionRows(result, { saved, ask, countOf, data }) {
         source_id: '',
         platform: item.platform || 'General',
         sort_order: countOf(kind) + fresh.filter((row) => row.kind === kind).length,
-        data: { ...data },
+        data: { ...data, ...extra },
       });
     }
   };
@@ -1134,7 +1208,11 @@ export const DISSECTION_SCHEMA = {
             type: 'array',
             items: {
               type: 'object',
-              properties: { category: { type: 'string' }, text: { type: 'string' } },
+              properties: {
+                category: { type: 'string' },
+                text: { type: 'string' },
+                evidence: { type: 'string' },
+              },
             },
           },
         },
@@ -1211,6 +1289,9 @@ export function buildDissectionPrompt({ material, text, universities = [], essay
   const essayList = essays.map((e) => `${e.title || 'Untitled'}${e.university_name ? ` (${e.university_name})` : ''}: ${clipToBoundary(String(e.prompt || ''), 140, { marker: '…' }) || '(no prompt)'}`);
   return `You are filing ONE material into the sections an admissions reader would keep apart, so that later drafting reads only the part that is relevant. A successful full application is an activities list plus a personal statement plus several supplements for several schools; a guide has chapters per essay type; the applicant's own notes may address one school. Each of those parts teaches something different and must not be mixed into one pile.
 
+WHAT THIS DOCUMENT IS ACTUALLY ABOUT — DECIDE THIS BEFORE YOU FILE ANYTHING
+A title, one school name, and one passing mention are not subjects. Say what the document as a whole is FOR: whose application, which essay, which task. A guide that mentions Stanford in an example is a guide, not a Stanford document. A draft that mentions "Course 16" is not MIT's own material. A resume, a transcript, or an assessment of the applicant's writing is none of those things at once. Never name or scope a section after a single mention, and never let a rule written for one kind of writing become a universal law: a tip about the personal statement is filed with that kind and nowhere else.
+
 THE MATERIAL
 Title: ${presented.title || '(untitled)'}
 Type: ${presented.type || 'document'} · Lens: ${role}
@@ -1224,8 +1305,9 @@ Schools: ${schools.length ? schools.join('; ') : '(none saved)'}
 Essays: ${essayList.length ? `\n- ${essayList.join('\n- ')}` : '(none saved)'}
 
 WHAT TO RETURN
-Personal experiences, values, goals and biographical facts are shared across ALL applications, including when found in a UCAS or school-specific draft. Extract them as audience "own", school "", platform "", essay_kind "other". The source title is provenance, NEVER a restriction. Only writing guidance or school references may be school/platform-specific. Match school references only to the saved school list; never invent a target. Separate personal evidence from school-specific fit claims.
+Personal experiences, values, goals and biographical facts are shared across ALL applications, including when they are found inside a UCAS or school-specific draft: extract them as audience "own" with school "", platform "", and essay_kind "other", and still give the section its real name — the name is how a later reader knows which part of the applicant's writing a fact came out of. The source title is provenance, NEVER a restriction. Only writing guidance or school references may be school/platform-specific. Match school references only to the saved school list; never invent a target. Separate personal evidence from school-specific fit claims.
 Return [] in "sections" when the material has no part that belongs to a specific school, essay kind, platform, or task — a resume, a transcript, or a single general reflection usually has none, and that is the correct answer.
+A section describes only its own part of the material. Never carry a rule, a fact, or a name across from another chapter, page, or essay into this one, and never summarise the whole document in one section: file what a drafter working on THIS part would obey.
 Otherwise, one entry per distinct section, at most 8:
 - "section": a short name a reader would recognise ("Stanford — roommate essay", "Activities list", "Common App personal statement", "How to write a why-us essay").
 - "school": the university the section is FOR, exactly as written in the material, or "". Fill it ONLY when the material itself targets that school — a supplement written for it, that school's own guide or requirements. NEVER name a school for the applicant's own story, reflection, or past writing: a personal statement or a life experience is the applicant's biography, which every school reads. If such a text mentions a university in passing, the section still gets "school": "" — that mention is content, not a filing address.
@@ -1233,11 +1315,13 @@ Otherwise, one entry per distinct section, at most 8:
 - "essay_kind": one of ${ESSAY_KINDS.join(', ')}.
 - "platform": common_app, uc, ucas, coalition, direct, or "".
 - "audience": "sample" (someone else's successful work), "own" (the applicant's own writing or notes), "guide" (advice or reference about how to write), or "school" (information about a school, its readers, atmosphere, or student body).
-- "items": 1-4 items, each {"category", "text"}, 2-3 finished sentences, and specific:
+- "items": 1-4 items, each {"category", "text", "evidence"}, 2-3 finished sentences, and specific:
+    · "evidence" is what this item rests on: up to two sentences quoted from THIS section of the material (the applicant's own wording where it is stronger than yours). Nothing may go in "text" that "evidence" does not support, and an item with no evidence behind it is left out rather than inferred.
     · for "sample": the craft that made THIS section work for THIS reader — the move, why it lands, what a weak imitation gets wrong. Never copy the writer's life. Categories: opening, structure, evidence, reflection, voice, length, judgement.
     · for "own": what this part shows about the applicant as a person, usable for this essay kind — their mindset, how they act, what drives them — with the concrete evidence. Categories: personality, actions, mindset, goals, achievement, experience, value, fact.
-    · for "guide": the decision rule a drafter can obey without reading the guide. Categories: writing_principle, application_rule, requirement, warning, process.
+    · for "guide": the decision rule a drafter can obey without reading the guide, and the kind of writing it governs. Categories: writing_principle, application_rule, requirement, warning, process.
     · for "school": what this school's readers reward, the atmosphere, the student body, programmes named — for judging fit. Categories: requirement, judgement.
+- EARN EVERY LINK. An achievement, an event, a number, and a quality are four separate items unless this material says one produced another. Never write "the internship led to the thesis", "because of that season she built…", or "his research made him a leader" on your own reading: where the source keeps two facts apart, file them apart, and let the drafter make the connection only if the applicant's own words support it. The same holds for a person's motive — do not supply a reason the text never states.
 Keep it compact: a section with nothing specific to teach is left out. Return JSON only: {"sections": [...]}`;
 }
 
@@ -1344,13 +1428,20 @@ export async function dissectMaterialKnowledge({
     const targets = dissectionTargets(section, { universities, essays });
     // The applicant's own life is one independent value: an insight drawn from
     // their writing or story belongs to EVERY application, so a school named in
-    // the prose or the source scope must never turn it into school-specific
-    // knowledge. A guide or
-    // a school-reference section keeps its binding — those are for one school.
+    // the prose or in the source's own scope must never turn it into
+    // school-specific knowledge. A guide or a school-reference section keeps its
+    // binding — those are written for one school.
     const ownLife = audience === 'own';
     const ownUniversity = ownLife ? null : targets.target_university_id;
     const ownEssay = ownLife ? null : targets.target_essay_id;
-    const label = ownLife ? 'Personal evidence — all applications' : clean(section?.section) || (targets.school ? `${targets.school} — ${targets.kind}` : targets.kind);
+    // The section keeps the name the material gave it. Sharing an item across
+    // every application is a fact about its SCOPE, which the row carries by
+    // having no targets at all; overwriting its name would throw away which part
+    // of the applicant's writing the item came out of, and that context is what
+    // lets a drafter use it correctly instead of pasting it anywhere.
+    const label = clean(section?.section)
+      || (ownLife ? 'Personal evidence — all applications'
+        : (targets.school ? `${targets.school} — ${targets.kind}` : targets.kind));
     // An "own" section may teach the portrait OR the evidence list, so its items
     // are validated against BOTH category tables — otherwise a personality or
     // mindset item is silently downgraded to a fact here and never reaches the
@@ -1376,7 +1467,18 @@ export async function dissectMaterialKnowledge({
         target_essay_id: ownLife ? null : (presented.target_essay_id || ownEssay),
         target_platform: ownLife ? null : (presented.target_platform || targets.target_platform),
         target_task: ownLife ? null : (presented.target_task || targets.target_task),
-        data: { ...stamp, previous_sections: [], section: label, school: ownLife ? '' : targets.school, shape_keys: ownLife ? [] : targets.shape_keys, audience },
+        data: {
+          ...stamp,
+          previous_sections: [],
+          section: label,
+          school: ownLife ? '' : targets.school,
+          shape_keys: ownLife ? [] : targets.shape_keys,
+          audience,
+          // `shared` is what the row's emptiness means, stated once so a later
+          // pass can tell an intentionally shared item from a forgotten target.
+          ...(ownLife ? { shared: true } : {}),
+          ...(item.evidence ? { evidence: item.evidence } : {}),
+        },
       });
     }
   }
@@ -1517,7 +1619,27 @@ function shapeAllows(row, { shapeKeys = [], universityId = '', essayId = '' } = 
   if (!shapes.length) return true;
   if (essayId && String(row?.target_essay_id || '') === String(essayId)) return true;
   if (universityId && String(row?.target_university_id || '') === String(universityId)) return true;
+  // A job that is not writing one particular essay (the full application review,
+  // an activity list) has no shape of its own to match. A section lifted out of
+  // one material still belongs to that material's part, so it stays out; a craft
+  // rule or a guidance item from the general build is the reader's whole-file
+  // knowledge and is kept.
+  if (!shapeKeys.length) return !row?.data?.dissected;
   return shapeKeys.some((key) => shapes.includes(key));
+}
+
+/**
+ * How a saved item's own wording from the source reads in a prompt.
+ *
+ * The quotation is what turns a summary back into the applicant's voice: a
+ * drafter can lift the phrase, and the applicant can see exactly what the item
+ * was built on. It is clipped at a sentence boundary like everything else, and an
+ * item with no evidence costs the prompt nothing.
+ */
+function evidenceNote(row) {
+  const evidence = clean(row?.data?.evidence);
+  if (!evidence) return '';
+  return ` → in the applicant's own words: ${evidence.startsWith('“') || evidence.startsWith('"') ? evidence : `“${evidence}”`}`;
 }
 
 /**
@@ -1539,9 +1661,11 @@ export function applicantKnowledgeForPrompt(rows, {
   const current = essay || (essayId ? (essays || []).find((item) => String(item?.id) === String(essayId)) : null);
   const shapeKeys = current ? essayKindsFor(current) : task === 'activity' ? ['activities_list', 'activity'] : [];
   const scope = { universityId, essayId, shapeKeys };
-  // Legacy AI personal rows may carry faulty source-derived targets. Share them
-  // at retrieval time too; manual scopes remain an explicit user choice.
-  const sharedRows = rows.map((row) => row.origin === 'ai' && ['brief', 'evidence'].includes(row.kind)
+  // The applicant's own life is one shared value, so an AI portrait or evidence
+  // row belongs to every application — including a legacy row that an older
+  // filing bound to the school named in its source text. A scope the applicant
+  // set by hand on a manual row is an explicit choice and is never overridden.
+  const sharedRows = (rows || []).map((row) => row.origin === 'ai' && ['brief', 'evidence'].includes(row.kind)
     ? { ...row, target_university_id: null, target_essay_id: null, target_platform: null, target_task: null } : row);
   const usable = filterByContextTarget(sharedRows, { universityId, essayId, essayIds, platform, task })
     .filter((r) => String(r.text || '').trim())
@@ -1572,13 +1696,13 @@ export function applicantKnowledgeForPrompt(rows, {
       heading: 'ABOUT THE APPLICANT (AI-built and applicant-edited; consistent with the profile and materials):',
       items: about,
       budget: share(0.3),
-      render: ({ row }) => `- [${ABOUT_CATEGORIES[row.category] || 'About'}]${targetLabel(row, { universities, essays })} ${row.text}${qaNote(row)}`,
+      render: ({ row }) => `- [${ABOUT_CATEGORIES[row.category] || 'About'}]${targetLabel(row, { universities, essays })} ${row.text}${evidenceNote(row)}${qaNote(row)}`,
     },
     {
       heading: 'PERSONAL POINTS (facts the applicant can use. Use these, and never add experiences beyond them):',
       items: points,
       budget: share(0.34),
-      render: ({ row }) => `- [${POINT_CATEGORIES[row.category] || 'Fact'}]${targetLabel(row, { universities, essays })} ${row.text}${row.source_label ? ` (source: ${row.source_label})` : ''}${qaNote(row)}`,
+      render: ({ row }) => `- [${POINT_CATEGORIES[row.category] || 'Fact'}]${targetLabel(row, { universities, essays })} ${row.text}${evidenceNote(row)}${row.source_label ? ` (source: ${row.source_label})` : ''}${qaNote(row)}`,
     },
     {
       heading: 'SUCCESSFUL-APPLICATION PATTERNS (apply the technique to this applicant’s own life; never copy a sample’s life):',
@@ -1624,7 +1748,7 @@ export function applicantKnowledgeForPrompt(rows, {
   const text = lines.join('\n').trim();
   if (!text) return '';
   if (omitted > 0) {
-    return `${text}\n\n[${omitted} further knowledge item${omitted === 1 ? '' : 's'} are saved but did not fit this prompt; they are complete in the AI Knowledge Base page, and nothing above was shortened to make room.]`;
+    return `${text}\n\n[${omitted} further knowledge item${omitted === 1 ? ' is' : 's are'} saved but did not fit this prompt; they are complete in the AI Knowledge Base page, and nothing above was shortened to make room.]`;
   }
   return text;
 }

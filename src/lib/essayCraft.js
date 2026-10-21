@@ -229,6 +229,33 @@ export function detectSupplementShape(args = {}) {
   return detectSupplementShapes(args)[0] || null;
 }
 
+/**
+ * The shapes whose craft is a story with a turn rather than an argument, a list,
+ * or a piece of plain information.
+ *
+ * This distinction is what keeps a personal statement's rubric off a supplemental
+ * essay. "One story, forward in time, ending on a change" is the shape of a
+ * narrative question; a 40-word box, a why-us argument, and an
+ * additional-information explanation each have a different standard of good, and
+ * scoring them by the arc test reads as an arbitrary penalty to the applicant.
+ */
+export const NARRATIVE_SHAPE_KEYS = new Set([
+  'personal_statement', 'challenge', 'identity', 'talent', 'gratitude', 'activity',
+]);
+
+/**
+ * @param {{ type?: string, prompt?: string, limit?: number, unit?: string }} essay
+ * @returns {boolean} true when the arc test (through-line, movement, a turn) is the
+ *   right test for this piece of writing
+ */
+export function isNarrativeEssay({ type = '', prompt = '', limit = 0, unit = 'words' } = {}) {
+  const kind = String(type || '');
+  if (kind === 'personal_statement' || kind === 'activity') return true;
+  if (kind === 'why_this_school' || kind === 'scholarship') return false;
+  return detectSupplementShapes({ prompt, limit: Number(limit) || 0, unit })
+    .some((shape) => NARRATIVE_SHAPE_KEYS.has(shape.key));
+}
+
 // ---------------------------------------------------------------------------
 // Voice by institution type: tone, structure, and the mindset on show
 // ---------------------------------------------------------------------------

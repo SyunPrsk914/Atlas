@@ -18,6 +18,8 @@
 // Pure module: no React, no browser APIs beyond timers.
 
 const tasks = new Map();
+/** id → a promise that resolves when that task settles and never rejects. */
+const settlements = new Map();
 const listeners = new Set();
 let counter = 0;
 
@@ -77,6 +79,7 @@ export function startBackgroundTask({ kind, label, scope = {}, stage = 'running'
     const timer = setTimeout(() => {
       if (tasks.get(id) === current) {
         tasks.delete(id);
+        settlements.delete(id);
         publish({ ...snapshot(current), state: 'removed' });
       }
     }, SETTLED_TTL_MS);
@@ -95,10 +98,48 @@ export function startBackgroundTask({ kind, label, scope = {}, stage = 'running'
       settle('failed', { error: error instanceof Error ? error : new Error(String(error?.message || error || 'Unknown error')) });
       throw error;
     });
+  // Anything waiting on this job (a queued section re-examination, see
+  // dissectionQueue.js) needs a promise that resolves whatever the outcome is and
+  // never rejects, or a failed job would strand the queue behind it.
+  settlements.set(id, promise.then(() => undefined, () => undefined));
   // A task that nobody awaits must not surface as an unhandled rejection: the
   // registry already records the failure and the task reported it itself.
   promise.catch(() => undefined);
   return { id, promise };
+}
+
+/**
+ * Resolves once no running task matches `predicate`.
+ *
+ * A queue that must not start its job while another one holds the same lock uses
+ * this instead of refusing the request: the applicant's click is kept, and the
+ * work begins when the way is clear. The number of waits is bounded — a page that
+ * keeps starting fresh jobs cannot starve the queue forever — and when the budget
+ * runs out the wait ends and the caller decides what to do: the knowledge queue
+ * tries to start again, up to `MAX_QUEUE_ATTEMPTS`, then reports that material as
+ * failed and moves on to the next one.
+ *
+ * @param {(task: object) => boolean} [predicate] defaults to every running task
+ * @param {{ maxWaits?: number }} [options]
+ * @returns {Promise<boolean>} true when the way is clear, false when the budget ran out
+ */
+export async function waitUntilIdle(predicate = () => true, { maxWaits = 25 } = {}) {
+  const matches = () => [...tasks.values()].filter((task) => task.state === 'running' && predicate(snapshot(task)));
+  let waits = 0;
+  for (;;) {
+    const running = matches();
+    if (!running.length) return true;
+    if (waits >= Math.max(1, Number(maxWaits) || 1)) return false;
+    waits += 1;
+    await Promise.all(running.map((task) => settlements.get(task.id) || Promise.resolve()));
+  }
+}
+
+/** The settled result of a task by id, or null when it is unknown or forgotten. */
+export function taskResult(id) {
+  const task = tasks.get(id);
+  if (!task) return null;
+  return { state: task.state, result: task.result, error: task.error };
 }
 
 /**
@@ -168,5 +209,6 @@ export function describeStage(stage) {
 /** Test hook: forget every task. Never used by the app. */
 export function _resetBackgroundTasks() {
   tasks.clear();
+  settlements.clear();
   listeners.clear();
 }

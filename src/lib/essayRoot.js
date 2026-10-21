@@ -91,6 +91,9 @@ function extractAlternatives(root, { selectionLike }) {
 // Style language must NOT be treated as a content constraint to match literally —
 // e.g. "Be natural" or "looks like an actual note" is a voice rule, not a topic.
 const STYLE_SIGNALS = /\b(be natural|sounds? like|looks? like|actual note|human|authentic|conversational|simple words?|plain language|not like ai|don't sound|avoid ai|tone|voice|style)\b/i;
+// …but a style sentence that quotes words is a content rule wearing a style hat:
+// "Keep the last line — it looks like a real note" still has a line that must survive.
+const QUOTES_TEXT = /[“"'`][^“”"'`]{6,}[”"'`]/;
 
 /** Sentences that read as instructions about the essay, not as topics to cover. */
 function extractConstraints(root) {
@@ -106,7 +109,7 @@ function extractConstraints(root) {
     if (!forbidden && !required) continue;
     // Style sentences are voice rules — they intentionally do not need literal word overlap
     // with the draft; verifying them by keyword would misclassify good drafts as ignored.
-    if (STYLE_SIGNALS.test(sentence)) continue;
+    if (STYLE_SIGNALS.test(sentence) && !QUOTES_TEXT.test(sentence)) continue;
     const words = tokens(sentence);
     if (!words.length) continue;
     out.push({ text: sentence, polarity: forbidden ? 'avoid' : 'require', words });
@@ -191,7 +194,7 @@ const MATCH_THRESHOLD = 0.5;
  *   ok: boolean, status: 'no-root'|'respected'|'ignored'|'crammed'|'uncertain',
  *   message: string, correction: string,
  *   matched: string[], missing: string[], violations: string[],
- *   root: object
+ *   voiceOnly: boolean, root: object
  * }}
  */
 export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
@@ -199,7 +202,7 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
     ? interpretRoot(rootOrInterpretation)
     : rootOrInterpretation;
   const plain = (status, ok, message, extra = {}) => ({
-    ok, status, message, correction: '', matched: [], missing: [], violations: [], root, ...extra,
+    ok, status, message, correction: '', matched: [], missing: [], violations: [], voiceOnly: false, root, ...extra,
   });
   if (!root.hasRoot) return plain('no-root', true, '');
   const draftWords = tokens(draft);
@@ -226,6 +229,13 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
   }
 
   const overall = coverageOf(root.words, draftWords);
+  // A root made ONLY of voice directions ("Be natural", "make it read like an actual
+  // note") has no subject for a keyword check to find: tone is not lexical overlap, and
+  // claiming "ignored" here would send a good draft back to be rewritten. A mixed root
+  // keeps its content checks — a style clause must not excuse an essay that dropped the
+  // subject the applicant named.
+  const voiceOnly = !!root.styleDirectives?.length
+    && !root.alternatives.length && !root.constraints.length;
   const statusOf = () => {
     if (root.alternatives.length >= 2) {
       if (root.chooseOne && matched.length >= 2) return 'crammed';
@@ -233,9 +243,7 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
       if (root.includeAll && matched.length < root.alternatives.length) return 'uncertain';
       return 'respected';
     }
-    // Meaning and tone cannot be verified by lexical overlap. Do not claim
-    // success, or trigger a destructive rewrite, on that basis.
-    if (root.styleDirectives?.length) return 'uncertain';
+    if (voiceOnly) return 'uncertain';
     if (overall < 0.15) return 'ignored';
     if (overall < 0.35) return 'uncertain';
     return 'respected';
@@ -258,8 +266,8 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
   return {
     ok: status === 'respected' || status === 'uncertain',
     status,
-    message: root.styleDirectives?.length && status === 'uncertain'
-      ? 'Voice instructions were sent to the AI. Keyword checks cannot verify tone; review the wording yourself.'
+    message: voiceOnly && status === 'uncertain'
+      ? 'The voice direction was sent to the AI. Keyword checks cannot verify tone; read the wording yourself — Atlas will not call this a failure it cannot measure.'
       : messages[status] || '',
     correction: corrections[status] || (violations.length
       ? `The draft also breaks a stated rule: ${violations.join(' | ')}. Fix that without changing the story.`
@@ -267,8 +275,32 @@ export function checkDraftAgainstRoot(rootOrInterpretation, draft) {
     matched,
     missing,
     violations,
+    voiceOnly,
     root,
   };
+}
+
+/**
+ * Did the applicant ask for more than an edit?
+ *
+ * The conservation contract (see PRESERVATION_FLOOR in ./textDiff) is the default: an AI
+ * pass keeps the applicant's wording and changes only what has to change. It yields to
+ * one thing — the applicant asking for a bigger change in their own words. This reads
+ * the root and the edit instructions for that request, so a "rewrite the whole thing"
+ * is obeyed while an unrequested overhaul is not excused by a stray word.
+ */
+const BROAD_CHANGE_REQUEST = new RegExp([
+  '\\b(rewrite|restructure|rework|reimagine|scrap|tear (it |the )?(down|out)|start (over|again|from scratch)|begin again|redo (it|the essay)|throw out|bin (it|this)|full rewrite|complete rewrite|total rewrite|fresh draft|new essay|entirely (new|different)|completely (new|different|rework)|wholesale|from scratch)\\b',
+  '\\b(make|write|build|turn it into)\\b[^.\\n]{0,30}\\b(from the start|a different essay|something else entirely)\\b',
+  '\\bcut (everything|most of it|all but)\\b',
+  '\\b(drop|delete|remove|cut)\\b[^.\\n]{0,24}\\b(everything (except|else)|most of (it|the essay)|the (whole|entire) (middle|second) (paragraph|part))\\b',
+].join('|'), 'i');
+
+/** @param {string} text the root, the edit instructions, or both joined */
+export function requestsBroadRewrite(text) {
+  const value = String(text || '');
+  if (!value.trim()) return false;
+  return BROAD_CHANGE_REQUEST.test(value);
 }
 
 /**

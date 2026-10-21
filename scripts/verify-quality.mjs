@@ -279,7 +279,8 @@ const HARVARD = { name: 'Harvard University' };
     allEssays: [essay], materialsText: 'M', profileText: 'P', applicantText: 'A',
   });
   assert.match(prompt, /THE PRIME DIRECTIVE — CONSERVE THE APPLICANT'S DRAFT/);
-  assert.match(prompt, /at least 80% of the original words/i);
+  assert.match(prompt, /80% of the applicant's own words survive/i);
+  assert.match(prompt, /Atlas does not take your word for it/i, 'the conservation contract has to be stated as measured, not as a request');
   assert.match(prompt, /FINDINGS YOU MUST ACTUALLY FIX/);
   assert.match(prompt, /name the machine and the person who taught you/);
   assert.match(prompt, /give the workshop scene a physical detail/);

@@ -31,7 +31,10 @@ import {
 } from '@/lib/essayPrompts';
 import { assessLength, isBetterLength, lengthSeverity } from '@/lib/essayLength';
 import { checkDraftAgainstRoot, interpretRoot, rootCheckBrief } from '@/lib/essayRoot';
-import { findUnaddressedFindings, unaddressedBrief, checkInstructionsFollowed, instructionsBrief } from '@/lib/essayEditCheck';
+import {
+  findUnaddressedFindings, unaddressedBrief, checkInstructionsFollowed, instructionsBrief,
+  editWorthiness, keepRevisedDraft, chooseEditAnswer,
+} from '@/lib/essayEditCheck';
 import { diffText, diffStats, isAggressiveRewrite } from '@/lib/textDiff';
 import {
   essaysApplicableToUniversity, getUniversityPlatform, PLATFORMS, PLATFORM_REQUIREMENTS,
@@ -1074,7 +1077,7 @@ export default function EssayBuilder() {
           rootRetried ? 're-drafted to follow your required root' : '',
           repaired ? 'length repaired automatically' : '',
           assessment.ok ? 'inside the target band' : 'still outside the target band',
-          instructionCheck.missed ? `${instructionCheck.missed} instruction(s) not carried out` : '',
+          instructionCheck.unmet ? `${instructionCheck.unmet} instruction(s) not carried out` : '',
         ].filter(Boolean).join(' · '),
       });
       ui.setLengthIssue(assessment.ok ? null : assessment);
@@ -1089,8 +1092,8 @@ export default function EssayBuilder() {
           description: `The first answer ignored the direction in the root box, so Atlas sent it back. ${rootNote}`,
           duration: 12000,
         });
-      } else if (instructionCheck.missed) {
-        toast.warning(`Draft written, but ${instructionCheck.missed} of your instruction${instructionCheck.missed === 1 ? ' was' : 's were'} not followed`, {
+      } else if (instructionCheck.unmet) {
+        toast.warning(`Draft written, but ${instructionCheck.unmet} of your instruction${instructionCheck.unmet === 1 ? ' was' : 's were'} not followed`, {
           description: `${instructionNote} They are listed under “fill these in”; “Apply edits” will hold the editor to them.`,
           duration: 12000,
         });
@@ -1206,57 +1209,146 @@ export default function EssayBuilder() {
         ? focusInstructions.join('\n')
         : (essayForAction.edit_instructions || '');
       const instructionList = splitEditInstructions(editInstructions);
-      const outcome = await runAI({
-        prompt: buildPolishPrompt({
-          essay: essayForAction, university: universityForEssay(essayForAction), platform,
-          reviewResult: priorReview, knowledgeText: context.knowledgeText, allEssays: essays,
-          materialsText: context.materialsText, profileText: context.profileText,
-          applicantText: context.applicantText,
-          focusPhrases: focusPhrases?.length ? focusPhrases : null,
-          focusInstructions: focusInstructions?.length ? focusInstructions : null,
-          editInstructions,
-        }),
-        response_json_schema: POLISH_SCHEMA,
-        temperature: AI_TEMPERATURES.polish,
-      }, { fallbackTitle: 'Could not edit this essay' });
+      // One editing attempt, measured the same way every time. The measurement is
+      // the whole point of this function: an applicant asked for the minimum change
+      // that makes the essay better, and a number printed in the UI does not make
+      // an edit minimum — it only reports one that was not. Everything that judges
+      // an answer lives here, so a second attempt is held to exactly the same bar.
+      const attemptEdit = async ({ redoNote = '' } = {}) => {
+        const outcome = await runAI({
+          prompt: buildPolishPrompt({
+            // Always the applicant's own text: an edit that failed is redone from
+            // their draft, never stacked on top of the version that failed.
+            essay: { ...essayForAction, content: before }, university: universityForEssay(essayForAction), platform,
+            reviewResult: priorReview, knowledgeText: context.knowledgeText, allEssays: essays,
+            materialsText: context.materialsText, profileText: context.profileText,
+            applicantText: context.applicantText,
+            focusPhrases: focusPhrases?.length ? focusPhrases : null,
+            focusInstructions: focusInstructions?.length ? focusInstructions : null,
+            editInstructions,
+            redoNote,
+          }),
+          response_json_schema: POLISH_SCHEMA,
+          temperature: AI_TEMPERATURES.polish,
+        }, { fallbackTitle: 'Could not edit this essay' });
+        // A call that never landed is not an empty answer: the provider error was
+        // already reported by the runner, and the applicant must not be told the
+        // model handed back an empty revision when it handed back nothing at all.
+        if (!isLiveOutcome(outcome)) return null;
+        const result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
+        let text = cleanEssayText(extractRevisedEssay(outcome.result));
+        if (!text) return { empty: true };
+        let assessment = assessLength(text, essayForAction, essays);
+        let repaired = false;
+        if (assessment.needsWork || outcome.meta?.truncated) {
+          // An edit that shrinks the essay below its target band is the exact
+          // failure this feature exists to prevent, so it is repaired before it
+          // is ever shown as finished.
+          setStage('repair');
+          const repairStats = diffStats(diffText(before, text).ops);
+          const fix = await repairLength({
+            essay: essayForAction, context, text, assessment, mode: 'edit',
+            originalText: before, preservedRatio: repairStats.preservedRatio,
+          });
+          if (fix) {
+            text = fix.text;
+            assessment = fix.assessment;
+            repaired = true;
+          }
+        }
+        const { ops } = diffText(before, text);
+        const stats = diffStats(ops);
+        // The measure of an edit is whether it fixed what was wrong, so Atlas
+        // checks the review's own quoted phrases against the text it got back
+        // instead of reading the model's change log and hoping.
+        const unaddressed = findUnaddressedFindings(priorReview, text, before);
+        // And the applicant's own instructions, checked the same way: against the
+        // text, with the model's report used only where there is nothing to check.
+        const instructionCheck = checkInstructionsFollowed(instructionList, before, text, result);
+        const claim = String(result.improvement_claim || '').toLowerCase();
+        return {
+          text, result, assessment, repaired, ops, stats, unaddressed, instructionCheck, claim,
+          worth: editWorthiness({
+            stats, essay: essayForAction, editInstructions, instructionCheck, unaddressed, claim, repaired,
+          }),
+        };
+      };
 
-      if (!isLiveOutcome(outcome)) return;
-      const result = outcome.result && typeof outcome.result === 'object' ? outcome.result : {};
-      let text = cleanEssayText(extractRevisedEssay(outcome.result));
-      if (!text) {
+      const firstAttempt = await attemptEdit({});
+      if (firstAttempt?.empty) {
         toast.error('The AI returned an empty revision', { description: 'Your draft was left untouched.' });
         return;
       }
-      let assessment = assessLength(text, essayForAction, essays);
-      let repaired = false;
-      if (assessment.needsWork || outcome.meta?.truncated) {
-        // An edit that shrinks the essay below its target band is the exact
-        // failure this feature exists to prevent, so it is repaired before it
-        // is ever shown as finished.
-        setStage('repair');
-        const firstStats = diffStats(diffText(before, text).ops);
-        const fix = await repairLength({
-          essay: essayForAction, context, text, assessment, mode: 'edit',
-          originalText: before, preservedRatio: firstStats.preservedRatio,
-        });
-        if (fix) {
-          text = fix.text;
-          assessment = fix.assessment;
-          repaired = true;
-        }
+      if (!firstAttempt) return;
+      let chosen = firstAttempt;
+      if (firstAttempt.worth.verdict === 'redo') {
+        // A failed edit is a rejection, not a notice. The reasons come back to the
+        // model before the applicant reads a word of it, because "it changed 60% of
+        // my draft and did not do what I asked" is not a result to be shown off.
+        setStage('polish');
+        const secondAttempt = (await attemptEdit({
+          redoNote: `Atlas measured it against the contract you were given and found: ${firstAttempt.worth.reasons.join('; ')}.`,
+        })) || null;
+        const winner = chooseEditAnswer(firstAttempt, secondAttempt?.empty ? null : secondAttempt);
+        if (winner === 'second') chosen = secondAttempt;
       }
-
-      const { ops } = diffText(before, text);
-      const stats = diffStats(ops);
+      const revisionFor = (attempt, extra = {}) => ({
+        before,
+        after: attempt.text,
+        ops: attempt.ops,
+        stats: attempt.stats,
+        unit: attempt.assessment.unit,
+        changes: Array.isArray(attempt.result.changes) ? attempt.result.changes : [],
+        why: attempt.result.why_it_scores_higher || '',
+        summary: attempt.result.summary_of_edit || '',
+        protectedItems: Array.isArray(attempt.result.protected) ? attempt.result.protected : [],
+        gaps: Array.isArray(attempt.result.gaps_for_applicant) ? attempt.result.gaps_for_applicant : [],
+        preservedEstimate: Number(attempt.result.preserved_estimate) > 0 ? Number(attempt.result.preserved_estimate) : null,
+        at: new Date().toISOString(),
+        repaired: attempt.repaired,
+        followUp,
+        unaddressed: attempt.unaddressed.stillPresent,
+        resolvedPhrases: attempt.unaddressed.fixed,
+        refused: Array.isArray(attempt.result.unresolved_phrases) ? attempt.result.unresolved_phrases : [],
+        unaddressedNote: unaddressedBrief(attempt.unaddressed),
+        instructionCheck: attempt.instructionCheck.hadNothing ? null : attempt.instructionCheck,
+        improvementClaim: attempt.claim || null,
+        redo: attempt !== firstAttempt,
+        ...extra,
+      });
+      if (!chosen.worth.conservationMet) {
+        // Both answers overwrote the draft for a change the applicant never asked
+        // for, so neither is an edit and neither is applied. Their own text stays in
+        // the editor and in the database; what the model returned is filed as a
+        // snapshot, so it can still be read or restored, and nothing is lost either
+        // way. This is the enforcement of a request that used to be a suggestion.
+        const rejected = chosen;
+        setEssaySnapshot(essayForAction.id, { content: rejected.text, label: 'the AI rewrite Atlas did not apply', review: priorReview });
+        ui.setSnapshot(getEssaySnapshot(essayForAction.id));
+        ui.setRevision(revisionFor(rejected, {
+          notApplied: true,
+          notAppliedReasons: rejected.worth.reasons,
+        }));
+        recordProgress(essayForAction.id, {
+          action: 'edit-rejected',
+          unit: rejected.assessment.unit,
+          wordsBefore: assessLength(before, essayForAction, essays).count,
+          wordsAfter: rejected.assessment.count,
+          scoreBefore: priorReview?.overall_score ?? null,
+          scoreAfter: priorReview?.overall_score ?? null,
+          preservedRatio: rejected.stats.preservedRatio,
+          note: `not applied: it replaced ${Math.round((1 - rejected.stats.preservedRatio) * 100)}% of the draft${rejected.worth.reasons.length > 1 ? ' and left the rest of the work undone' : ''}`,
+        });
+        toast.error('The edit was not applied — your version is still in the editor', {
+          description: `It replaced ${Math.round((1 - rejected.stats.preservedRatio) * 100)}% of your own words. Atlas asks for the minimum change that lifts the score; the version it returned is saved under the comparison if you want to read it anyway.`,
+          duration: 16000,
+        });
+        return;
+      }
+      const { text, assessment, repaired, stats, unaddressed, instructionCheck, claim } = chosen;
+      // Below the conservation floor is only ever a rewrite the applicant asked for
+      // by name now; everything else was fixed above or discarded.
       const rewritten = isAggressiveRewrite(stats);
-      // The measure of an edit is whether it fixed what was wrong, so Atlas
-      // checks the review's own quoted phrases against the text it got back
-      // instead of reading the model's change log and hoping.
-      const unaddressed = findUnaddressedFindings(priorReview, text, before);
-      // And the applicant's own instructions, checked the same way: against the
-      // text, with the model's report used only where there is nothing to check.
-      const instructionCheck = checkInstructionsFollowed(instructionList, before, text, result);
-      const claim = String(result.improvement_claim || '').toLowerCase();
 
       setEssaySnapshot(essayForAction.id, { content: before, label: 'your version before this edit', review: priorReview });
       ui.setSnapshot(getEssaySnapshot(essayForAction.id));
@@ -1264,37 +1356,17 @@ export default function EssayBuilder() {
         followUp ? 'follow-up edits applied' : 'edits applied');
       await persist({ content: text, status: 'polishing' }, essayForAction);
 
-      ui.setRevision({
-        before,
-        after: text,
-        ops,
-        stats,
-        unit: assessment.unit,
-        changes: Array.isArray(result.changes) ? result.changes : [],
-        why: result.why_it_scores_higher || '',
-        summary: result.summary_of_edit || '',
-        protectedItems: Array.isArray(result.protected) ? result.protected : [],
-        gaps: Array.isArray(result.gaps_for_applicant) ? result.gaps_for_applicant : [],
-        preservedEstimate: Number(result.preserved_estimate) > 0 ? Number(result.preserved_estimate) : null,
-        at: new Date().toISOString(),
-        repaired,
-        followUp,
-        unaddressed: unaddressed.stillPresent,
-        resolvedPhrases: unaddressed.fixed,
-        refused: Array.isArray(result.unresolved_phrases) ? result.unresolved_phrases : [],
-        unaddressedNote: unaddressedBrief(unaddressed),
-        instructionCheck: instructionCheck.hadNothing ? null : instructionCheck,
-        improvementClaim: claim || null,
-      });
+      ui.setRevision(revisionFor(chosen));
       ui.setLengthIssue(assessment.ok ? null : assessment);
+      const sentBack = chosen !== firstAttempt;
 
       if (rewritten) {
-        toast.warning('The editor rewrote most of your draft', {
-          description: `Only ${Math.round(stats.preservedRatio * 100)}% of your words survived, and Atlas asked it to keep at least 80%. The comparison below highlights everything it touched — restore your version if you prefer it.`,
-          duration: 14000,
+        toast.message('Rewritten, because you asked for it', {
+          description: `You asked for more than a polish, so the editor took it: ${Math.round(stats.preservedRatio * 100)}% of your words survived. Every change is highlighted below and your version is one click away.`,
+          duration: 12000,
         });
-      } else if (instructionCheck.missed) {
-        toast.warning(`Revision applied, but ${instructionCheck.missed} of your instruction${instructionCheck.missed === 1 ? ' was' : 's were'} not carried out`, {
+      } else if (instructionCheck.unmet) {
+        toast.warning(`Revision applied, but ${instructionCheck.unmet} of your instruction${instructionCheck.unmet === 1 ? ' was' : 's were'} not carried out`, {
           description: `${instructionsBrief(instructionCheck)} The comparison lists each one; the follow-up button sends only those back.`,
           duration: 14000,
         });
@@ -1309,7 +1381,7 @@ export default function EssayBuilder() {
           duration: 12000,
         });
       } else {
-        toast.success('Revision applied', {
+        toast.success(`Revision applied${sentBack ? ' after Atlas sent the first answer back' : ''}`, {
           description: `${stats.kept} of your ${stats.oldTotal} ${formatLimit(assessment.unit)} kept, ${stats.added} added, ${stats.removed} cut${unaddressed.fixed.length ? `, and all ${unaddressed.fixed.length} flagged phrase(s) the review objected to are gone` : ''}${instructionCheck.total ? `, and your ${instructionCheck.total} instruction${instructionCheck.total === 1 ? '' : 's'} accounted for` : ''}. Every change is highlighted below.`,
         });
       }
@@ -1352,33 +1424,38 @@ export default function EssayBuilder() {
           focusPhrases?.length ? `follow-up on ${focusPhrases.length} flagged phrase(s)` : '',
           focusInstructions?.length ? `follow-up on ${focusInstructions.length} missed instruction(s)` : '',
           repaired ? 'length repaired automatically' : '',
-          rewritten ? 'rewrote more than expected' : '',
+          rewritten ? 'rewrote as the applicant asked' : '',
           unaddressed.stillPresent.length ? `${unaddressed.stillPresent.length} still unaddressed` : '',
-          instructionCheck.missed ? `${instructionCheck.missed} instruction(s) not carried out` : '',
+          instructionCheck.unmet ? `${instructionCheck.unmet} instruction(s) not carried out` : '',
         ].filter(Boolean).join(' · '),
       });
 
       if (nextReview) {
         const beforeScore = Number(priorReview?.overall_score) || 0;
         const afterScore = Number(nextReview.overall_score) || 0;
-        const delta = beforeScore > 0 ? Math.round((afterScore - beforeScore) * 10) / 10 : null;
+        // An edit is kept when the same rubric now says more, or when it did not
+        // move but the work the edit was asked to do is genuinely finished. A score
+        // that fell, or a score that sat still while the draft was rewritten or the
+        // open findings stayed open, is not an improvement and is not kept.
+        const decision = keepRevisedDraft({
+          beforeScore, afterScore, worth: chosen.worth,
+          measured: autoReview && hasLiveModel() && !!priorReview,
+        });
+        const delta = decision.delta;
         // The score belongs on the comparison, not only in a toast that disappears
         // while it is being read: an edit is judged by whether the same rubric now
         // says more, and the applicant must be able to see the number afterwards.
         ui.setRevision((prev) => (prev ? {
           ...prev, scoreBefore: beforeScore || null, scoreAfter: afterScore || null, scoreDelta: delta,
         } : prev));
-        if (delta !== null && delta < 0) {
-          // A lower score is the one outcome that is never an improvement. With
-          // the automatic restore on, the applicant's own text goes back and the
-          // rejected edit becomes the snapshot, so nothing is lost either way.
+        if (delta !== null && !decision.keep) {
           if (autoRestoreWorse) {
             setStage('restore');
             try {
               await persist({ content: before, status: 'polishing' }, updatedEssay);
-              setEssaySnapshot(essayForAction.id, { content: text, label: 'the AI edit that scored lower', review: nextReview });
+              setEssaySnapshot(essayForAction.id, { content: text, label: `the AI edit Atlas set aside (${decision.reason.split(':')[0]})`, review: nextReview });
               ui.setSnapshot(getEssaySnapshot(essayForAction.id));
-              rememberForUndo(essayForAction, { content: text, status: 'polishing' }, 'the lower-scoring AI edit re-applied');
+              rememberForUndo(essayForAction, { content: text, status: 'polishing' }, 'the set-aside AI edit re-applied');
               if (priorReview) {
                 const measured = withMeasuredLength(priorReview, { ...essayForAction, content: before }, essays);
                 ui.setReviewResult(measured);
@@ -1386,7 +1463,7 @@ export default function EssayBuilder() {
                 await persist({ status: 'in_review', review_notes: JSON.stringify(measured, null, 2) }, { ...updatedEssay, content: before, status: 'polishing' });
               }
               ui.setPreviousScore(null);
-              ui.setRevision((prev) => (prev ? { ...prev, autoRestored: true } : prev));
+              ui.setRevision((prev) => (prev ? { ...prev, autoRestored: true, restoreReason: decision.reason } : prev));
               recordProgress(essayForAction.id, {
                 action: 'restore',
                 unit: assessment.unit,
@@ -1394,22 +1471,23 @@ export default function EssayBuilder() {
                 wordsAfter: assessLength(before, essayForAction, essays).count,
                 scoreBefore: afterScore || null,
                 scoreAfter: beforeScore || null,
-                note: 'edit scored lower, so your version was put back automatically',
+                preservedRatio: stats.preservedRatio,
+                note: `your version was put back: ${decision.reason}`,
               });
-              toast.warning(`The edit scored lower (${beforeScore} → ${afterScore}/10), so your version is back`, {
-                description: 'Not an improvement, so it was not kept. The rejected edit is still there under “Compare with the AI edit that scored lower” if you want to look at it.',
-                duration: 14000,
+              toast.warning(`Your version is back — ${decision.reason}`, {
+                description: 'An edit has to earn its place by scoring better or closing what was open. The version Atlas set aside is kept under the comparison if you want to read it anyway.',
+                duration: 16000,
               });
             } catch (restoreError) {
               console.error(restoreError);
-              toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
+              toast.warning(`This edit was not an improvement: ${decision.reason}`, {
                 description: 'Atlas could not put your version back by itself. Use “Restore it” below.',
                 duration: 14000,
               });
             }
           } else {
-            toast.warning(`The revision scored lower: ${beforeScore} → ${afterScore}/10`, {
-              description: 'This is not an improvement. Restore your version below, or apply edits again — the new review says exactly what is wrong now.',
+            toast.warning(`Not an improvement: ${decision.reason}`, {
+              description: 'Automatic restore is switched off, so the edit stays. Restore your version below, or apply edits again — the new review says exactly what is wrong now.',
               duration: 14000,
             });
           }
@@ -1418,8 +1496,8 @@ export default function EssayBuilder() {
             description: 'Same rubric, same scale, measured on the text now in the editor.',
           });
         } else if (delta === 0) {
-          toast.message(`Re-scored after the edit: still ${afterScore}/10`, {
-            description: 'No measured improvement. Keep the edit only if you can see a change you want; otherwise restore your version.',
+          toast.success(`Re-scored after the edit: still ${afterScore}/10`, {
+            description: 'The number did not move, and everything this edit was asked to answer is answered: that is what a 9 becoming a 9.9 looks like on this scale.',
             duration: 12000,
           });
         } else {
