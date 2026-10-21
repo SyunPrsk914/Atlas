@@ -27,8 +27,10 @@ import {
 // through knowledgeService, so leaving this page never cancels one.
 import {
   readKnowledgeSources, runningKnowledgeTask, startKnowledgeRebuild, startKnowledgeExtend,
-  startKnowledgeRefresh, startKnowledgeDissection,
+  startKnowledgeRefresh, queueSectionReExamination, cancelSectionReExamination,
+  clearSectionReExaminationQueue, sectionQueueState, subscribeSectionQueue,
 } from '@/lib/knowledgeService';
+import { describeSectionQueueStatus, sectionQueueBusyFor } from '@/lib/dissectionQueue';
 import {
   runKnowledgeMaintenance, scheduleKnowledgeAutoRefresh, subscribeKnowledgeAutoRefresh, knowledgeAutoRefreshBlocker,
 } from '@/lib/knowledgeAutoRefresh';
@@ -185,6 +187,13 @@ export default function AiKnowledge() {
   /** The last automatic pass this page heard about: what it did, or why it did nothing. */
   const [autoEvent, setAutoEvent] = useState(null);
   const [checking, setChecking] = useState(false);
+  /**
+   * The section re-examination queue: which materials are waiting, which one is
+   * being read, and how each finished. Asked-for work is never refused because
+   * another job happens to be running — it waits its turn, like the materials
+   * analysis queue, so a whole shelf of sources is one click each and no waiting.
+   */
+  const [queue, setQueue] = useState(() => sectionQueueState());
   const modelReady = hasLiveModel();
 
   /** Reads the applicant's sources (profile, materials, drafts) and the saved items. */
@@ -226,11 +235,49 @@ export default function AiKnowledge() {
   const tasks = useBackgroundTasks(onTaskChange);
   const knowledgeTask = tasks.find((task) => task.kind === 'knowledge' && task.state === 'running') || runningKnowledgeTask();
   const busy = knowledgeTask?.stage || null;
+  const queueWaiting = queue.waiting.length;
+  const queueRunningId = queue.current?.id ? String(queue.current.id) : '';
 
   useEffect(() => subscribeKnowledgeAutoRefresh((event) => {
     setAutoEvent({ ...event, at: Date.now() });
     if (event.type === 'finished') load({ quiet: true });
   }), [load]);
+
+  useEffect(() => subscribeSectionQueue((id, state) => {
+    setQueue(sectionQueueState());
+    if (!state) return;
+    const title = state.title ? `“${state.title}”` : 'a material';
+    if (state.state === 'done') {
+      const filed = (state.result?.done || []).reduce((sum, item) => sum + (item.rows || 0), 0);
+      if (filed) {
+        toast.success(`Re-read ${title}`, {
+          description: `${plural(filed, 'section item')} filed from it${state.result?.removed ? `, ${state.result.removed} stale item${state.result.removed === 1 ? '' : 's'} cleared` : ''}.`,
+        });
+      } else {
+        toast.message(`Nothing new to file in ${title}`, {
+          description: (state.result?.warnings || [])[0] || 'No part of it belongs to a school, an essay kind, a platform, or a task.',
+        });
+      }
+      load({ quiet: true });
+    } else if (state.state === 'failed') {
+      toast.error(`Could not re-read ${title}`, { description: state.message });
+    }
+  }), [load]);
+
+  /** The material rows by id, so a filed section can be traced back to its source. */
+  const materialsById = useMemo(() => new Map((materials || []).map((row) => [String(row.id), row])), [materials]);
+
+  /** Queues one material for a fresh reading of its sections. */
+  const queueReExamine = (sourceKey, { force = true } = {}) => {
+    const material = materialsById.get(String(sourceKey)) || { id: sourceKey, title: 'Material' };
+    queueSectionReExamination([{ id: material.id, title: material.title || 'Material' }], { force });
+  };
+
+  /** Queues a whole list at once; they run one after another, in this order. */
+  const queueMany = (list, { force = true } = {}) => {
+    if (!list.length) return;
+    queueSectionReExamination(list.map((item) => ({ id: item.id, title: item.title || 'Material' })), { force });
+  };
 
   const status = knowledgeStatus(rows, inputs?.fingerprint);
   const byKind = (kind) => rows.filter((r) => r.kind === kind)
@@ -337,23 +384,14 @@ export default function AiKnowledge() {
     });
   };
 
-  /** Files each unfiled material into sections (school, essay kind, platform, task). */
-  const handleDissect = async (materialId = null) => {
-    await runJob((options) => startKnowledgeDissection({ ...options, limit: materialId ? 1 : 4, force: !!materialId, materialIds: materialId ? [materialId] : null }), {
-      title: 'Could not file the materials into sections',
-      onDone: (outcome) => {
-        const filed = (outcome.done || []).reduce((sum, item) => sum + (item.rows || 0), 0);
-        const named = (outcome.done || []).map((item) => item.title).join(', ');
-        if (filed) {
-          toast.success(`${plural(filed, 'section item')} filed`, {
-            description: `${named}. ${outcome.skipped ? `${plural(outcome.skipped, 'material')} still waiting — press again.` : 'Drafts now read only the sections that match their school and essay.'}`,
-          });
-        } else {
-          toast.message('Nothing new to file', { description: outcome.warnings[0] || 'These materials hold no part that belongs to one school or one essay.' });
-        }
-        for (const warning of (outcome.warnings || []).slice(0, 3)) toast.warning('Note', { description: warning });
-      },
-    });
+  /**
+   * Files the materials that have never been filed, or whose text changed, into
+   * sections. Each one is queued as its own job rather than cut off at a batch
+   * size, so a dozen new sources is one click and no re-pressing.
+   */
+  const handleDissect = () => {
+    if (rebuildBlocker) return;
+    queueMany(pendingDissection, { force: false });
   };
 
   /** The automatic pass, run now instead of on its timer. */
@@ -691,9 +729,13 @@ export default function AiKnowledge() {
                 </Button>
               )}
               {pendingDissection.length > 0 && (
-                <Button variant="outline" onClick={() => handleDissect()} disabled={!!rebuildBlocker || !!busy}>
-                  {busy === 'dissect' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Scissors className="w-4 h-4 mr-2" />}
-                  {busy === 'dissect' ? 'Filing…' : `File ${pendingDissection.length} material${pendingDissection.length === 1 ? '' : 's'} into sections`}
+                <Button variant="outline" onClick={handleDissect} disabled={!!rebuildBlocker}>
+                  {queueWaiting > 0 || busy === 'dissect'
+                    ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    : <Scissors className="w-4 h-4 mr-2" />}
+                  {busy === 'dissect' && queueWaiting === 0
+                    ? 'Filing…'
+                    : `File ${plural(pendingDissection.length, 'material')} into sections`}
                 </Button>
               )}
               <Button variant={status.built ? 'ghost' : 'default'} onClick={handleRebuild} disabled={!!rebuildBlocker || !!busy}>
@@ -788,10 +830,40 @@ export default function AiKnowledge() {
                 <FolderTree className="w-4 h-4 text-foreground/40" /> Sections filed from your materials
               </h2>
               <p className="text-xs text-foreground/40">
-                Personal experiences are shared across applications. Only craft guidance and school references are scoped. Re-examine a material below to correct older filing.
+                Personal evidence reaches every application; craft guidance and school references are read only where they belong.
+                A material re-read keeps the items you edited and replaces the ones Atlas wrote.
               </p>
+              {(queueWaiting > 0 || queueRunningId) && (
+                <p className="text-xs text-accent flex items-center gap-1.5 mt-1 flex-wrap">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {queue.current
+                    ? `Re-examining “${queue.current.title || 'a material'}”`
+                    : 'Starting the next one'}
+                  {queueWaiting > 0 ? ` · ${plural(queueWaiting, 'material')} queued after it` : ''}
+                  {queueWaiting > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => clearSectionReExaminationQueue()}
+                      className="underline decoration-dotted text-foreground/45 hover:text-foreground"
+                    >
+                      Cancel the rest
+                    </button>
+                  )}
+                </p>
+              )}
             </div>
-            <Badge variant="outline" className="shrink-0">{plural(filedSections.length, 'material')}</Badge>
+            <div className="flex items-center gap-2 shrink-0">
+              <Badge variant="outline">{plural(filedSections.length, 'material')}</Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!!rebuildBlocker}
+                onClick={() => queueMany(filedSections.map((material) => materialsById.get(String(material.key)) || { id: material.key, title: material.title }))}
+                title="Queue every material with filed sections, one after another"
+              >
+                <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Re-examine all
+              </Button>
+            </div>
             <ChevronDown className={`w-4 h-4 text-foreground/45 transition-transform ${collapsedSections.filed ? '-rotate-90' : ''}`} />
           </button>
           {!collapsedSections.filed && (
@@ -799,10 +871,38 @@ export default function AiKnowledge() {
               {filedSections.map((material) => (
                 <div key={material.key} className="rounded-lg border border-border p-3">
                   <p className="text-xs font-medium text-foreground/75 truncate" title={material.title}>{material.title}</p>
-                  <Button variant="outline" size="sm" className="mt-2" disabled={!!rebuildBlocker || !!busy} onClick={() => handleDissect(material.key)}>
-                    <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Re-examine sections
-                  </Button>
-                  <p className="text-[11px] text-foreground/45 mt-1">Re-read this source with current criteria. Your edited items are kept.</p>
+                  {(() => {
+                    const queueStatus = queue.statuses[String(material.key)] || null;
+                    const inQueue = sectionQueueBusyFor(queueStatus);
+                    return (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="mt-2"
+                          disabled={!!rebuildBlocker || inQueue}
+                          onClick={() => queueReExamine(material.key)}
+                        >
+                          {inQueue ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5 mr-1.5" />}
+                          {queueStatus?.state === 'running' ? 'Re-examining…' : queueStatus?.state === 'queued' ? 'Queued' : 'Re-examine sections'}
+                        </Button>
+                        {queueStatus?.state === 'queued' && (
+                          <button
+                            type="button"
+                            onClick={() => cancelSectionReExamination(String(material.key))}
+                            className="ml-2 text-[11px] underline decoration-dotted text-foreground/45 hover:text-foreground"
+                          >
+                            remove
+                          </button>
+                        )}
+                        {describeSectionQueueStatus(queueStatus) && (
+                          <p className={`text-[11px] mt-1 ${queueStatus.state === 'failed' ? 'text-red-700' : 'text-foreground/45'}`}>
+                            {describeSectionQueueStatus(queueStatus)}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                   <ul className="mt-2 space-y-1">
                     {material.sections.map((section) => (
                       <li key={section.label}>

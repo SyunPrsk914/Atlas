@@ -37,6 +37,11 @@ Vercel + Supabase deployment, environment variables, and key locations.
   written, the reader's voice, the anchored score scale, and the prompts and
   JSON schemas behind generate / review / polish / length-repair.
 - `src/lib/textDiff.js`: lossless word diff used to show what an AI edit changed.
+  `PRESERVATION_FLOOR` (0.8) is the conservation contract: an AI edit that keeps less
+  than 80% of the applicant's own words is a rewrite, and the number in the prompt is
+  read from this constant so the two cannot drift. `isDraftReplaced` is the harsher
+  floor for text that was swapped wholesale. Neither one is a warning to print — they
+  are inputs to the decision in `essayEditCheck.js`.
 - `src/lib/activityPrompts.js`: Common App activity limits, suggestion prompts,
   and the validation that cuts a suggestion to the real form.
 - `src/lib/honorPrompts.js`: the Common App honors limits and the sharpen-only
@@ -62,6 +67,30 @@ Vercel + Supabase deployment, environment variables, and key locations.
   against the instruction it was given (the root) and against the review it was asked
   to answer (the flagged phrases), instead of trusting the model's own summary. A
   check that fails is corrected once, then reported honestly to the applicant.
+  `editWorthiness` is the single adjudicator — conservation, every instruction
+  (`unmet` counts a refusal, not just a miss), and the open findings — and it decides
+  before the applicant reads anything: `verdict: 'redo'` sends the answer back once
+  (`redoNote`) and `chooseEditAnswer` keeps the better of the two; a draft that still
+  overwrites the writing is not applied at all. `keepRevisedDraft` then judges the
+  re-score: a higher score, or a flat score with everything closed, is kept; a flat
+  score with work left open, or a lower score, is not. An applicant who asked for the
+  bigger change themselves (`requestsBroadRewrite`) is the only thing that lifts the
+  floor. `checkDraftAgainstRoot` also returns `voiceOnly`, so a root that constrains
+  style is never "crammed" for containing those same words.
+- `src/lib/essayPrompts.js` also holds `siblingEssaysBrief`: the rest of the applicant's
+  essays (title, school, the opening of each) go into the generate and polish prompts,
+  because one story belongs to one essay and a reused image is a tell. It is deliberately
+  absent from the review prompt — a reader may notice duplication, but Atlas never scores
+  a page for what another page contains.
+- `src/lib/dissectionQueue.js`: the pure FIFO behind "Re-examine sections" — one job
+  in flight, one entry per material, `running-later` when the same material is asked
+  for again (re-read afterwards so a file changed mid-flight is never left stale),
+  and a failure that stops nothing. `src/lib/knowledgeService.js` wires it to the real
+  job (`queueSectionReExamination`, `subscribeSectionQueue`, `sectionQueueState`,
+  `cancelSectionReExamination`); each item waits for the knowledge queue to idle with
+  `waitUntilIdle` from `src/lib/backgroundTasks.js` and retries a `knowledge_busy`
+  throw, so asking for ten re-reads in a row is never refused. Materials analysis
+  (`src/lib/materialJobs.js`) is the sibling pattern.
 - `src/lib/backgroundTasks.js`: the ledger of AI work that must outlive its page.
   Any new long-running AI action belongs in `startBackgroundTask` (kind, label,
   scope) and persists its own result (entity API or `persist.js`) before it
@@ -125,6 +154,11 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - Every status message, error title and setup step names the provider the
   server actually reports (`/api/status`), never a hard-coded one. Use
   `providerLabel()` and the `setupHint()` helper in `src/lib/ai.js`.
+- A review reads only the page, in both directions: it may not be told about a
+  previous draft either, so a line the applicant deleted is `fixed: removed` and a
+  re-score is forbidden from charging for a cut it cannot have seen. Findings are
+  judged against the shape the prompt asks for (`essayIsNarrative`, `coherenceRule`),
+  never against a personal statement's arc by default.
 - A review reads only the page. Never instruct a model to judge an essay against
   information from the applicant's profile, materials, or knowledge base: that
   produces "you have X but you did not include it", which no admissions officer
@@ -170,14 +204,34 @@ Vercel + Supabase deployment, environment variables, and key locations.
 - Essay edit instructions (`essay.edit_instructions`) are binding: ranked below
   the root and above the review in every generate/polish prompt, split with
   `splitEditInstructions`, and checked against the text afterwards with
-  `checkInstructionsFollowed`. An edit's re-score is compared with the score
-  before it: equal is reported as unchanged, lower is restored automatically
-  unless the applicant turned that off. Never present an edit as improved on
-  the model's say-so.
+  `checkInstructionsFollowed`. There is no "declined" outcome for an instruction:
+  the prompt tells the model that a style instruction can always be obeyed in
+  wording and that a content instruction it cannot do literally is done as far as
+  the contract allows with the collision named; the checker counts a reported
+  refusal as `unmet`, and `editWorthiness` sends that answer back. An edit's
+  re-score is compared with the score before it: equal is kept only when the work
+  the edit was asked to do is finished, lower is restored automatically unless the
+  applicant turned that off. Never present an edit as improved on the model's
+  say-so, and never apply an edit that is not worth making — an over-written draft
+  is stored in the local snapshot for reference and the essay keeps the applicant's
+  version.
 - Knowledge-base items are person-first (`PERSON_FOCUS_RULES`): what kind of
   person the applicant is, their mindset, how they act, what they like, what
   drives them — with evidence — never a document summary or a grade.
   `looksLikeMechanicsDump` marks the failures; the refresh re-examines them
   first. Items with `origin: 'manual'` are never revised or removed by any job.
+- Filing is not causation: an achievement, an event, a number, and a quality are
+  four items unless the material says one produced another, and a school, course,
+  or club named in passing never becomes a document's subject. Every item carries
+  the section it was read out of (`data.section`, kept in `source_label`) and a
+  quotation it rests on (`data.evidence`, clipped with `clipToBoundary`), and the
+  prompts that use them say `EARN EVERY LINK` / `ONE DOCUMENT, ONE SUBJECT` /
+  `LINKS MUST BE TRUE` — so a draft can point at the passage behind a link, and a
+  misfiled material is corrected by re-dissection (Refresh deliberately skips
+  `data.dissected` rows). Craft knowledge is scoped by `applies_to` →
+  `data.shape_keys` (`appliesToKeys`, `shapeAllows`): a personal-statement rule is
+  withheld from a 40-word box and from a why-us essay, while a rule with no
+  declared scope still reaches every shape — including the full-application review,
+  which is the one place a `brief`/`evidence` row is not filtered.
 - The app has a Demo mode (no env vars → localStorage backend + labeled demo AI
   output). Keep it working — it is the zero-config onboarding path.

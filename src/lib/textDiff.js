@@ -185,13 +185,35 @@ export function diffStats(ops) {
 }
 
 /**
- * Guard rail for the editor: an AI revision that discards most of the draft is
- * not an edit, it is a rewrite, and Atlas says so instead of quietly saving it.
+ * The conservation contract, in one place.
+ *
+ * The editing prompts state a floor ("keep at least 80% of the applicant's own
+ * words"); this constant is that same floor, so the number the model is asked to
+ * honour and the number Atlas measures the answer against cannot drift apart.
+ * A figure below it is not a polish that came out slightly aggressive: it is the
+ * contract broken, and the caller acts on it (send the edit back, then put the
+ * applicant's text back) rather than only reporting it.
  */
-export const MAX_ACCEPTABLE_REWRITE = 0.45;
+export const PRESERVATION_FLOOR = 0.8;
 
-/** True when less than 55% of the original words survived. */
+/**
+ * Below this the draft was not edited at all — it was replaced. Kept apart from
+ * the contract floor so the UI can tell "you broke the 80% rule" from "you threw
+ * the applicant's essay away", which are different failures.
+ */
+export const REPLACEMENT_FLOOR = 0.55;
+
+/** @deprecated the contract is a floor, not a tolerated share of the rewrite. */
+export const MAX_ACCEPTABLE_REWRITE = 1 - PRESERVATION_FLOOR;
+
+/** True when fewer than 80% of the original words survived — the contract, measured. */
 export function isAggressiveRewrite(stats) {
   if (!stats || !stats.oldTotal) return false;
-  return stats.preservedRatio < 1 - MAX_ACCEPTABLE_REWRITE;
+  return stats.preservedRatio < PRESERVATION_FLOOR;
+}
+
+/** True when fewer than 55% survived: the applicant's draft no longer exists. */
+export function isDraftReplaced(stats) {
+  if (!stats || !stats.oldTotal) return false;
+  return stats.preservedRatio < REPLACEMENT_FLOOR;
 }

@@ -15,7 +15,8 @@ import {
   buildKnowledgeInputs, rebuildApplicantKnowledge, extendApplicantKnowledge, refreshApplicantKnowledge,
   dissectMaterialKnowledge, materialsNeedingDissection, staleDissectionRows, canDissectMaterial,
 } from '@/lib/applicantKnowledge';
-import { findRunningTask, startBackgroundTask } from '@/lib/backgroundTasks';
+import { findRunningTask, startBackgroundTask, waitUntilIdle } from '@/lib/backgroundTasks';
+import { createDissectionQueue } from '@/lib/dissectionQueue';
 
 export const MISSING_KNOWLEDGE_TABLE = /applicant_knowledge|ApplicantKnowledge|relation .* does not exist|Could not find the table/i;
 
@@ -168,4 +169,85 @@ export function startKnowledgeDissection({ owner = null, limit = 3, materialIds 
       return { done, skipped: pending.length - batch.length, removed, warnings };
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Re-examining a material's sections, one after another
+// ---------------------------------------------------------------------------
+//
+// One knowledge job at a time is the rule, so a second request used to be refused
+// with "wait for it to finish" and the applicant had to come back and press again
+// for each material in turn. The request is queued now: it starts the moment the
+// way is clear, every material keeps its own status in the row it was asked from,
+// and one material failing does not stop the ones behind it. Nothing about the job
+// changed — the same background task, the same lock, the same per-material re-read
+// that files sections and keeps the applicant's own edits.
+
+/** How long one queued item keeps asking for the lock before it gives up. */
+const MAX_QUEUE_ATTEMPTS = 3;
+
+/** Waits for the knowledge lock, then runs this material's job and returns its result. */
+async function runQueuedDissection(job) {
+  // A knowledge task started while this item was waiting (a draft being written,
+  // the automatic pass) still goes first; the queue never cuts in front of it.
+  await waitUntilIdle((task) => task.kind === 'knowledge');
+  let lastError = null;
+  for (let attempt = 0; attempt < MAX_QUEUE_ATTEMPTS; attempt += 1) {
+    try {
+      return await startKnowledgeDissection({
+        owner: 'section-queue', limit: 1, force: job.force !== false, materialIds: [job.id],
+      }).promise;
+    } catch (error) {
+      if (error?.code !== 'knowledge_busy') throw error;
+      lastError = error;
+      await waitUntilIdle((task) => task.kind === 'knowledge');
+    }
+  }
+  throw lastError || new Error('The knowledge base is still busy, so this request was not started. Ask again in a moment.');
+}
+
+const sectionQueue = createDissectionQueue({ run: runQueuedDissection });
+
+/**
+ * Asks for materials to be re-read into sections, in the order given.
+ *
+ * @param {object|object[]} materials rows (or `{ id, title }` shapes) to re-examine
+ * @param {{ force?: boolean }} [options] `force: false` files only what still
+ *   needs filing, which is what the "File … into sections" button wants.
+ * @returns {{ requested: number, added: number }}
+ */
+export function queueSectionReExamination(materials, { force = true } = {}) {
+  const list = (Array.isArray(materials) ? materials : [materials])
+    .filter((material) => material && (material.id || material.key));
+  let added = 0;
+  for (const material of list) {
+    const id = String(material.id ?? material.key);
+    const outcome = sectionQueue.enqueue({ id, title: material.title || 'Material', force });
+    if (outcome !== 'merged') added += 1;
+  }
+  return { requested: list.length, added };
+}
+
+/** Everything the queue knows: what waits, what runs, and each material's status. */
+export function sectionQueueState() {
+  return sectionQueue.state();
+}
+
+export function sectionQueueStatusFor(id) {
+  return sectionQueue.statusFor(id);
+}
+
+/** Takes a material out of the queue. A re-read already running finishes on its own. */
+export function cancelSectionReExamination(id) {
+  return sectionQueue.cancel(id);
+}
+
+/** Empties what is waiting, leaving the running job alone. Returns how many went. */
+export function clearSectionReExaminationQueue() {
+  return sectionQueue.clearWaiting();
+}
+
+/** @param {(id: string|null, status: object|null, state: object) => void} listener */
+export function subscribeSectionQueue(listener) {
+  return sectionQueue.subscribe(listener);
 }

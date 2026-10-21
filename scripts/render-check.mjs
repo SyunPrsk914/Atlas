@@ -198,6 +198,38 @@ export const cases = {
       onKeep={() => {}} onRestore={() => {}} restoring={false}
     />
   ),
+  // The answer Atlas refused: the essay in the editor is still the applicant's own,
+  // and the comparison has to say plainly that this version was never applied.
+  'EssayDiffView — edit not applied': () => (
+    <EssayDiffView
+      revision={{
+        before, after, ops, stats: { ...stats, preservedRatio: 0.42, rewriteRatio: 0.58 }, unit: 'words',
+        changes: [], notApplied: true, redo: true,
+        notAppliedReasons: [
+          'it replaced 58% of your wording when you asked for an edit (the contract is 80% kept)',
+          '2 of your 3 instructions were not carried out',
+        ],
+        unaddressed: ['we worked hard together'],
+      }}
+      onKeep={() => {}} onRestore={() => {}} restoring={false} disabled
+    />
+  ),
+  // A flat score that was still kept, and a version put back for a reason the check
+  // itself chose — both lines must read in the comparison, not only in a toast.
+  'EssayDiffView — set aside after the re-score': () => (
+    <EssayDiffView
+      revision={{
+        before, after, ops, stats, unit: 'words', changes: [],
+        scoreBefore: 8, scoreAfter: 8, scoreDelta: 0,
+        autoRestored: true, restoreReason: 'the score did not move and 1 phrase the review objected to is still in the draft',
+        instructionCheck: { total: 2, missed: 0, declined: 1, unmet: 1, verified: 1, hadNothing: false, items: [
+          { instruction: 'Cut the last line', status: 'done', detail: 'the phrase is gone' },
+          { instruction: 'Add the workshop date', status: 'declined', detail: 'not in the draft' },
+        ] },
+      }}
+      onKeep={() => {}} onRestore={() => {}} restoring={false} disabled={false}
+    />
+  ),
   // The edit that left a flagged phrase alone: the page must be able to show the
   // list and the follow-up button, and never assume the change log is complete.
   'EssayDiffView — flagged phrases still present': () => (

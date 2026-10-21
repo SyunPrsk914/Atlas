@@ -28,7 +28,7 @@ function Stat({ label, value, tone = '' }) {
  * @param {object} revision { before, after, ops, stats, changes, notes,
  *   preservedEstimate, why, protectedItems, gaps, at, unit, unaddressed,
  *   resolvedPhrases, refused, unaddressedNote, instructionCheck, scoreBefore,
- *   scoreAfter, scoreDelta, autoRestored }
+ *   scoreAfter, scoreDelta, autoRestored, restoreReason, notApplied, notAppliedReasons }
  */
 export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemaining, restoring = false, disabled = false }) {
   const [showRemoved, setShowRemoved] = useState(true);
@@ -106,12 +106,27 @@ export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemain
           <div className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 p-3">
             <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
             <div className="text-xs text-red-800 leading-relaxed">
-              <p className="font-medium">This is a rewrite, not an edit.</p>
+              <p className="font-medium">
+                {revision.notApplied
+                  ? 'This edit was not applied to your essay.'
+                  : 'This is a rewrite, not an edit.'}
+              </p>
               <p className="mt-0.5">
                 Only {percent(stats.preservedRatio)} of your own words survived. Atlas asks the editor to keep at
-                least 80% of your draft and to change only what has to change, so this answer broke its own rules.
-                Read it before you keep it — or restore your version and try the edit again.
+                least 80% of your draft and to change only what has to change.
+                {revision.notApplied
+                  ? (revision.redo
+                    ? ' The editor was sent back once and its second answer did the same, so your version stayed in the editor. This one is kept here for reference — you have lost nothing.'
+                    : ' Atlas measured this answer and did not apply it, so your version stayed in the editor. It is kept here for reference — you have lost nothing.')
+                  : ' Read it before you keep it — or restore your version and try the edit again.'}
               </p>
+              {Array.isArray(revision.notAppliedReasons) && revision.notAppliedReasons.length > 0 && (
+                <ul className="mt-1.5 space-y-0.5 text-[11px] text-red-700/90">
+                  {revision.notAppliedReasons.map((reason, index) => (
+                    <li key={index}>· {reason}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         )}
@@ -199,11 +214,13 @@ export default function EssayDiffView({ revision, onKeep, onRestore, onFixRemain
             <span className="text-[11px] opacity-80">
               {delta < 0
                 ? (revision.autoRestored
-                  ? 'The revision scored lower, so Atlas put your previous version back. The edit is kept here for reference.'
+                  ? `Atlas put your previous version back: ${revision.restoreReason || 'the revision scored lower'}. The edit is kept here for reference.`
                   : 'The revision scored lower — this is not an improvement. Restore your version, or fix what is still flagged below.')
-                : delta === 0
-                  ? 'No measured improvement: the score did not move. Keep it only if you can see a change you want.'
-                  : 'Measured by Atlas on the text now in the editor, not by the editor itself.'}
+                : revision.autoRestored
+                  ? `Atlas put your previous version back: ${revision.restoreReason}. The edit is kept here for reference.`
+                  : delta === 0
+                    ? 'The score did not move. Atlas kept this edit only because every finding and instruction it was asked to answer is answered in the text.'
+                    : 'Measured by Atlas on the text now in the editor, not by the editor itself.'}
             </span>
           </div>
         )}
